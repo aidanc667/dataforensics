@@ -106,7 +106,7 @@ research-data-harmonizer/
 ## 5. CLI specification
 
 ```
-rdh scan <file> [--config schema.yaml]
+rdh scan <file> [--rules schema.yaml]
     Read-only. Writes data_dictionary.json/.md and validation_report.json/.md.
     Never writes to the input path or any transformed data file.
 
