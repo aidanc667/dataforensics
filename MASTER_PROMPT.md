@@ -188,4 +188,6 @@ Four levels: unit (per guard/rule), integration (full pipeline on one fixture), 
 
 ## 10. Explicit non-goals for v1 (state these in the README, don't build them)
 
-No automatic imputation. No automatic fuzzy-match deduplication (suggest only). No automatic unit conversion. No NLU/codebook semantic parsing beyond ingesting an explicitly-provided data dictionary/JSON sidecar. No ML anomaly detection. No GUI. No claims of statistical/scientific validity — only "no violations of configured rules detected."
+No automatic imputation. No automatic fuzzy-match deduplication (suggest only). No automatic unit conversion. No NLU/codebook semantic parsing beyond ingesting an explicitly-provided data dictionary/JSON sidecar. No ML anomaly detection. No claims of statistical/scientific validity — only "no violations of configured rules detected."
+
+**Amendment (2026-08-24):** "No GUI" was loosened to permit exactly one addition, matching the pattern in the sibling `hospital-price-concentration` project: a thin, read-only Streamlit viewer (`app.py`) that renders JSON the CLI already produces — no write path, no new engine logic, no way to trigger a transformation from the UI. Everything else in this non-goals list stands unchanged. See implementation Task 19.

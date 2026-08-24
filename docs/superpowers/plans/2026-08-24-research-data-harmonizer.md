@@ -2595,6 +2595,191 @@ git commit -m "feat: README, empty-file hardening, failure-mode test coverage"
 
 ---
 
+### Task 19: Read-only Streamlit viewer over JSON reports
+
+Added after the CLI-only scope was reopened (2026-08-24) — Aidan wants a viewer matching the pattern in the sibling `hospital-price-concentration` project. Scope stays narrow: **pure presentation over files `rdh` already produces**, no write path, no calling the CLI from within the app, no new business logic. Do this task after Task 18 — it needs real report JSON shapes to render, which only exist once `scan`/`harmonize` are fully built.
+
+**Files:**
+- Create: `src/rdh/viewer.py` (pure functions — classification/summary logic, framework-independent and directly testable)
+- Create: `app.py` (thin Streamlit script, not unit-tested directly — see Step 6)
+- Modify: `pyproject.toml` (add a `viewer` optional-dependency group so the core CLI install stays lightweight)
+- Test: `tests/unit/test_viewer.py`
+
+**Interfaces:**
+- Consumes: the JSON shapes already defined by `dictionary.build_data_dictionary` (Task 6), `validation.validate` (Task 10), and `manifest.build_manifest` (Task 12) — no new shapes introduced.
+- Produces: `viewer.classify_report(data: dict) -> str` (`"data_dictionary"` / `"validation_report"` / `"manifest"` / `"unknown"`) and `viewer.validation_summary(data: dict) -> dict` (counts by severity). `app.py` imports these and does only file upload + rendering — kept out of the plan's test surface deliberately, verified by a manual smoke test instead (Step 7), the same way Task 17's real-dataset runs are manual rather than scripted.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/unit/test_viewer.py
+from rdh.viewer import classify_report, validation_summary
+
+
+def test_classify_data_dictionary():
+    data = {"age": {"dtype": "Utf8", "non_null_pct": 100.0}}
+    assert classify_report(data) == "data_dictionary"
+
+
+def test_classify_validation_report():
+    data = {"errors": [], "warnings": [], "suggestions": [], "checks_evaluated": 0, "checks_passed": 0}
+    assert classify_report(data) == "validation_report"
+
+
+def test_classify_manifest():
+    data = {"run_id": "abc", "mutations": [], "tool_version": "0.1.0"}
+    assert classify_report(data) == "manifest"
+
+
+def test_classify_unknown_for_unrecognized_shape():
+    assert classify_report({"foo": "bar"}) == "unknown"
+
+
+def test_validation_summary_counts_by_severity():
+    data = {
+        "errors": [{"rule": "minimum"}],
+        "warnings": [{"rule": "maximum"}, {"rule": "maximum"}],
+        "suggestions": [{"rule": "iqr_outlier"}],
+        "checks_evaluated": 10,
+        "checks_passed": 7,
+    }
+    summary = validation_summary(data)
+    assert summary == {
+        "errors": 1,
+        "warnings": 2,
+        "suggestions": 1,
+        "checks_evaluated": 10,
+        "checks_passed": 7,
+    }
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/unit/test_viewer.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'rdh.viewer'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/rdh/viewer.py
+def classify_report(data: dict) -> str:
+    if "mutations" in data and "run_id" in data:
+        return "manifest"
+    if {"errors", "warnings", "suggestions"} <= data.keys():
+        return "validation_report"
+    if data and all(isinstance(v, dict) for v in data.values()):
+        return "data_dictionary"
+    return "unknown"
+
+
+def validation_summary(data: dict) -> dict:
+    return {
+        "errors": len(data.get("errors", [])),
+        "warnings": len(data.get("warnings", [])),
+        "suggestions": len(data.get("suggestions", [])),
+        "checks_evaluated": data.get("checks_evaluated", 0),
+        "checks_passed": data.get("checks_passed", 0),
+    }
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/unit/test_viewer.py -v`
+Expected: PASS (5 tests)
+
+- [ ] **Step 5: Add the `viewer` optional-dependency group**
+
+```toml
+# pyproject.toml — add alongside [project.optional-dependencies]
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+viewer = ["streamlit>=1.30"]
+```
+
+- [ ] **Step 6: Write the thin Streamlit app**
+
+```python
+# app.py
+import json
+
+import streamlit as st
+
+from rdh.viewer import classify_report, validation_summary
+
+st.set_page_config(page_title="rdh report viewer", layout="wide")
+st.title("research-data-harmonizer — report viewer")
+st.caption("Read-only. Upload a JSON file rdh already produced (data dictionary, validation report, or manifest).")
+
+uploaded = st.file_uploader("Upload a .json report", type="json")
+
+if uploaded is None:
+    st.info("No file uploaded yet.")
+else:
+    data = json.load(uploaded)
+    kind = classify_report(data)
+
+    if kind == "validation_report":
+        summary = validation_summary(data)
+        cols = st.columns(5)
+        cols[0].metric("Errors", summary["errors"])
+        cols[1].metric("Warnings", summary["warnings"])
+        cols[2].metric("Suggestions", summary["suggestions"])
+        cols[3].metric("Checks evaluated", summary["checks_evaluated"])
+        cols[4].metric("Checks passed", summary["checks_passed"])
+        for severity in ("errors", "warnings", "suggestions"):
+            with st.expander(f"{severity.capitalize()} ({len(data[severity])})"):
+                st.json(data[severity])
+
+    elif kind == "data_dictionary":
+        st.dataframe(
+            [{"column": col, **fields} for col, fields in data.items()],
+            use_container_width=True,
+        )
+
+    elif kind == "manifest":
+        st.write(
+            {
+                "tool_version": data.get("tool_version"),
+                "run_id": data.get("run_id"),
+                "timestamp_utc": data.get("timestamp_utc"),
+                "input_sha256": data.get("input_sha256"),
+            }
+        )
+        st.subheader(f"Mutations ({len(data.get('mutations', []))})")
+        st.dataframe(data.get("mutations", []), use_container_width=True)
+
+    else:
+        st.error("Unrecognized report shape — this doesn't look like rdh output.")
+```
+
+- [ ] **Step 7: Manual smoke test (not automated — thin rendering layer only)**
+
+```bash
+pip install -e ".[dev,viewer]"
+rdh scan fixtures/sample.csv --rules fixtures/sample_rules.yaml --out-dir /tmp/rdh_demo
+streamlit run app.py
+```
+
+Upload `/tmp/rdh_demo/sample.validation_report.json`, confirm the metrics and expanders render; upload `/tmp/rdh_demo/sample.data_dictionary.json`, confirm the table renders. This mirrors how Task 17's real-dataset runs are verified manually rather than scripted — Streamlit apps aren't meaningfully unit-testable beyond the pure logic already covered in Step 1-4.
+
+- [ ] **Step 8: Update README and CI**
+
+Add a "Viewer (optional)" section to `README.md`'s quickstart pointing at Steps 6-7 above. Add `streamlit>=1.30` install to `.github/workflows/ci.yml`'s install step (`pip install -e ".[dev,viewer]"`) so `test_viewer.py`'s import of `rdh.viewer` — which itself has no Streamlit dependency — keeps working either way; this is only needed if a later task adds Streamlit-specific tests.
+
+- [ ] **Step 9: Run full suite**
+
+Run: `pytest -v`
+Expected: PASS, all tests green including the 5 new viewer tests
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/rdh/viewer.py app.py pyproject.toml README.md tests/unit/test_viewer.py
+git commit -m "feat: read-only Streamlit viewer over existing JSON report output"
+```
+
+---
+
 ## Self-Review
 
 **Spec coverage:** every MASTER_PROMPT.md section maps to a task — §1 safety/immutability → Tasks 2, 12, 13, 14; §1 never-guess-semantics → Tasks 5, 9, 13, 14; §1 three-tier validation → Task 10; §1 determinism/versioning → Tasks 12, 14; §1 privacy defaults → deferred: **gap found and noted below**; §2 blind spots (WONDER suppression, no-merge crosswalk, footer algorithm, license check) → Tasks 4, 15, 17; §3 datasets → Task 17; §5 CLI shape → Tasks 1, 8, 11, 13, 15; §6 rules YAML → Task 9; §7 build order → this plan's task order; §8 testing levels → spread across all tasks + Task 18; §9/§10 definition of done / non-goals → Task 18's README.
@@ -2609,6 +2794,8 @@ git commit -m "feat: README, empty-file hardening, failure-mode test coverage"
 - [ ] Add `_PII_COLUMN_PATTERN = re.compile(r"(name|ssn|mrn|email|phone|dob)", re.IGNORECASE)` to `typing_guards.py` and a `is_pii_like_column(name: str) -> bool` function, mirroring Task 5's style.
 - [ ] In `build_data_dictionary`, when `is_pii_like_column(name)` is true, replace `levels` with the masking string regardless of cardinality, and never include raw value samples anywhere in `result[name]`.
 - [ ] Run tests, commit: `git commit -m "feat: mask PII-pattern columns in reports by default"`.
+
+**Note on Task 19 vs. the original spec:** MASTER_PROMPT.md §10 lists "No GUI" as an explicit v1 non-goal. Task 19 was added afterward at Aidan's request and is a deliberate, logged scope change, not an inconsistency slipping through — it stays inside the spirit of the constraint (no *write* surface, no new engine logic, pure read-only presentation over files the CLI already produces) rather than reopening the GUI question generally. MASTER_PROMPT.md's non-goals section has been amended to reflect this so the two documents don't contradict each other.
 
 **Placeholder scan:** no TBD/TODO markers remain; the one intentionally-manual task (17) is manual because the underlying action (browser downloads) is not scriptable, not because content was deferred — every step in it has concrete URLs, commands, or file templates.
 
