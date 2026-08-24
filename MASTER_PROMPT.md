@@ -35,7 +35,8 @@ Organize your mental model around these five clusters. They are constraints on e
 **Determinism, reproducibility, and versioning**
 - Same input + same rules file + same tool version ⇒ byte-identical output, every time. No unseeded randomness anywhere in profiling or transformation.
 - Transformations must be idempotent: running `harmonize` twice on the same output must not change it further. Write a test for this specifically.
-- Every manifest carries: `tool_version`, `python_version`, resolved dependency versions, `schema_sha256` (hash of the rules file), `input_sha256` (hash of raw input bytes, not filename), `run_id`, `timestamp_utc`, and an optional user-supplied (never inferred) `provenance:` block (source org, dataset, release, download date).
+- Every manifest carries: `tool_version`, `python_version`, resolved versions of the *direct* dependencies listed in `pyproject.toml` (via `importlib.metadata`, not the full transitive tree — that's noise, not signal), `schema_sha256` (hash of the rules file — for a crosswalk run, hash *every* rules/crosswalk file involved and record each separately), `input_sha256` (hash of raw input bytes, not filename), `run_id`, `timestamp_utc`, and an optional user-supplied (never inferred) `provenance:` block (source org, dataset, release, download date).
+- Every per-mutation manifest entry needs a `row_key` field, not a bare row index — for a single-column primary key this is `{"participant_id": "12345"}`; for a composite key (§1, longitudinal data) it's every key column as an object, e.g. `{"participant_id": "12345", "visit_date": "2024-01-01"}`. A bare integer row index is not stable across reruns if row order ever changes, so don't rely on it as the primary reference.
 - Pin dependencies with a lockfile so the recorded dependency versions in the manifest are actually reproducible from a fresh clone.
 
 **Privacy defaults**
@@ -53,6 +54,13 @@ Organize your mental model around these five clusters. They are constraints on e
 - **A working "5-minute quickstart" needs a bundled tiny synthetic fixture** (a 20-row CSV with a couple of planted issues) shipped in the repo, so a reviewer can run `rdh scan` and `rdh harmonize --dry-run` immediately without first downloading real government data.
 - **Soften "audit log as legal record" to "audit trail" in all user-facing docs.** Keep every field the original ask specified (who/what/when/why for every mutation) — just don't imply actual legal admissibility, which the tool can't guarantee and shouldn't claim.
 - **This project has grown well beyond a weekend script.** Build it in the phased order in §7 so it's demoable at every checkpoint — never let it sit half-wired across every module at once.
+- **Don't let "Polars throughout" quietly imply everything streams.** Polars' lazy engine streams the initial dtype/missingness/count pass on large files, which is what the "2GB+ file" requirement actually needs — but several heuristics genuinely require a materialized column (IQR/MAD outlier stats, top-code point-mass detection, string-similarity category clustering) and are not meaningfully streamable. Document exactly which pass streams and which doesn't in the README rather than claiming full streaming everywhere — an inflated scalability claim is a worse look than an honestly-scoped one (this is the project's own principle: don't fake scale you don't have).
+- **Polars alone doesn't give you fuzzy string matching.** The category-merge *suggestion* heuristic (`M`/`Male`/`male` clustering) needs an explicit string-similarity library (e.g. `rapidfuzz`) as a named dependency — call this out in `pyproject.toml` and in the build order, don't leave it implied.
+- **No standard library gives you CSV dialect/encoding sniffing for free here.** Use `charset-normalizer` for encoding detection and write an explicit delimiter-sniffing heuristic (Polars has no built-in equivalent to `csv.Sniffer`) — needed because the three demo sources alone span comma, tab, and semicolon-delimited exports.
+- **Footer-stripping needs a concrete algorithm, not just "detect structural breaks."** Concretely: compare each of the trailing N lines' delimiter count against the header's field count; truncate at the first line where a sustained run (e.g. 2+ consecutive lines) of mismatched field counts begins. Log exactly which lines were stripped and why in the standardization step's output, don't just silently shorten the file.
+- **CDC WONDER's suppression label and threshold are not the same across every WONDER database** (Underlying Cause of Death vs. Natality vs. others each have their own confidentiality rules and may render suppressed cells differently — blank, `Suppressed`, or `Unreliable` for rate-based fields with a small denominator). Check the specific database's documentation for whichever WONDER export you actually pull, rather than hardcoding one label.
+- **License/redistribution check before committing any sample rows to the public repo.** CDC WONDER and Census ACS PUMS are U.S. government works (public domain) — safe to commit small excerpts. OpenNeuro dataset licenses vary per dataset (most are CC0, but not all) — check the specific dataset's license on its OpenNeuro page before committing any of its rows or a derived fixture into the repo; when in doubt, keep it in `data/raw/` (gitignored) and commit only the fixture files you synthesized yourself.
+- **`scan` operates on exactly one file per invocation** — for the three demo datasets, that's three separate `scan` calls, not a batch mode. Don't build multi-file input handling into `scan`; that complexity belongs only to `harmonize`'s crosswalk path (§5).
 
 ## 3. Datasets
 
@@ -68,7 +76,7 @@ Harmonization demo (§1, "never literally join"): CDC WONDER + ACS PUMS mapped o
 
 ```
 research-data-harmonizer/
-├── pyproject.toml              # packaging + console_scripts entry: rdh
+├── pyproject.toml              # packaging + console_scripts entry: rdh; deps: polars, pyyaml, charset-normalizer, rapidfuzz
 ├── README.md                   # pitch, quickstart, differentiation vs. ydata-profiling/great_expectations, explicit non-goals
 ├── WRITEUP.md                  # 1-page before/after per dataset, specific issues caught
 ├── src/rdh/
@@ -102,11 +110,19 @@ rdh scan <file> [--config schema.yaml]
     Read-only. Writes data_dictionary.json/.md and validation_report.json/.md.
     Never writes to the input path or any transformed data file.
 
-rdh harmonize <file...> --rules schema.yaml --output <path> [--execute]
-    Without --execute: dry run. Prints proposed transformations (rule -> rows affected), writes nothing.
+rdh harmonize <file> --rules schema.yaml --output <path> [--execute]
+    Single-file standardization. Without --execute: dry run, writes nothing.
     With --execute: applies rules, writes <path> and <path>.manifest.json atomically.
-    Refuses if --output equals any input path.
-    Accepts 1 file (single-dataset standardization) or 2+ files with a crosswalk rules file (harmonization).
+    Refuses if --output equals the input path.
+
+rdh harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2.yaml --crosswalk crosswalk.yaml --output-dir <dir> [--execute]
+    Cross-dataset harmonization. Each input is validated/standardized against its OWN rules file first
+    (per §1 "never literally join" — there is no single shared --rules file here, because each source
+    has its own native schema until the crosswalk remaps it). The crosswalk file then maps each source's
+    standardized columns onto the shared target schema.
+    Writes one output file per input into --output-dir (<output-dir>/<source-stem>.harmonized.csv) plus
+    one combined manifest recording both per-source rules hashes and the crosswalk hash — never a single
+    merged/joined table. Refuses if --output-dir contains any input path.
 
 rdh report <artifact.json>
     Renders a data_dictionary/validation_report/manifest JSON file to Markdown.
@@ -160,7 +176,7 @@ Four levels: unit (per guard/rule), integration (full pipeline on one fixture), 
 ## 9. Definition of done
 
 - [ ] Raw input file hash identical before/after every run, on all three real datasets
-- [ ] `harmonize` without `--execute` never writes a file
+- [ ] `harmonize` without `--execute` never writes a file, in both the single-file and cross-dataset (`--output-dir`) forms
 - [ ] No transformation occurs without a corresponding rule in the rules YAML
 - [ ] Ambiguous dates never silently parsed; units never guessed
 - [ ] Rows never silently deleted; row/column counts asserted every run
