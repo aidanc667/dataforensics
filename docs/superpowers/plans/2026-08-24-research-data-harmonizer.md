@@ -2780,6 +2780,246 @@ git commit -m "feat: read-only Streamlit viewer over existing JSON report output
 
 ---
 
+### Task 20: Ambiguous date format detection (Error tier)
+
+**Found during a final readiness audit (2026-08-24):** MASTER_PROMPT.md's §1 principles and the original spec both call this out as one of the most important safety rules — "ambiguous dates are flagged as a Critical validation warning and never silently parsed" — and Task 16's own fixture plants a `03/04/2024` value specifically to exercise it. But no task in the plan as written actually implements date-column handling: `validation.py` (Task 10) only checks `minimum`/`maximum`, and `type: date`/`format` in the rules YAML (§6) was documented but never enforced. This task closes that gap.
+
+**Files:**
+- Modify: `src/rdh/validation.py`
+- Test: `tests/unit/test_date_validation.py`
+
+**Interfaces:**
+- Produces: `validation.is_ambiguous_date(value: str) -> bool` and a new check inside `validate()` for any column where `columns.<name>.type == "date"`. Findings use `rule` values `"ambiguous_date_format"` and `"date_format_mismatch"`, both Error tier (deterministic — the rule being violated is "a date column must be unambiguous or have an explicit format," not a guess about the value itself).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/unit/test_date_validation.py
+from rdh.validation import is_ambiguous_date, validate
+
+_DATE_RULES = {
+    "version": 1,
+    "primary_key": ["participant_id"],
+    "columns": {
+        "visit_date": {"type": "date"},
+    },
+    "missing_values": {},
+    "category_mappings": {},
+    "weights_strata": {"columns": []},
+}
+
+_DATE_RULES_WITH_FORMAT = {
+    **_DATE_RULES,
+    "columns": {"visit_date": {"type": "date", "format": "%Y-%m-%d"}},
+}
+
+
+def test_is_ambiguous_date_flags_slash_format():
+    assert is_ambiguous_date("03/04/2024") is True
+
+
+def test_is_ambiguous_date_does_not_flag_iso8601():
+    assert is_ambiguous_date("2024-03-04") is False
+
+
+def test_slash_date_with_no_declared_format_is_error():
+    rows = [{"participant_id": "1", "visit_date": "03/04/2024"}]
+    result = validate(rows, _DATE_RULES)
+    ambiguous = [e for e in result["errors"] if e["rule"] == "ambiguous_date_format"]
+    assert len(ambiguous) == 1
+    assert ambiguous[0]["column"] == "visit_date"
+
+
+def test_iso8601_date_with_no_declared_format_is_not_flagged():
+    rows = [{"participant_id": "1", "visit_date": "2024-03-04"}]
+    result = validate(rows, _DATE_RULES)
+    assert result["errors"] == []
+
+
+def test_value_matching_declared_format_is_not_flagged():
+    rows = [{"participant_id": "1", "visit_date": "2024-03-04"}]
+    result = validate(rows, _DATE_RULES_WITH_FORMAT)
+    assert result["errors"] == []
+
+
+def test_value_not_matching_declared_format_is_error():
+    rows = [{"participant_id": "1", "visit_date": "03/04/2024"}]
+    result = validate(rows, _DATE_RULES_WITH_FORMAT)
+    mismatches = [e for e in result["errors"] if e["rule"] == "date_format_mismatch"]
+    assert len(mismatches) == 1
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/unit/test_date_validation.py -v`
+Expected: FAIL — `is_ambiguous_date` doesn't exist; date columns aren't checked at all yet
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/rdh/validation.py — add near the top
+import re
+from datetime import datetime
+
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
+
+
+def is_ambiguous_date(value: str) -> bool:
+    if _ISO_DATE_PATTERN.match(value):
+        return False
+    return bool(_SLASH_DATE_PATTERN.match(value))
+```
+
+```python
+# src/rdh/validation.py — inside validate()'s per-row, per-column loop, alongside the
+# existing "minimum"/"maximum" checks (same indentation level, same row/column loop):
+            if col_rules.get("type") == "date":
+                checks_evaluated += 1
+                declared_format = col_rules.get("format")
+                if declared_format:
+                    try:
+                        datetime.strptime(raw_value, declared_format)
+                    except ValueError:
+                        errors.append(
+                            {
+                                "column": column,
+                                "row_key": row_key,
+                                "rule": "date_format_mismatch",
+                                "message": f"{column}={raw_value} does not match declared format {declared_format}",
+                                "severity": "error",
+                            }
+                        )
+                elif is_ambiguous_date(raw_value):
+                    errors.append(
+                        {
+                            "column": column,
+                            "row_key": row_key,
+                            "rule": "ambiguous_date_format",
+                            "message": f"{column}={raw_value} is ambiguous (MM/DD vs DD/MM) with no declared format — not parsed",
+                            "severity": "error",
+                        }
+                    )
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/unit/test_date_validation.py -v`
+Expected: PASS (6 tests)
+
+- [ ] **Step 5: Run full suite, confirm Task 16's fixture now actually catches its own planted issue**
+
+Run: `pytest -v`
+Expected: PASS. Additionally run `rdh scan fixtures/sample.csv --rules fixtures/sample_rules.yaml` by hand — the report should now include an `ambiguous_date_format` error for row 5's `03/04/2024`, closing the loop on what that fixture was always meant to demonstrate. (`fixtures/sample_rules.yaml` needs a `visit_date: {type: date}` entry added — add it now as part of this task.)
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/rdh/validation.py tests/unit/test_date_validation.py fixtures/sample_rules.yaml
+git commit -m "feat: ambiguous date format detection (Error tier) — closes a gap the fixture already anticipated"
+```
+
+---
+
+### Task 21: Wire the `rdh report` command
+
+**Found during the same final audit:** `rdh report <artifact.json>` is defined in MASTER_PROMPT.md §5 and stubbed out in Task 1 ("not implemented," exit 3) — but no later task ever replaces the stub. It's the only one of the three CLI verbs that stays permanently unimplemented across the whole plan as written.
+
+**Files:**
+- Modify: `src/rdh/cli.py`
+- Test: `tests/integration/test_report_command.py`
+
+**Interfaces:**
+- Consumes: `report.render_markdown` (Task 8), `viewer.classify_report` (Task 19 — reused here for a sensible title, e.g. "Validation Report" vs. "Data Dictionary," rather than duplicating that logic).
+- Produces: `rdh report <artifact.json> [--out <path>]` — prints rendered Markdown to stdout by default, or writes it to `--out` if given.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/integration/test_report_command.py
+import json
+
+from click.testing import CliRunner
+
+from rdh.cli import main
+
+
+def test_report_renders_validation_report_to_stdout(tmp_path):
+    artifact = tmp_path / "sample.validation_report.json"
+    artifact.write_text(json.dumps({"errors": [], "warnings": [], "suggestions": [], "checks_evaluated": 1, "checks_passed": 1}))
+
+    result = CliRunner().invoke(main, ["report", str(artifact)])
+    assert result.exit_code == 0
+    assert "# Validation Report" in result.output
+
+
+def test_report_writes_to_out_path_when_given(tmp_path):
+    artifact = tmp_path / "sample.data_dictionary.json"
+    artifact.write_text(json.dumps({"age": {"dtype": "Utf8", "non_null_pct": 100.0}}))
+    out_path = tmp_path / "rendered.md"
+
+    result = CliRunner().invoke(main, ["report", str(artifact), "--out", str(out_path)])
+    assert result.exit_code == 0
+    assert out_path.exists()
+    assert "# Data Dictionary" in out_path.read_text()
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/integration/test_report_command.py -v`
+Expected: FAIL — `report` still prints "not implemented" and exits 3
+
+- [ ] **Step 3: Wire cli.py's report command**
+
+```python
+# src/rdh/cli.py — replace the report command body
+from rdh.viewer import classify_report
+
+_REPORT_TITLES = {
+    "data_dictionary": "Data Dictionary",
+    "validation_report": "Validation Report",
+    "manifest": "Transformation Manifest",
+    "unknown": "Report",
+}
+
+
+@main.command()
+@click.argument("artifact", type=click.Path(exists=True))
+@click.option("--out", type=click.Path(), default=None)
+def report(artifact, out):
+    """Render a data_dictionary/validation_report/manifest JSON file to Markdown."""
+    data = json.loads(Path(artifact).read_text())
+    title = _REPORT_TITLES[classify_report(data)]
+    markdown = render_markdown(title, data)
+
+    if out:
+        Path(out).write_text(markdown)
+    else:
+        click.echo(markdown)
+    sys.exit(0)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/integration/test_report_command.py -v`
+Expected: PASS (2 tests)
+
+- [ ] **Step 5: Run full suite**
+
+Run: `pytest -v`
+Expected: PASS, all tests green — this is the last task, so this is the final full-suite run
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/rdh/cli.py tests/integration/test_report_command.py
+git commit -m "feat: wire the previously-stubbed rdh report command"
+```
+
+Note: this task depends on `viewer.classify_report` from Task 19. If Task 19 (Streamlit viewer) is ever descoped, inline a copy of `classify_report`'s three-line logic directly in `cli.py` instead of importing from `rdh.viewer` — don't make the core CLI's third verb depend on an optional-extras module.
+
+---
+
 ## Self-Review
 
 **Spec coverage:** every MASTER_PROMPT.md section maps to a task — §1 safety/immutability → Tasks 2, 12, 13, 14; §1 never-guess-semantics → Tasks 5, 9, 13, 14; §1 three-tier validation → Task 10; §1 determinism/versioning → Tasks 12, 14; §1 privacy defaults → deferred: **gap found and noted below**; §2 blind spots (WONDER suppression, no-merge crosswalk, footer algorithm, license check) → Tasks 4, 15, 17; §3 datasets → Task 17; §5 CLI shape → Tasks 1, 8, 11, 13, 15; §6 rules YAML → Task 9; §7 build order → this plan's task order; §8 testing levels → spread across all tasks + Task 18; §9/§10 definition of done / non-goals → Task 18's README.
@@ -2796,6 +3036,8 @@ git commit -m "feat: read-only Streamlit viewer over existing JSON report output
 - [ ] Run tests, commit: `git commit -m "feat: mask PII-pattern columns in reports by default"`.
 
 **Note on Task 19 vs. the original spec:** MASTER_PROMPT.md §10 lists "No GUI" as an explicit v1 non-goal. Task 19 was added afterward at Aidan's request and is a deliberate, logged scope change, not an inconsistency slipping through — it stays inside the spirit of the constraint (no *write* surface, no new engine logic, pure read-only presentation over files the CLI already produces) rather than reopening the GUI question generally. MASTER_PROMPT.md's non-goals section has been amended to reflect this so the two documents don't contradict each other.
+
+**Second gap-finding pass (2026-08-24, requested directly):** re-read the whole plan against MASTER_PROMPT.md looking specifically for spec requirements with no implementing task. Found two: (1) ambiguous-date detection — one of the most heavily emphasized safety rules in the original spec, and something Task 16's fixture already planted a test value for (`03/04/2024`) without any task ever actually checking it — added as Task 20. (2) `rdh report`, defined in §5 and stubbed in Task 1, was never wired to a real implementation in any later task — added as Task 21. Also noted and deliberately deferred rather than silently dropped: explicit unit-conversion rules (§1 allows them when schema-declared, but none of the three chosen demo datasets need one, so no task builds it — if a future dataset needs it, add a task following the same pattern as Task 14's `apply_transformations`, keyed off a new `unit_conversions:` rules-YAML section) and a `type: integer`-driven numeric cast on cleaned output (currently validated for range but left as a string in the output file, which is consistent with the spec's "preserve raw strings unless explicitly told to convert" principle, so this is a deliberate minimalism, not an oversight).
 
 **Placeholder scan:** no TBD/TODO markers remain; the one intentionally-manual task (17) is manual because the underlying action (browser downloads) is not scriptable, not because content was deferred — every step in it has concrete URLs, commands, or file templates.
 
