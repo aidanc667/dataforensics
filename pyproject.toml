@@ -1,0 +1,25 @@
+[project]
+name = "research-data-harmonizer"
+version = "0.1.0"
+description = "Auditable profiling, validation, and rules-driven harmonization for messy research tabular exports."
+requires-python = ">=3.11"
+dependencies = [
+    "polars>=1.0",
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "charset-normalizer>=3.3",
+    "rapidfuzz>=3.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+rdh = "rdh.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

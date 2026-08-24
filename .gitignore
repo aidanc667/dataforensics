@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+data/raw/*
+!data/raw/.gitkeep
+data/standardized/*
+!data/standardized/.gitkeep
+data/cleaned/*
+!data/cleaned/.gitkeep
