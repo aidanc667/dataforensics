@@ -33,6 +33,8 @@ def _cardinality_cap(n_rows: int) -> int:
 
 def build_data_dictionary(path: Path) -> dict:
     data_lines, delimiter = _read_cleaned_lines(path)
+    if not data_lines:
+        return {}
     header = data_lines[0].split(delimiter)
     body_rows = [line.split(delimiter) for line in data_lines[1:]]
     n_rows = len(body_rows)
