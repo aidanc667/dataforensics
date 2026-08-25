@@ -1,0 +1,13 @@
+version: 1
+primary_key: [participant_id]
+columns:
+  age:
+    type: integer
+    minimum: 0
+    maximum: 120
+missing_values:
+  smoking_status:
+    "99": Refused
+category_mappings: {}
+weights_strata:
+  columns: []
