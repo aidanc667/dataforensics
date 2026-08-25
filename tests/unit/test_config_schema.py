@@ -295,6 +295,22 @@ def test_load_rules_rejects_scalar_columns(tmp_path):
         load_rules(f)
 
 
+def test_load_rules_scalar_columns_error_advises_empty_dict_not_omission(tmp_path):
+    # Fix 5 regression test: `columns` is a REQUIRED key (see _REQUIRED_KEYS),
+    # so the shared "omit the key entirely" advice used for
+    # missing_values/category_mappings is actively wrong here -- omitting
+    # `columns` produces a different error ("missing required key: columns"),
+    # not a fix. The error for columns specifically must instead point at
+    # `columns: {}` as the correct fix.
+    f = tmp_path / "rules.yaml"
+    f.write_text("version: 1\nprimary_key: [id]\ncolumns: 5\n")
+    with pytest.raises(RulesConfigError) as exc_info:
+        load_rules(f)
+    message = str(exc_info.value)
+    assert "columns: {}" in message
+    assert "omit the key entirely" not in message
+
+
 def test_load_rules_rejects_non_dict_single_column_ruleset(tmp_path):
     # "columns:\n  age: 5" -- a bare scalar instead of a column's rule-set
     # dict. Would otherwise crash later in validation.py's
@@ -347,6 +363,41 @@ def test_load_rules_accepts_numeric_minimum_and_maximum(tmp_path):
     rules = load_rules(f)
     assert rules["columns"]["age"]["minimum"] == 0
     assert rules["columns"]["age"]["maximum"] == 120.5
+
+
+def test_load_rules_rejects_non_string_format(tmp_path):
+    # "format: 5" -- validation.py passes `format` straight into
+    # `datetime.strptime(raw_value, declared_format)`, which raises an
+    # uncaught TypeError (not a catchable ValueError) when declared_format
+    # isn't a string. Must be caught here as a clean RulesConfigError
+    # instead, matching the minimum/maximum numeric-type checks above.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns:\n"
+        "  d:\n"
+        "    type: date\n"
+        "    format: 5\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_accepts_string_format(tmp_path):
+    # Sanity check the new format-type check doesn't over-fire on an
+    # ordinary, well-formed date format string.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns:\n"
+        "  d:\n"
+        "    type: date\n"
+        "    format: \"%Y-%m-%d\"\n"
+    )
+    rules = load_rules(f)
+    assert rules["columns"]["d"]["format"] == "%Y-%m-%d"
 
 
 def test_load_rules_accepts_non_chained_missing_values(tmp_path):

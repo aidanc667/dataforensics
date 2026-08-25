@@ -51,6 +51,18 @@ def load_rules(path: Path) -> dict:
     # TypeError class. Validate it here too.
     for rule_name in ("missing_values", "category_mappings", "columns"):
         if not isinstance(raw[rule_name], dict):
+            if rule_name == "columns":
+                # Unlike missing_values/category_mappings, `columns` is a
+                # REQUIRED key (see _REQUIRED_KEYS above) -- "omit the key
+                # entirely" is actively wrong advice here, since omitting it
+                # produces a *different* error ("missing required key:
+                # columns"), not a fix. Point at the actual correct fix
+                # instead: an explicit empty mapping.
+                raise RulesConfigError(
+                    f"Rules file {path}: '{rule_name}' must be a YAML mapping of column name -> "
+                    f"rule (got {raw[rule_name]!r}) — use `columns: {{}}` if you have no "
+                    "column-level rules, since `columns` is a required key and cannot be omitted"
+                )
             raise RulesConfigError(
                 f"Rules file {path}: '{rule_name}' must be a YAML mapping of column name -> "
                 f"rule (got {raw[rule_name]!r}) — if you don't need any {rule_name} rules, "
@@ -62,7 +74,11 @@ def load_rules(path: Path) -> dict:
     # `minimum`/`maximum` bound within it must be numeric -- validation.py's
     # `col_rules["minimum"]` / `numeric < col_rules["minimum"]` comparisons
     # would otherwise crash with an uncaught TypeError (or silently compare
-    # against a non-numeric value) instead of failing cleanly here.
+    # against a non-numeric value) instead of failing cleanly here. Likewise
+    # `format`, if present, must be a string -- validation.py passes it
+    # straight into `datetime.strptime(raw_value, declared_format)`, which
+    # raises an uncaught TypeError (not a clean, catchable ValueError) when
+    # ``declared_format`` isn't a string (e.g. "format: 5").
     for column, col_rules in raw["columns"].items():
         if not isinstance(col_rules, dict):
             raise RulesConfigError(
@@ -75,6 +91,11 @@ def load_rules(path: Path) -> dict:
                     f"Rules file {path}: columns['{column}']['{bound_key}'] must be numeric "
                     f"(got {col_rules[bound_key]!r})"
                 )
+        if "format" in col_rules and not isinstance(col_rules["format"], str):
+            raise RulesConfigError(
+                f"Rules file {path}: columns['{column}']['format'] must be a string "
+                f"(got {col_rules['format']!r})"
+            )
 
     overlap = sorted(set(raw["missing_values"]) & set(raw["category_mappings"]))
     if overlap:
