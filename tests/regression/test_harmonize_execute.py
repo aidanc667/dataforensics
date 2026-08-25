@@ -81,6 +81,23 @@ def test_execute_is_idempotent(tmp_path):
     assert first_bytes == second_bytes
 
 
+def test_apply_transformations_masks_pii_column_values_in_mutation_log():
+    from rdh.harmonize import apply_transformations
+
+    rules = {
+        "primary_key": ["participant_id"],
+        "missing_values": {},
+        "category_mappings": {"ssn": {"123-45-6789": "999-99-9999"}},
+    }
+    rows = [{"participant_id": "1", "ssn": "123-45-6789"}]
+    _, mutations = apply_transformations(rows, rules)
+    assert len(mutations) == 1
+    assert "123-45-6789" not in str(mutations[0])
+    assert "999-99-9999" not in str(mutations[0])
+    assert mutations[0]["column"] == "ssn"
+    assert mutations[0]["row_key"] == {"participant_id": "1"}
+
+
 def test_execute_on_header_only_csv_preserves_columns(tmp_path):
     src = tmp_path / "empty.csv"
     src.write_text("participant_id,smoking_status\n")
