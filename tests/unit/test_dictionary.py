@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from rdh.dictionary import build_data_dictionary
+from rdh.dictionary import build_data_dictionary, read_rows
 
 
 def test_dictionary_basic_fields(tmp_path):
@@ -70,3 +70,10 @@ def test_dictionary_ragged_row_counts_missing_trailing_field_as_null(tmp_path):
     d = build_data_dictionary(f)
     assert d["c"]["null_count"] == 1
     assert d["c"]["non_null_pct"] == 50.0
+
+
+def test_read_rows_ragged_row_fills_missing_trailing_field(tmp_path):
+    f = tmp_path / "ragged.csv"
+    f.write_text("participant_id,age,site\n1,40,A\n2,41\n")  # row 2 is missing the 'site' field
+    rows = read_rows(f)
+    assert rows[1] == {"participant_id": "2", "age": "41", "site": ""}
