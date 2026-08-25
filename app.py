@@ -1,4 +1,5 @@
 import csv
+import html
 import io
 import json
 import tempfile
@@ -122,6 +123,34 @@ def _step_bar(current: int) -> None:
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
+def _esc(value) -> str:
+    """Escape a value that came from uploaded data before it goes into an
+    unsafe_allow_html=True markdown block -- column names and cell values
+    are attacker- (or just messily-formatted-) controlled text, not code we
+    wrote, so they must never be interpolated into HTML raw."""
+    return html.escape(str(value))
+
+
+def _visualize_whitespace(value: str) -> str:
+    """Render a string so leading/trailing whitespace is actually visible,
+    instead of indistinguishable from its stripped form. A trailing space
+    ("Bangalore ") reads identically to "Bangalore" in normal text, which
+    is exactly why detect_similar_categories exists to catch it -- but a
+    finding a human can't visually verify is a finding they'll distrust.
+    Escapes the value first, so this is also safe to use in place of
+    _esc() for any value that might carry leading/trailing whitespace.
+    """
+    escaped = _esc(value)
+    stripped = value.strip()
+    leading_ws = len(value) - len(value.lstrip())
+    trailing_ws = len(value) - len(value.rstrip())
+    if not leading_ws and not trailing_ws:
+        return escaped
+    marker = '<span style="background:#FEE2E2; color:#B91C1C;">&middot;</span>'
+    visible = (marker * leading_ws) + _esc(stripped) + (marker * trailing_ws)
+    return f'{visible} <span style="color:#94A3B8; font-style:italic;">(hidden whitespace, {len(value)} chars total)</span>'
+
+
 def _write_temp(name: str, content: bytes) -> Path:
     tmp_dir = Path(tempfile.mkdtemp(prefix="rdh_app_"))
     path = tmp_dir / name
@@ -193,7 +222,7 @@ with tab_analyze:
         st.markdown(
             f'<div class="rdh-card"><span class="rdh-badge rdh-badge-error">Blocking</span>'
             f'<div class="rdh-card-title">Duplicate column names found</div>'
-            f'<div class="rdh-card-evidence">{exc}</div></div>',
+            f'<div class="rdh-card-evidence">{_esc(exc)}</div></div>',
             unsafe_allow_html=True,
         )
         st.write(
@@ -366,7 +395,7 @@ with tab_analyze:
                 c1, c2, c3 = st.columns([0.5, 2.5, 2])
                 checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
                 c2.markdown(
-                    f'<div class="rdh-card-title">{col} = "{val}"</div>'
+                    f'<div class="rdh-card-title">{_esc(col)} = "{_visualize_whitespace(val)}"</div>'
                     f'<div class="rdh-card-evidence">looks like a common missing-value convention</div>',
                     unsafe_allow_html=True,
                 )
@@ -381,7 +410,7 @@ with tab_analyze:
             c1, c2, c3 = st.columns([0.5, 2.5, 2])
             checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
             c2.markdown(
-                f'<div class="rdh-card-title">{col}</div>'
+                f'<div class="rdh-card-title">{_esc(col)}</div>'
                 f'<div class="rdh-card-evidence">{count} value(s) shaped like MM/DD or DD/MM with no way to '
                 f"tell which — never parsed automatically</div>",
                 unsafe_allow_html=True,
@@ -400,11 +429,11 @@ with tab_analyze:
                 badge_cls = "rdh-badge-high" if cluster["confidence"] == "high" else "rdh-badge-medium"
                 c1, c2 = st.columns([0.5, 4])
                 checked = c1.checkbox("approve", key=f"{key}_on", value=(cluster["confidence"] == "high"), label_visibility="collapsed")
-                values_str = " / ".join(f'"{v}"' for v in cluster["values"])
+                values_str = " / ".join(f'"{_visualize_whitespace(v)}"' for v in cluster["values"])
                 c2.markdown(
-                    f'<span class="rdh-badge {badge_cls}">{cluster["confidence"]} confidence</span>'
-                    f'<div class="rdh-card-title">{col}: {values_str}</div>'
-                    f'<div class="rdh-card-evidence">would merge onto "{cluster["suggested_canonical"]}"</div>',
+                    f'<span class="rdh-badge {badge_cls}">{_esc(cluster["confidence"])} confidence</span>'
+                    f'<div class="rdh-card-title">{_esc(col)}: {values_str}</div>'
+                    f'<div class="rdh-card-evidence">would merge onto "{_visualize_whitespace(cluster["suggested_canonical"])}"</div>',
                     unsafe_allow_html=True,
                 )
                 if checked:
@@ -421,14 +450,14 @@ with tab_analyze:
         for c, f in outlier_cols.items():
             st.markdown(
                 f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Suggestion</span>'
-                f'<div class="rdh-card-title">{c}: {f["outliers"]["outlier_count"]} statistical outlier(s)</div>'
+                f'<div class="rdh-card-title">{_esc(c)}: {f["outliers"]["outlier_count"]} statistical outlier(s)</div>'
                 f'<div class="rdh-card-evidence">IQR method — statistically unusual, not necessarily wrong</div></div>',
                 unsafe_allow_html=True,
             )
         for c, f in top_code_cols.items():
             st.markdown(
                 f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Suggestion</span>'
-                f'<div class="rdh-card-title">{c}: possible top-coding at {f["top_code_spike"]["value"]}</div>'
+                f'<div class="rdh-card-title">{_esc(c)}: possible top-coding at {_esc(f["top_code_spike"]["value"])}</div>'
                 f'<div class="rdh-card-evidence">{f["top_code_spike"]["fraction"]:.1%} of values sit at the observed max</div></div>',
                 unsafe_allow_html=True,
             )
@@ -550,8 +579,8 @@ with tab_analyze:
             for finding in report["errors"]:
                 st.markdown(
                     f'<div class="rdh-card"><span class="rdh-badge rdh-badge-error">Error</span>'
-                    f'<span class="rdh-card-title">{finding["rule"]}</span> — {finding["message"]}<br>'
-                    f'<span class="rdh-card-evidence">row_key: {finding["row_key"]}</span></div>',
+                    f'<span class="rdh-card-title">{_esc(finding["rule"])}</span> — {_esc(finding["message"])}<br>'
+                    f'<span class="rdh-card-evidence">row_key: {_esc(finding["row_key"])}</span></div>',
                     unsafe_allow_html=True,
                 )
         else:
@@ -594,7 +623,7 @@ with tab_multifile:
                 for i, cand in enumerate(candidates):
                     st.markdown(
                         f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Candidate key</span>'
-                        f'<div class="rdh-card-title">{cand["file_a"]}.{cand["column_a"]} ↔ {cand["file_b"]}.{cand["column_b"]}</div>'
+                        f'<div class="rdh-card-title">{_esc(cand["file_a"])}.{_esc(cand["column_a"])} ↔ {_esc(cand["file_b"])}.{_esc(cand["column_b"])}</div>'
                         f'<div class="rdh-card-evidence">{cand["overlap_fraction"]:.0%} of the smaller file\'s distinct values '
                         f"appear in the other — a plausible join key, not a confirmed one</div></div>",
                         unsafe_allow_html=True,
