@@ -79,3 +79,21 @@ def test_execute_is_idempotent(tmp_path):
     second_bytes = output_path.read_bytes()
 
     assert first_bytes == second_bytes
+
+
+def test_execute_on_header_only_csv_preserves_columns(tmp_path):
+    src = tmp_path / "empty.csv"
+    src.write_text("participant_id,smoking_status\n")
+    rules_path = tmp_path / "rules.yaml"
+    rules_path.write_text(
+        "version: 1\nprimary_key: [participant_id]\ncolumns: {}\n"
+        "missing_values:\n  smoking_status:\n    \"99\": Refused\n"
+    )
+    output_path = tmp_path / "out.csv"
+
+    result = CliRunner().invoke(
+        main, ["harmonize", str(src), "--rules", str(rules_path), "--output", str(output_path), "--execute"]
+    )
+    assert result.exit_code == 0
+    content = output_path.read_text()
+    assert content.strip().startswith("participant_id,smoking_status") or content.strip() == "participant_id,smoking_status"

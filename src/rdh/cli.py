@@ -10,9 +10,26 @@ from rdh import __version__
 from rdh.config_schema import RulesConfigError, load_rules
 from rdh.dictionary import build_data_dictionary, read_rows
 from rdh.harmonize import apply_transformations, plan_transformations
+from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
 from rdh.manifest import atomic_write, build_manifest
 from rdh.report import render_markdown
 from rdh.validation import validate
+
+
+def _read_header(path: Path) -> list[str]:
+    """Read the header row directly from the input file, independent of row count.
+
+    Used as the source of truth for output CSV column structure when
+    ``transformed_rows`` is empty (e.g. a valid header-only input with zero
+    data rows) — falling back to ``transformed_rows[0].keys()`` in that case
+    would silently produce an empty fieldnames list and destroy the input's
+    column structure in the output.
+    """
+    encoding = detect_encoding(path)
+    raw_lines = path.read_text(encoding=encoding).splitlines()
+    delimiter = detect_delimiter(raw_lines[:10])
+    data_lines, _stripped = strip_footer(raw_lines, delimiter)
+    return data_lines[0].split(delimiter) if data_lines else []
 
 
 @click.group()
@@ -115,7 +132,7 @@ def _harmonize_single_file(file, rules_path, output, execute):
     if transformed_rows:
         fieldnames = list(transformed_rows[0].keys())
     else:
-        fieldnames = list(rows[0].keys()) if rows else []
+        fieldnames = _read_header(file_path)
 
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=fieldnames)

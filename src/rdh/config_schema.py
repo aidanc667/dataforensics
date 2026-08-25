@@ -31,4 +31,13 @@ def load_rules(path: Path) -> dict:
     raw.setdefault("missing_values", {})
     raw.setdefault("category_mappings", {})
     raw.setdefault("weights_strata", {"columns": []})
+
+    overlap = sorted(set(raw["missing_values"]) & set(raw["category_mappings"]))
+    if overlap:
+        cols = ", ".join(f"'{col}'" for col in overlap)
+        raise RulesConfigError(
+            f"Column(s) {cols} appear in both missing_values and category_mappings — "
+            "this ordering is ambiguous and not supported; use only one rule type per column"
+        )
+
     return raw

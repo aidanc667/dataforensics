@@ -48,3 +48,20 @@ def test_load_rules_defaults_missing_optional_sections(tmp_path):
     assert rules["missing_values"] == {}
     assert rules["category_mappings"] == {}
     assert rules["weights_strata"] == {"columns": []}
+
+
+def test_load_rules_rejects_column_in_both_missing_values_and_category_mappings(tmp_path):
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "missing_values:\n"
+        "  sex:\n"
+        "    \"9\": Unknown\n"
+        "category_mappings:\n"
+        "  sex:\n"
+        "    M: Male\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
