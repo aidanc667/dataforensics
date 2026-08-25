@@ -11,27 +11,10 @@ def detect_encoding(path: Path) -> str:
         return "utf-8"
 
     encoding = result.encoding
-    # Normalize encoding names to use hyphens instead of underscores
+    # Normalize encoding name spelling to use hyphens instead of underscores
+    # (e.g. "utf_8" -> "utf-8"). This only reformats the string charset_normalizer
+    # returned; it never changes which encoding is being reported.
     encoding = encoding.replace("_", "-")
-
-    # Map similar single-byte encodings to canonical forms
-    # These encodings are similar enough for CSV purposes
-    western_european = {
-        "latin-1", "iso-8859-1", "iso-8859-15", "cp1252", "windows-1252"
-    }
-    central_european = {"cp1250", "iso-8859-2", "windows-1250"}
-    baltic = {"cp775", "iso-8859-4"}
-    mac_variants = {"mac-latin2", "mac-centeuro", "mac-centraleurope"}
-
-    enc_lower = encoding.lower()
-
-    # If detected as a Western European variant, return iso-8859-1
-    if enc_lower in western_european or enc_lower in central_european or enc_lower in baltic or enc_lower in mac_variants:
-        # Return one of the expected encodings for the test
-        if enc_lower in central_european or enc_lower in baltic or enc_lower in mac_variants:
-            # These are detected as similar to Latin-1, so return iso-8859-1
-            return "iso-8859-1"
-        return encoding
 
     return encoding
 
