@@ -64,3 +64,59 @@ def test_column_with_no_rule_is_not_evaluated():
     assert result["checks_evaluated"] == result["checks_passed"] + len(
         result["errors"]
     ) + len(result["warnings"])
+
+
+def test_outlier_value_is_suggestion_not_error_or_warning():
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [{"participant_id": str(i), "lab_value": "10"} for i in range(8)]
+    rows[7]["lab_value"] = "500"  # a genuine outlier
+    result = validate(rows, rules)
+    outlier_suggestions = [s for s in result["suggestions"] if s["rule"] == "iqr_outlier"]
+    assert len(outlier_suggestions) == 1
+    assert outlier_suggestions[0]["row_key"] == {"participant_id": "7"}
+    assert result["errors"] == []
+    assert result["warnings"] == []
+
+
+def test_rare_category_is_suggestion_with_correct_row_key():
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = (
+        [{"participant_id": str(i), "site": "A"} for i in range(10)]
+        + [{"participant_id": "10", "site": "Z"}]
+    )
+    result = validate(rows, rules)
+    rare = [s for s in result["suggestions"] if s["rule"] == "rare_category"]
+    assert len(rare) == 1
+    assert rare[0]["row_key"] == {"participant_id": "10"}
+    assert result["errors"] == []
+    assert result["warnings"] == []
+
+
+def test_id_shaped_column_not_flagged_as_rare_category():
+    # every value unique -> looks like an ID column, not a categorical column with one rare value
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [{"participant_id": str(i), "site": f"site-{i}"} for i in range(10)]
+    result = validate(rows, rules)
+    rare = [s for s in result["suggestions"] if s["rule"] == "rare_category"]
+    assert rare == []
