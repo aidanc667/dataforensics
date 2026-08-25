@@ -78,12 +78,20 @@ def strip_footer(lines: list[str], delimiter: str) -> tuple[list[str], list[str]
     split-by-delimiter count. A genuine data row containing a quoted
     delimiter (e.g. a comma-delimited file with a value like
     ``"Delta Clinic, North"``) has a higher raw delimiter count than the
-    header and can, in rare cases, be misclassified as a footer line and
-    silently dropped. Properly fixing this would mean rewriting the parser
-    to be CSV-quote-aware, which is a larger architectural change; callers
-    should instead surface ``stripped_lines`` to the user (see
+    header and can be misclassified as a footer line -- this is a plausible
+    trigger, not an exotic edge case: two consecutive rows with a quoted
+    delimiter in any free-text column (site names, addresses, notes) is
+    enough. Once triggered, this function does NOT drop only the
+    misclassified line(s): it treats EVERYTHING from the first detected
+    mismatch to end-of-file as footer and returns it all in
+    ``stripped_lines``. This is a truncation of the rest of the file, not a
+    single-row exclusion -- on a file where the mismatch starts near the
+    top, the majority of the dataset can end up in ``stripped_lines``.
+    Properly fixing this would mean rewriting the parser to be
+    CSV-quote-aware, which is a larger architectural change; callers should
+    instead surface ``stripped_lines`` to the user (see
     ``cli._warn_if_footer_stripped``) rather than discarding it silently, so
-    a misclassification like this is at least visible instead of silent.
+    a truncation like this is at least visible instead of silent.
     """
     if not lines:
         return [], []

@@ -54,13 +54,16 @@ table. A `*.manifest.json` from `harmonize --execute` renders the run metadata a
 rdh scan <file> [--rules schema.yaml] [--out-dir DIR]
     Read-only. Always writes <stem>.data_dictionary.{json,md}. If --rules is given, also
     writes <stem>.validation_report.{json,md}. Never writes to the input path.
-    Exit 0 (clean or no --rules), 1 (validation errors found), 2 (malformed rules file).
+    Exit 0 (clean or no --rules), 1 (validation errors found), 2 (malformed rules file),
+    3 (malformed input file, e.g. a duplicate header column).
 
 rdh harmonize <file> --rules schema.yaml --output <path> [--execute]
     Single-file mode. Without --execute: dry run, writes nothing, just lists proposed
-    transformations. With --execute: applies the rules, writes <path> and
+    transformations (footer-stripping warnings, if any, are printed on the dry run too, not
+    just --execute). With --execute: applies the rules, writes <path> and
     <path>.manifest.json atomically. Refuses (exit 2) if --output equals the input path
-    or if the rules file is malformed.
+    or if the rules file is malformed; exits 3 on a malformed input file or if a post-transform
+    safety check fails (refuses to write rather than risk silent data loss).
 
 rdh harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2.yaml \
     --crosswalk crosswalk.yaml --output-dir <dir> [--execute]
@@ -72,16 +75,24 @@ rdh harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2
     --crosswalk, and --output-dir; falls back to single-file mode only when exactly one
     file and --rules/--output are given. Exits 2 if --output-dir collides with an input
     path, a source has no --rules-map entry, or a source's filename stem has no matching
-    entry under the crosswalk file's `sources:` key.
+    entry under the crosswalk file's `sources:` key; exits 3 on a malformed input file or
+    a failed safety check for any source (nothing is written for ANY source in that case —
+    see the two-pass validate-then-write design below).
 
-rdh report <artifact.json>
-    Not yet implemented — currently a stub that prints "report: not implemented" and
-    exits 3. (Markdown rendering already exists internally and is used by `scan` itself;
-    exposing it as a standalone command over an arbitrary artifact file is still open work.)
+rdh report <artifact.json> [--out <path>]
+    Renders a data_dictionary/validation_report/manifest JSON artifact (the same JSON
+    `scan`/`harmonize --execute` already write to disk) to Markdown. The artifact type is
+    auto-detected from its shape (manifest: has `mutations` + `run_id`; validation_report:
+    has `errors`/`warnings`/`suggestions`; data_dictionary: a mapping of column name ->
+    per-column profile dict) and titled accordingly. Without --out, the Markdown is printed
+    to stdout; with --out, it's written to that path instead. Exits 3 on malformed/unreadable
+    JSON, 0 otherwise.
 ```
 
 Exit codes: `0` success/no hard errors, `1` validation errors found, `2` invalid rules/config/
-usage, `3` runtime/unimplemented.
+usage, `3` malformed/unreadable input (duplicate-header CSV, unparseable/unreadable JSON artifact
+for `report`) or a harmonize safety-check failure (refusing to write rather than risk silent data
+loss).
 
 ## What this doesn't do (on purpose)
 
@@ -97,19 +108,29 @@ over JSON the CLI already produces (no write path, no new engine logic). That vi
 
 ## Known limitations
 
-**Footer detection is not CSV-quote-aware.** `strip_footer` (used by every parse path — `scan`,
-`harmonize`, and the crosswalk mode) decides whether a trailing line is a footer by counting
-delimiter characters on the raw line (`line.count(delimiter)`), not by running a real CSV-quoting
-parser. A genuine data row containing a quoted delimiter — e.g. a comma-delimited file with a value
-like `"Delta Clinic, North"` — has a higher raw comma count than the header and can, in rare cases,
-be misclassified as a footer line and silently excluded from parsing. Properly fixing this would
-mean rewriting the parser to be CSV-quote-aware (e.g. using Python's `csv` module instead of
-hand-rolled `.split(delimiter)`), which is a larger change than this tool currently makes. As a
-mitigation, `scan` and `harmonize` both print a stderr warning naming how many lines were stripped
-whenever `strip_footer` actually discards anything, and `harmonize --execute` also records the
-count in `*.manifest.json`'s `stripped_footer_lines` field — so a misclassification like this is
-never silent, even though it isn't automatically prevented. If you see this warning unexpectedly,
-check the input file for a data row with a quoted delimiter near the point where stripping started.
+**Footer detection is not CSV-quote-aware, and a misclassification truncates the rest of the
+file — not just one row.** `strip_footer` (used by every parse path — `scan`, `harmonize`, and the
+crosswalk mode) decides whether a line is a footer by counting delimiter characters on the raw line
+(`line.count(delimiter)`), not by running a real CSV-quoting parser. A genuine data row containing a
+quoted delimiter — e.g. a comma-delimited file with a value like `"Delta Clinic, North"` — has a
+higher raw comma count than the header and can be misclassified as a footer line. This is a
+plausible trigger, not a rare edge case: two consecutive rows with a quoted delimiter in any
+free-text column (site names, addresses, free-text notes) is enough to set it off. And the impact is
+larger than a single row: once `strip_footer` detects a run of field-count mismatches, it treats
+EVERYTHING from that point to the end of the file as footer and drops it all — this is a
+truncation of the dataset, not a single-row exclusion. On a file where the mismatch starts early,
+the majority of the rows can be silently dropped. Properly fixing this would mean rewriting the
+parser to be CSV-quote-aware (e.g. using Python's `csv` module instead of hand-rolled
+`.split(delimiter)`), which is a larger change than this tool currently makes. As a mitigation,
+`scan` and `harmonize` both print a stderr warning naming how many lines were dropped and at which
+line the drop starts, whenever `strip_footer` actually discards anything, and `harmonize --execute`
+also records the count in `*.manifest.json`'s `stripped_footer_lines` field — so a truncation like
+this is never silent, even though it isn't automatically prevented. Note that this warning is not
+exclusively a failure signal: it also fires on legitimately-footered real exports (e.g. a genuine
+CDC WONDER disclaimer/"Query Parameters:" block), which is the intended, correct case for this
+heuristic. Either way, if you see this warning, it's worth a quick look — check the row count
+against what you expect, and if it's off, check the input file for a data row with a quoted
+delimiter near the line named in the warning.
 
 ## Project status
 
