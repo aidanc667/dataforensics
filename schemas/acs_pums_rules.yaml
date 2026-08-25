@@ -1,0 +1,33 @@
+# ACS PUMS Extract Rules Template
+#
+# IMPORTANT: This is a DRAFT TEMPLATE for American Community Survey Public Use Microdata Sample (PUMS).
+# The column names and structure below are PLACEHOLDERS based on typical ACS PUMS extracts.
+# Once you download a real ACS PUMS extract in Step 2 of Task 17:
+#   1. Verify the actual person-level key columns (SERIALNO + SPORDER, or custom person_id)
+#   2. Update primary_key to match your extract's actual identifier structure
+#   3. Add all actual demographic columns to the columns dict
+#   4. Update AGEP bounds to match your extract's actual age top-coding (usually 99)
+#   5. Ensure PWGTP (person weight) is listed in weights_strata.columns
+#   6. Add any value mappings for coded categorical variables (e.g., SEX: "1"=Male, "2"=Female)
+#
+# See: https://www.census.gov/programs-surveys/acs/microdata.html for PUMS data dictionary.
+# The data dictionary (Step 2) will have variable codes and value labels.
+# Task 17 Step 4 and Step 6 will exercise this against real data.
+
+version: 1
+primary_key: [person_id]  # Example: adjust to match SERIALNO/SPORDER or your extract's actual key structure
+columns:
+  AGEP:
+    type: integer
+    minimum: 0
+    maximum: 99  # ACS PUMS top-codes age at 99 in most recent releases — verify against your extract's data dictionary
+  SEX:
+    type: string
+    # Values are typically coded (1=Male, 2=Female) in raw extract; see category_mappings below
+missing_values: {}
+category_mappings:
+  SEX:
+    "1": M
+    "2": F
+weights_strata:
+  columns: [PWGTP]  # ACS PUMS person weight — never auto-cleaned or normalized

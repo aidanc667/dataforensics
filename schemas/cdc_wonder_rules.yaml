@@ -1,0 +1,28 @@
+# CDC WONDER Export Rules Template
+#
+# IMPORTANT: This is a DRAFT TEMPLATE for CDC WONDER mortality data.
+# The column names and structure below are PLACEHOLDERS based on typical WONDER exports.
+# Once you download a real CDC WONDER export in Step 1 of Task 17:
+#   1. Verify the actual grouping columns (county_fips is example; yours may use state, region, etc.)
+#   2. Update primary_key to match your export's actual grouping column(s)
+#   3. Add all actual data columns to the columns dict
+#   4. Adjust missing_values sentinel mappings to match what the actual export contains
+#   5. Update any bounds (minimum/maximum) based on domain knowledge of the real values
+#
+# See: https://wonder.cdc.gov/ for export format details.
+# Task 17 Step 4 and Step 6 will exercise this against real data.
+
+version: 1
+primary_key: [county_fips]  # Example: adjust to match the actual export's grouping columns
+columns:
+  deaths:
+    type: integer
+    minimum: 0
+    # Maximum depends on county population and time period; CDC typically suppresses cells < 10
+missing_values:
+  deaths:
+    "Suppressed": "Suppressed (small-cell, per WONDER confidentiality policy)"
+    "Not Applicable": "Not Applicable"
+category_mappings: {}
+weights_strata:
+  columns: []
