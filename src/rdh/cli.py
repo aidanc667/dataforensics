@@ -15,6 +15,14 @@ from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
 from rdh.manifest import atomic_write, build_manifest
 from rdh.report import render_markdown
 from rdh.validation import validate
+from rdh.viewer import classify_report
+
+_REPORT_TITLES = {
+    "data_dictionary": "Data Dictionary",
+    "validation_report": "Validation Report",
+    "manifest": "Transformation Manifest",
+    "unknown": "Report",
+}
 
 
 def _read_header(path: Path) -> list[str]:
@@ -259,7 +267,24 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
 
 @main.command()
 @click.argument("artifact", type=click.Path(exists=True))
-def report(artifact):
-    """Render a JSON report/manifest artifact to Markdown."""
-    click.echo("report: not implemented")
-    sys.exit(3)
+@click.option("--out", type=click.Path(), default=None)
+def report(artifact, out):
+    """Render a data_dictionary/validation_report/manifest JSON file to Markdown."""
+    artifact_path = Path(artifact)
+    try:
+        data = json.loads(artifact_path.read_text())
+    except json.JSONDecodeError as exc:
+        click.echo(f"Invalid/malformed JSON artifact {artifact_path}: {exc}", err=True)
+        sys.exit(3)
+    except OSError as exc:
+        click.echo(f"Could not read artifact {artifact_path}: {exc}", err=True)
+        sys.exit(3)
+
+    title = _REPORT_TITLES[classify_report(data)]
+    markdown = render_markdown(title, data)
+
+    if out:
+        Path(out).write_text(markdown)
+    else:
+        click.echo(markdown)
+    sys.exit(0)
