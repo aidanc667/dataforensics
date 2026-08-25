@@ -49,6 +49,11 @@ def apply_transformations(rows: list[dict], rules: dict) -> tuple[list[dict], li
 
     for row in rows:
         new_row = dict(row)
+        # Known limitation: row_key is not masked even if a primary_key column
+        # is itself PII-like (e.g. primary_key: [ssn]). Masking it would break
+        # the manifest's ability to reference which row a mutation belongs to,
+        # so this is a deliberate scope boundary, not an oversight — avoid
+        # choosing a PII-pattern column as a primary key if this matters.
         row_key = {k: row.get(k) for k in primary_key}
 
         for column, sentinel_map in missing_values.items():

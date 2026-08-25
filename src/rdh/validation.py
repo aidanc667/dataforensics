@@ -20,6 +20,11 @@ def is_ambiguous_date(value: str) -> bool:
 
 
 def _row_key(row: dict, primary_key: list[str]) -> dict:
+    # Known limitation: not masked even if a primary_key column is itself
+    # PII-like (e.g. primary_key: [ssn]) — masking it would break the
+    # report's ability to reference which row a finding belongs to. This is
+    # a deliberate scope boundary, matching harmonize.py's identical choice;
+    # avoid choosing a PII-pattern column as a primary key if this matters.
     return {k: row.get(k) for k in primary_key}
 
 
