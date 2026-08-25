@@ -165,19 +165,28 @@ def validate(rows: list[dict], rules: dict) -> dict:
 
         # 1. Outlier suggestions (IQR method) — only if the entire column
         # parses as numeric, mirroring build_data_dictionary's numeric
-        # detection in dictionary.py. dictionary.py classifies a column as
-        # category "id" (and never numerically casts or outlier-tests it)
-        # when EITHER is_id_like_column(name) matches OR
+        # detection in dictionary.py. dictionary.py skips numeric parsing
+        # (and therefore outlier-testing) for a column when
+        # `category != "id" and not mask_pii` is false -- i.e. it skips
+        # BOTH ID-like columns AND PII-like columns. "id" is assigned when
+        # EITHER is_id_like_column(name) matches OR
         # preserves_leading_zero(non_null_values) is true — e.g. a column
         # named "county_code" doesn't match the ID-name pattern, but its
         # leading-zero values ("06081") must still never be float()-cast and
-        # IQR-tested, or the leading zero would be destroyed and this check
-        # would contradict dictionary.py's own classification of the same
-        # column. Both conditions must be checked here to actually mirror
-        # dictionary.py's logic.
+        # IQR-tested, or the leading zero would be destroyed. And a
+        # PII-like column (e.g. "phone") must never be numerically parsed
+        # either, even though its message is separately masked via
+        # _display_value — firing a suggestion at all on a PII column
+        # would still contradict dictionary.py's treatment of the same
+        # column. All three conditions must be checked here to actually
+        # mirror dictionary.py's logic, token-for-token.
         column_values = [v for v, _ in values_with_keys]
-        is_id_like = is_id_like_column(column) or preserves_leading_zero(column_values)
-        is_numeric = not is_id_like
+        is_id_or_pii_like = (
+            is_id_like_column(column)
+            or preserves_leading_zero(column_values)
+            or is_pii_like_column(column)
+        )
+        is_numeric = not is_id_or_pii_like
         numeric_values: list[float] = []
         for raw_value, _row_key_ in values_with_keys:
             if not is_numeric:
@@ -205,13 +214,17 @@ def validate(rows: list[dict], rules: dict) -> dict:
         # 2. Rare category suggestions — only run on columns that look
         # categorical-ish (unique-value count < half the non-null row
         # count), so free-text columns aren't flagged wholesale. The
-        # cardinality heuristic alone isn't enough to exclude ID-shaped
-        # columns, though: a *low-cardinality* ID-shaped column (e.g.
-        # county_fips with only 2 distinct leading-zero values across many
-        # rows) can still satisfy "unique_count < half the row count" and
-        # get flagged as a rare category despite dictionary.py classifying
-        # it category "id" — so apply the same combined ID guard used for
-        # outlier suggestions above.
+        # cardinality heuristic alone isn't enough to exclude ID-shaped or
+        # PII-like columns, though: a *low-cardinality* ID-shaped column
+        # (e.g. county_fips with only 2 distinct leading-zero values across
+        # many rows) can still satisfy "unique_count < half the row count"
+        # and get flagged as a rare category despite dictionary.py
+        # classifying it category "id" — and a low-cardinality PII-like
+        # column (e.g. a "phone" column with a handful of shared area
+        # codes) would likewise get a suggestion fired on it even though
+        # its message is masked, contradicting dictionary.py's treatment of
+        # the same column — so apply the same combined ID/PII guard used
+        # for outlier suggestions above.
         value_counts: dict[str, int] = {}
         for raw_value, _row_key_ in values_with_keys:
             value_counts[raw_value] = value_counts.get(raw_value, 0) + 1
@@ -219,7 +232,7 @@ def validate(rows: list[dict], rules: dict) -> dict:
         unique_count = len(value_counts)
         non_null_count = len(values_with_keys)
         looks_categorical = (
-            not is_id_like and unique_count > 1 and unique_count < (non_null_count / 2)
+            not is_id_or_pii_like and unique_count > 1 and unique_count < (non_null_count / 2)
         )
 
         if looks_categorical:

@@ -123,10 +123,16 @@ def test_id_shaped_column_not_flagged_as_rare_category():
     assert rare == []
 
 
-def test_rare_category_message_masks_pii_like_column_raw_value():
-    # patient_name is a PII-like column name (is_pii_like_column). A rare
-    # value in it must never appear raw in the finding message, since that
-    # message gets written verbatim into generated Markdown/JSON reports.
+def test_rare_category_never_fires_on_pii_like_column():
+    # patient_name is a PII-like column name (is_pii_like_column). Earlier
+    # rounds masked a rare value's raw text in the finding message via
+    # _display_value, but still let the suggestion fire in the first place
+    # -- which contradicted dictionary.py's treatment of the same column
+    # (dictionary.py never numerically/statistically profiles a masked
+    # PII-like column at all). The guard now excludes PII-like columns from
+    # rare_category candidacy entirely, the same way it already excluded
+    # ID-like columns, so no finding -- masked or not -- is produced for
+    # this column.
     assert is_pii_like_column("patient_name") is True
     rules = {
         "version": 1,
@@ -142,12 +148,7 @@ def test_rare_category_message_masks_pii_like_column_raw_value():
     )
     result = validate(rows, rules)
     rare = [s for s in result["suggestions"] if s["rule"] == "rare_category"]
-    assert len(rare) == 1
-    assert "Zelda Uniquename" not in rare[0]["message"]
-    assert "[masked" in rare[0]["message"]
-    # row_key legitimately uses the primary key value, not the flagged
-    # column's own value, so it is unaffected by masking.
-    assert rare[0]["row_key"] == {"participant_id": "10"}
+    assert rare == []
 
 
 def test_duplicate_primary_key_message_masks_pii_like_primary_key_value():
@@ -267,6 +268,71 @@ def test_leading_zero_low_cardinality_column_not_flagged_as_rare_category():
     ]
     result = validate(rows, rules)
     rare = [s for s in result["suggestions"] if s["rule"] == "rare_category" and s["column"] == "county_code"]
+    assert rare == []
+
+
+def test_pii_like_column_never_flagged_as_outlier():
+    # "phone" is PII-like (is_pii_like_column) and its values happen to
+    # parse as floats, but dictionary.py never numerically casts/
+    # outlier-tests a column when `category != "id" and not mask_pii` is
+    # false -- i.e. it also excludes PII-like columns, not just ID-like
+    # ones. validation.py's suggestion-tier guard must match that full
+    # condition, not just the ID half of it.
+    from rdh.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
+
+    assert is_pii_like_column("phone") is True
+    assert is_id_like_column("phone") is False
+    assert preserves_leading_zero(["5551234", "9999999"]) is False
+
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [
+        {"participant_id": "1", "phone": "5551234"},
+        {"participant_id": "2", "phone": "5551235"},
+        {"participant_id": "3", "phone": "5551236"},
+        {"participant_id": "4", "phone": "9999999"},  # would be a numeric outlier if cast
+        {"participant_id": "5", "phone": "5551234"},
+        {"participant_id": "6", "phone": "5551236"},
+        {"participant_id": "7", "phone": "5551235"},
+        {"participant_id": "8", "phone": "9999999"},
+    ]
+    result = validate(rows, rules)
+    outlier_suggestions = [
+        s for s in result["suggestions"] if s["rule"] == "iqr_outlier" and s["column"] == "phone"
+    ]
+    assert outlier_suggestions == []
+
+
+def test_pii_like_low_cardinality_column_not_flagged_as_rare_category():
+    # Same contradiction as the outlier case above, but for rare_category:
+    # a low-cardinality PII-like column satisfies the "looks categorical"
+    # cardinality heuristic and, before the fix, would get its singleton
+    # value flagged as rare_category -- even though the message is
+    # separately masked, the suggestion firing at all on a PII column
+    # contradicts dictionary.py's treatment of the same column.
+    from rdh.typing_guards import is_pii_like_column
+
+    assert is_pii_like_column("phone") is True
+
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [{"participant_id": str(i), "phone": "5551234"} for i in range(8)] + [
+        {"participant_id": "8", "phone": "5559999"}  # would look "rare" if treated as categorical
+    ]
+    result = validate(rows, rules)
+    rare = [s for s in result["suggestions"] if s["rule"] == "rare_category" and s["column"] == "phone"]
     assert rare == []
 
 
