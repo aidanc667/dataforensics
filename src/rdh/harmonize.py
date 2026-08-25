@@ -31,3 +31,50 @@ def plan_transformations(rows: list[dict], rules: dict) -> list[dict]:
             )
 
     return plan
+
+
+def apply_transformations(rows: list[dict], rules: dict) -> tuple[list[dict], list[dict]]:
+    primary_key = rules["primary_key"]
+    missing_values = rules.get("missing_values", {})
+    category_mappings = rules.get("category_mappings", {})
+
+    transformed = []
+    mutations = []
+
+    for row in rows:
+        new_row = dict(row)
+        row_key = {k: row.get(k) for k in primary_key}
+
+        for column, sentinel_map in missing_values.items():
+            original = new_row.get(column)
+            new_value = classify_sentinel(original, sentinel_map)
+            if new_value is not None:
+                mutations.append(
+                    {
+                        "row_key": row_key,
+                        "column": column,
+                        "original_value": original,
+                        "new_value": new_value,
+                        "transformation_rule": f"missing_value_sentinel:{column}",
+                    }
+                )
+                new_row[column] = new_value
+
+        for column, mapping in category_mappings.items():
+            original = new_row.get(column)
+            if original in mapping:
+                new_value = mapping[original]
+                mutations.append(
+                    {
+                        "row_key": row_key,
+                        "column": column,
+                        "original_value": original,
+                        "new_value": new_value,
+                        "transformation_rule": f"category_mapping:{column}",
+                    }
+                )
+                new_row[column] = new_value
+
+        transformed.append(new_row)
+
+    return transformed, mutations

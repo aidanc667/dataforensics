@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import sys
 from pathlib import Path
@@ -7,7 +9,8 @@ import click
 from rdh import __version__
 from rdh.config_schema import RulesConfigError, load_rules
 from rdh.dictionary import build_data_dictionary, read_rows
-from rdh.harmonize import plan_transformations
+from rdh.harmonize import apply_transformations, plan_transformations
+from rdh.manifest import atomic_write, build_manifest
 from rdh.report import render_markdown
 from rdh.validation import validate
 
@@ -107,8 +110,26 @@ def _harmonize_single_file(file, rules_path, output, execute):
             click.echo("  (no transformations would be applied)")
         sys.exit(0)
 
-    click.echo("--execute not implemented yet", err=True)
-    sys.exit(3)
+    transformed_rows, mutations = apply_transformations(rows, rules)
+
+    if transformed_rows:
+        fieldnames = list(transformed_rows[0].keys())
+    else:
+        fieldnames = list(rows[0].keys()) if rows else []
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(transformed_rows)
+    atomic_write(output_path, buffer.getvalue())
+
+    manifest = build_manifest([file_path], [Path(rules_path)])
+    manifest["mutations"] = mutations
+    manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
+    atomic_write(manifest_path, json.dumps(manifest, indent=2))
+
+    click.echo(f"harmonize complete: wrote {output_path}, {len(mutations)} mutations logged")
+    sys.exit(0)
 
 
 @main.command()
