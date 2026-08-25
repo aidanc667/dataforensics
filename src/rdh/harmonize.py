@@ -18,15 +18,23 @@ class HarmonizeSafetyError(Exception):
     column check is unconditional wherever it applies. When callers pass
     ``input_columns`` AND ``input_row_count`` derived independently from
     the on-disk file (see ``assert_row_and_column_integrity``'s docstring
-    -- cli.py does this via ``cli._read_header_and_row_count``), both
-    the column check and the row check are independent of any single
-    upstream fix (e.g. duplicate-header detection in ingest.py) -- a future
-    regression anywhere in the transform pipeline, including inside the
-    initial file parse itself (e.g. strip_footer dropping a genuine data
-    line), is still caught here, before anything is written to disk. If a
+    -- cli.py does this via ``cli._read_header_and_row_count``), both the
+    column check and the row check are independent of a regression confined
+    to ``dictionary.py``'s own parse *composition* -- e.g. a duplicate-header
+    dict-collapse, or a mis-slice specific to how ``dictionary.py`` drives
+    ``ingest.strip_footer`` -- because cli.py's anchor is a separate call
+    path that never shares that composition. This independence does NOT
+    extend to a regression inside a primitive both paths call directly:
+    cli.py's anchor and ``dictionary.py``'s parse both call the very same
+    ``ingest.strip_footer`` (and ``detect_delimiter`` / ``detect_encoding``)
+    function -- two bindings of one function, not two independent
+    implementations -- so a bug inside ``strip_footer`` itself (e.g. its
+    field-count heuristic misclassifying and dropping a genuine data line)
+    corrupts both sides identically and would NOT be caught here. If a
     caller omits ``input_row_count`` (or ``input_columns``), that half of
     the check falls back to comparing against ``input_rows`` itself and
-    loses this independence -- see the parameter docs below."""
+    loses even the composition-level independence -- see the parameter docs
+    below."""
 
 
 def _column_union(rows: list[dict]) -> list[str]:
@@ -68,11 +76,18 @@ def assert_row_and_column_integrity(
     (e.g. cli.py, via ``cli._read_header_and_row_count``) should pass
     both explicitly -- otherwise this check only compares two views that
     were both already derived from the same upstream parse (e.g.
-    dictionary.read_rows), so a bug *inside* that parse (such as a
-    duplicate-header dict-collapse, or ``strip_footer`` dropping a genuine
-    data line) would corrupt both sides identically and this check would
-    pass trivially on already-corrupted data. Passing the independently
-    re-derived file header and row count closes that gap for both checks.
+    dictionary.read_rows), so a bug in that parse's *composition* (such as
+    a duplicate-header dict-collapse, or a mis-slice specific to how
+    dictionary.py drives ``strip_footer``) would corrupt both sides
+    identically and this check would pass trivially on already-corrupted
+    data. Passing the independently re-derived file header and row count
+    closes that composition-level gap for both checks -- but it does NOT
+    close a gap caused by a regression inside a primitive that both the
+    anchor and the parse call directly (``ingest.strip_footer``,
+    ``detect_delimiter``, ``detect_encoding``): those are shared bindings
+    of the same function, not independent implementations, so a bug inside
+    e.g. ``strip_footer`` itself would still corrupt the anchor and the
+    parse identically and would NOT be caught by this check.
 
     ``columns``:
       - "exact": output column *names* must exactly match input column names
