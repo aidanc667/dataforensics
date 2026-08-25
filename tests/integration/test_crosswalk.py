@@ -143,6 +143,44 @@ def test_crosswalk_colliding_source_stems_exit_2_before_any_write(tmp_path):
     assert not output_dir.exists() or list(output_dir.iterdir()) == []
 
 
+def test_crosswalk_duplicate_header_mid_loop_leaves_no_orphan_output(tmp_path):
+    # Reproduces the orphan-output scenario: source 1 is well-formed and
+    # would write cleanly; source 2 has a duplicate header. Under the old
+    # single-pass-with-writes-interleaved loop, source 1's
+    # wonder.harmonized.csv would already be on disk (with no accompanying
+    # manifest, since the manifest is only written after the whole loop
+    # succeeds) by the time source 2's DuplicateHeaderError aborted the run.
+    # After the two-pass restructure, every source's header is validated in
+    # pass 1 before any source is written in pass 3 -- so a problem with
+    # source 2 must leave NOTHING on disk, not just skip source 2.
+    wonder, wonder_rules, pums, pums_rules, crosswalk = _setup(tmp_path)
+    # Corrupt the second source (pums) with a duplicate header column.
+    pums.write_text("PUMA,AGEP,SEX,SEX\n0601,29,1,1\n0602,41,2,2\n")
+    output_dir = tmp_path / "harmonized"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "harmonize",
+            str(wonder),
+            str(pums),
+            "--rules-map",
+            f"{wonder}={wonder_rules},{pums}={pums_rules}",
+            "--crosswalk",
+            str(crosswalk),
+            "--output-dir",
+            str(output_dir),
+            "--execute",
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert "SEX" in result.output
+    # source 1 (wonder) must NOT have been written -- no orphan output file
+    # with no manifest.
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
 def test_crosswalk_missing_source_entry_exits_2(tmp_path):
     wonder, wonder_rules, pums, pums_rules, crosswalk = _setup(tmp_path)
     # crosswalk fixture from _setup only defines "wonder" and "pums" sources;

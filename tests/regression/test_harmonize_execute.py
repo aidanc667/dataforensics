@@ -152,6 +152,49 @@ def test_execute_refuses_to_write_if_a_column_is_silently_dropped(tmp_path, monk
     assert not output_path.exists()
 
 
+def test_safety_net_catches_regression_even_if_ingest_duplicate_header_guard_is_bypassed(
+    tmp_path, monkeypatch
+):
+    # Reproduces the exact scenario the safety net is meant to guard
+    # against: if the ingest-level duplicate-header guard
+    # (check_header_has_no_duplicates) were ever regressed/bypassed, a
+    # "pid,sex,sex" header would collapse to "pid,sex" during read_rows,
+    # silently destroying data. Before the fix, the row/column safety net
+    # only compared already-collapsed rows against themselves and passed
+    # trivially (exit 0, "harmonize complete", data destroyed). After the
+    # fix (anchoring to cli._read_header, re-derived independently from
+    # disk), the safety net must still catch this and refuse to write.
+    #
+    # check_header_has_no_duplicates is imported directly into both
+    # rdh.dictionary (used by read_rows) and rdh.cli (used by _read_header),
+    # so both local bindings must be patched to truly disable the guard
+    # everywhere, the way a real regression would.
+    import rdh.cli as cli_module
+    import rdh.dictionary as dictionary_module
+
+    monkeypatch.setattr(dictionary_module, "check_header_has_no_duplicates", lambda header: None)
+    monkeypatch.setattr(cli_module, "check_header_has_no_duplicates", lambda header: None)
+
+    src = tmp_path / "dup.csv"
+    src.write_text("pid,sex,sex\n1,M,F\n")
+    rules = tmp_path / "rules.yaml"
+    rules.write_text("version: 1\nprimary_key: [pid]\ncolumns: {}\n")
+    output_path = tmp_path / "out.csv"
+
+    result = CliRunner().invoke(
+        main,
+        ["harmonize", str(src), "--rules", str(rules), "--output", str(output_path), "--execute"],
+    )
+
+    assert result.exit_code == 3
+    assert not output_path.exists()
+    # Confirm it was the safety net that fired (HarmonizeSafetyError), not
+    # the (now-disabled) ingest-level DuplicateHeaderError path -- proving
+    # this is a genuine independent second layer of defense, not a restated
+    # pass because the ingest guard happened to still be active.
+    assert "Refusing to write output" in result.output
+
+
 def test_execute_on_header_only_csv_preserves_columns(tmp_path):
     src = tmp_path / "empty.csv"
     src.write_text("participant_id,smoking_status\n")

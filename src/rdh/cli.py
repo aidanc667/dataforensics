@@ -178,7 +178,17 @@ def _harmonize_single_file(file, rules_path, output, execute):
 
     try:
         assert_row_and_column_integrity(
-            rows, transformed_rows, context=f"harmonize {file_path.name}", columns="exact"
+            rows,
+            transformed_rows,
+            context=f"harmonize {file_path.name}",
+            columns="exact",
+            # Anchor to the header re-derived independently from disk, not
+            # rows[0].keys() -- the latter is already the *output* of
+            # read_rows, so a bug inside read_rows itself (e.g. a duplicate
+            # header silently dict-collapsing) would corrupt both sides of
+            # this comparison identically and this check would pass
+            # trivially on already-corrupted data.
+            input_columns=_read_header(file_path),
         )
     except HarmonizeSafetyError as exc:
         click.echo(f"Refusing to write output: {exc}", err=True)
@@ -254,29 +264,71 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
         click.echo(f"Invalid crosswalk file: {exc}", err=True)
         sys.exit(2)
 
-    all_mutations = []
-    schema_paths = []
+    file_paths = [Path(f) for f in files]
 
-    if execute:
-        output_dir_path.mkdir(parents=True, exist_ok=True)
-
-    for f in files:
-        file_path = Path(f)
+    # ---- Pass 1: validate everything that CAN be checked up front, across
+    # ALL sources, before any source's row data is read/transformed or any
+    # file is written. Without this, a per-source problem discovered mid-way
+    # through the old single loop (missing --rules-map entry, missing
+    # crosswalk `sources:` entry, duplicate header) would leave earlier
+    # sources' .harmonized.csv already on disk with no accompanying
+    # manifest -- an orphan output with no audit trail.
+    for file_path in file_paths:
         source_key = str(file_path)
         if source_key not in rules_map:
             click.echo(f"No --rules-map entry for {source_key}", err=True)
             sys.exit(2)
 
+    for file_path in file_paths:
+        source_name = file_path.stem
+        if source_name not in crosswalk.get("sources", {}):
+            click.echo(
+                f"No crosswalk entry for source '{source_name}' under 'sources:' in {crosswalk_path}",
+                err=True,
+            )
+            sys.exit(2)
+
+    loaded_rules: dict[str, dict] = {}
+    schema_paths = []
+    for file_path in file_paths:
+        source_key = str(file_path)
         try:
-            rules = load_rules(Path(rules_map[source_key]))
+            loaded_rules[source_key] = load_rules(Path(rules_map[source_key]))
         except RulesConfigError as exc:
             click.echo(f"Invalid rules file for {source_key}: {exc}", err=True)
             sys.exit(2)
         schema_paths.append(Path(rules_map[source_key]))
 
+    # Independently re-derived from disk (also re-validates "no duplicate
+    # header column" for every source up front) -- and reused below both to
+    # anchor each source's safety-net column check and as the header-only
+    # fieldnames fallback, so we don't re-read/re-parse the file twice.
+    file_headers: dict[str, list[str]] = {}
+    for file_path in file_paths:
+        try:
+            file_headers[str(file_path)] = _read_header(file_path)
+        except DuplicateHeaderError as exc:
+            click.echo(f"Malformed input file {file_path}: {exc}", err=True)
+            sys.exit(3)
+
+    # ---- Pass 2: compute every source's transformed + harmonized rows and
+    # run every safety-net check, still without writing anything. A
+    # HarmonizeSafetyError is the one failure mode here that's only
+    # discoverable during the actual transform (not front-loadable into pass
+    # 1) -- but it still fires before any source's output file is written,
+    # since writing only happens in pass 3 below.
+    all_mutations = []
+    computed = []  # (source_name, file_path, source_crosswalk, harmonized_rows, mutations)
+
+    for file_path in file_paths:
+        source_key = str(file_path)
+        rules = loaded_rules[source_key]
+
         try:
             rows = read_rows(file_path)
         except DuplicateHeaderError as exc:
+            # Defensive backstop only -- pass 1 already validated every
+            # source's header via _read_header above.
             click.echo(f"Malformed input file {file_path}: {exc}", err=True)
             sys.exit(3)
         transformed_rows, mutations = apply_transformations(rows, rules)
@@ -284,15 +336,16 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
 
         try:
             assert_row_and_column_integrity(
-                rows, transformed_rows, context=f"harmonize {file_path.name}", columns="exact"
+                rows,
+                transformed_rows,
+                context=f"harmonize {file_path.name}",
+                columns="exact",
+                input_columns=file_headers[source_key],
             )
         except HarmonizeSafetyError as exc:
             click.echo(f"Refusing to write output: {exc}", err=True)
             sys.exit(3)
 
-        if source_name not in crosswalk.get("sources", {}):
-            click.echo(f"No crosswalk entry for source '{source_name}' under 'sources:' in {crosswalk_path}", err=True)
-            sys.exit(2)
         source_crosswalk = crosswalk["sources"][source_name]
         harmonized_rows = apply_crosswalk(transformed_rows, source_crosswalk)
 
@@ -305,13 +358,21 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
             sys.exit(3)
 
         all_mutations.extend(mutations)
+        computed.append((source_name, file_path, source_crosswalk, harmonized_rows, mutations))
 
+    # ---- Pass 3: write. Every source has passed every check by this point,
+    # so if we write at all, we write every source -- no partial/orphaned
+    # output is possible.
+    if execute:
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    for source_name, file_path, source_crosswalk, harmonized_rows, mutations in computed:
         if execute:
             if harmonized_rows:
                 fieldnames = list(harmonized_rows[0].keys())
             else:
                 column_map = source_crosswalk.get("column_map", {})
-                fieldnames = [column_map.get(col, col) for col in _read_header(file_path)]
+                fieldnames = [column_map.get(col, col) for col in file_headers[str(file_path)]]
 
             out_path = output_dir_path / f"{source_name}.harmonized.csv"
             buffer = io.StringIO()
@@ -332,7 +393,7 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
     schema_paths.append(Path(crosswalk_path))
 
     if execute:
-        manifest = build_manifest([Path(f) for f in files], schema_paths)
+        manifest = build_manifest(file_paths, schema_paths)
         manifest["mutations"] = all_mutations
         atomic_write(output_dir_path / "crosswalk.manifest.json", json.dumps(manifest, indent=2))
         click.echo(

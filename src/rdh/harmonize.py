@@ -15,11 +15,32 @@ class HarmonizeSafetyError(Exception):
     silently deleted and columns are never silently dropped ... asserted
     after every run unless a rule explicitly removed something." No rule
     type in this codebase currently declares a column removal, so the
-    column check is unconditional wherever it applies. It exists
-    independently of any single upstream fix (e.g. duplicate-header
-    detection in ingest.py) so that a future regression anywhere in the
-    transform pipeline is still caught here, before anything is written to
-    disk."""
+    column check is unconditional wherever it applies. When callers pass
+    ``input_columns`` derived independently from the on-disk file (see
+    ``assert_row_and_column_integrity``'s docstring), this check is
+    independent of any single upstream fix (e.g. duplicate-header detection
+    in ingest.py) -- a future regression anywhere in the transform pipeline,
+    including inside the initial file parse itself, is still caught here,
+    before anything is written to disk."""
+
+
+def _column_union(rows: list[dict]) -> list[str]:
+    """Union of keys across every row, preserving first-seen order.
+
+    Checking only rows[0] misses per-row column drift -- e.g. one row
+    carries an extra '' key from a trailing-delimiter line while another
+    doesn't. That kind of drift would otherwise pass this check on row 0 and
+    only surface later as an uncaught csv.DictWriter ValueError, instead of
+    being caught cleanly here.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in seen:
+                seen.add(key)
+                ordered.append(key)
+    return ordered
 
 
 def assert_row_and_column_integrity(
@@ -28,12 +49,27 @@ def assert_row_and_column_integrity(
     *,
     context: str,
     columns: str = "exact",
+    input_columns: list[str] | None = None,
 ) -> None:
     """Assert output_rows has exactly as many rows as input_rows, and
     (depending on ``columns``) the same column structure.
 
+    ``input_columns``, when given, overrides the column set derived from
+    ``input_rows`` for the column-structure check (the row-count check
+    always uses ``input_rows``/``output_rows`` directly). Callers anchoring
+    this check to the actual on-disk file header (e.g. cli.py, via
+    ``_read_header``) should pass it explicitly -- otherwise this check only
+    compares two views that were both already derived from the same
+    upstream parse (e.g. dictionary.read_rows), so a bug *inside* that parse
+    (such as a duplicate-header dict-collapse) would corrupt both sides
+    identically and this check would pass trivially on already-corrupted
+    data. Passing the independently re-derived file header closes that gap.
+
     ``columns``:
-      - "exact": output column *names* must exactly match input column names.
+      - "exact": output column *names* must exactly match input column names
+        (as a multiset, not just as a set -- so a dropped duplicate name,
+        e.g. header ['pid', 'sex', 'sex'] collapsing to ['pid', 'sex'],
+        still trips this even though the *set* of names is unchanged).
         Correct for apply_transformations, which only substitutes values and
         never renames/adds/removes columns.
       - "count": only the output column *count* must match the input column
@@ -54,20 +90,23 @@ def assert_row_and_column_integrity(
     if columns == "skip" or not input_rows:
         return
 
-    input_columns = list(input_rows[0].keys())
-    output_columns = list(output_rows[0].keys()) if output_rows else []
+    resolved_input_columns = list(input_columns) if input_columns is not None else _column_union(input_rows)
+    output_columns = _column_union(output_rows)
 
     if columns == "exact":
-        if set(input_columns) != set(output_columns):
+        if len(resolved_input_columns) != len(output_columns) or set(resolved_input_columns) != set(
+            output_columns
+        ):
             raise HarmonizeSafetyError(
-                f"{context}: input columns {sorted(set(input_columns))} do not match "
-                f"output columns {sorted(set(output_columns))} -- columns must never be "
-                "silently dropped or added"
+                f"{context}: input columns {sorted(resolved_input_columns)} "
+                f"(count {len(resolved_input_columns)}) do not match output columns "
+                f"{sorted(output_columns)} (count {len(output_columns)}) -- columns must "
+                "never be silently dropped or added"
             )
     elif columns == "count":
-        if len(output_columns) != len(input_columns):
+        if len(output_columns) != len(resolved_input_columns):
             raise HarmonizeSafetyError(
-                f"{context}: {len(input_columns)} input column(s) became "
+                f"{context}: {len(resolved_input_columns)} input column(s) became "
                 f"{len(output_columns)} output column(s) -- columns must never be "
                 "silently dropped or merged"
             )
