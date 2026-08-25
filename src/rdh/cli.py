@@ -40,9 +40,12 @@ def _read_header_and_row_count(path: Path) -> tuple[list[str], int, int]:
     Returns ``(header, row_count, stripped_line_count)``. ``stripped_line_count``
     lets callers surface footer-stripping to the user (stderr warning, and
     optionally the manifest) instead of leaving it invisible -- strip_footer's
-    field-count heuristic is not CSV-quote-aware and can, in rare cases,
-    misclassify a genuine data row as a footer line (see strip_footer's
-    module-level docs in ingest.py).
+    field-count heuristic is not CSV-quote-aware, and once it detects a
+    field-count mismatch it treats EVERYTHING from that point to
+    end-of-file as footer, not just the mismatching line. A genuine data row
+    containing a quoted delimiter is a plausible trigger for this (not an
+    exotic one), and the result is a truncation of the rest of the file, not
+    a single dropped row (see strip_footer's module-level docs in ingest.py).
 
     Used as the safety-net anchor for both
     ``harmonize.assert_row_and_column_integrity``'s ``input_columns`` and
@@ -84,21 +87,32 @@ def _read_header_and_row_count(path: Path) -> tuple[list[str], int, int]:
     return header, len(data_lines) - 1, len(stripped)
 
 
-def _warn_if_footer_stripped(file_path: Path, stripped_count: int) -> None:
+def _warn_if_footer_stripped(file_path: Path, stripped_count: int, row_count: int = 0) -> None:
     """Print a stderr warning (never an error -- footer-stripping is often
-    correct and must not block a run) whenever strip_footer actually
-    discarded one or more lines from ``file_path``. strip_footer's
-    field-count heuristic is not CSV-quote-aware (see its module-level docs
-    in ingest.py), so a genuine data row containing a quoted delimiter can,
-    in rare cases, be misclassified as a footer line and end up in this
-    count -- surfacing the count lets a user notice and check, instead of
-    the drop staying silent."""
+    correct, e.g. a genuine CDC WONDER disclaimer block, and must not block
+    a run) whenever strip_footer actually discarded one or more lines from
+    ``file_path``. strip_footer's field-count heuristic is not
+    CSV-quote-aware (see its module-level docs in ingest.py): once it finds
+    a run of field-count mismatches, it treats EVERYTHING from that point to
+    end-of-file as footer, not just the mismatching line(s) -- so a genuine
+    data row containing a quoted delimiter can trigger a truncation of the
+    rest of the file, not a single dropped row. Surfacing the count (and
+    where it starts) lets a user notice and check, instead of the drop
+    staying silent.
+
+    ``row_count`` is the kept data-row count from the same
+    ``_read_header_and_row_count`` call that produced ``stripped_count`` --
+    used only to name the 1-indexed file line (header = line 1) at which
+    stripping began, so the message doesn't call dropped lines "trailing"
+    when they may be the middle/majority of the file."""
     if stripped_count:
+        start_line = row_count + 2
         click.echo(
-            f"Warning: {stripped_count} trailing line(s) in {file_path.name} were "
-            "classified as a footer/non-data block and excluded from parsing -- "
-            "review the input if this is unexpected (see README's Known Limitations: "
-            "footer detection is not CSV-quote-aware)",
+            f"Warning: {stripped_count} line(s) at and after line {start_line} in "
+            f"{file_path.name} were treated as a footer/non-data block and excluded from "
+            "parsing (this drops everything from the first detected mismatch to end-of-file, "
+            "not just one line) -- review the input if this is unexpected (see README's Known "
+            "Limitations: footer detection is not CSV-quote-aware)",
             err=True,
         )
 
@@ -132,10 +146,10 @@ def scan(file, rules_path, out_dir):
     # header; a DuplicateHeaderError here would be unexpected but is handled
     # defensively rather than left to crash uncaught.
     try:
-        _stripped_header, _stripped_row_count, stripped_count = _read_header_and_row_count(file_path)
+        _stripped_header, stripped_row_count, stripped_count = _read_header_and_row_count(file_path)
     except DuplicateHeaderError:
-        stripped_count = 0
-    _warn_if_footer_stripped(file_path, stripped_count)
+        stripped_row_count, stripped_count = 0, 0
+    _warn_if_footer_stripped(file_path, stripped_count, stripped_row_count)
 
     (out_dir_path / f"{stem}.data_dictionary.json").write_text(json.dumps(dictionary, indent=2))
     (out_dir_path / f"{stem}.data_dictionary.md").write_text(
@@ -230,16 +244,6 @@ def _harmonize_single_file(file, rules_path, output, execute):
         sys.exit(3)
     plan = plan_transformations(rows, rules)
 
-    if not execute:
-        click.echo(f"DRY RUN — no files written. Proposed transformations for {file_path.name}:")
-        for item in plan:
-            click.echo(f"  {item['rule']} -> {item['column']}: {item['rows_affected']} rows affected")
-        if not plan:
-            click.echo("  (no transformations would be applied)")
-        sys.exit(0)
-
-    transformed_rows, mutations = apply_transformations(rows, rules)
-
     # Anchor both the column check and the row-count check to a header/count
     # re-derived independently from disk, not to rows[0].keys()/len(rows) --
     # the latter are already the *output* of read_rows, so a bug inside
@@ -251,8 +255,26 @@ def _harmonize_single_file(file, rules_path, output, execute):
     # field-count heuristic misclassifying and dropping a genuine data line
     # as a footer line) would corrupt both sides identically too, and would
     # NOT be caught by this check.
+    #
+    # This read (and the footer-stripped warning it feeds) happens BEFORE
+    # the dry-run branch below, not after it, so that a plain `rdh harmonize`
+    # invocation (dry-run, the mode the README calls the "safe preview
+    # before committing") surfaces the warning too -- not just `--execute`.
+    # A dry run that silently hid rows being dropped by strip_footer would
+    # contradict the README's own description of dry-run as safe-to-trust
+    # preview.
     anchor_header, anchor_row_count, anchor_stripped_count = _read_header_and_row_count(file_path)
-    _warn_if_footer_stripped(file_path, anchor_stripped_count)
+    _warn_if_footer_stripped(file_path, anchor_stripped_count, anchor_row_count)
+
+    if not execute:
+        click.echo(f"DRY RUN — no files written. Proposed transformations for {file_path.name}:")
+        for item in plan:
+            click.echo(f"  {item['rule']} -> {item['column']}: {item['rows_affected']} rows affected")
+        if not plan:
+            click.echo("  (no transformations would be applied)")
+        sys.exit(0)
+
+    transformed_rows, mutations = apply_transformations(rows, rules)
 
     try:
         assert_row_and_column_integrity(
@@ -391,7 +413,9 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
         except DuplicateHeaderError as exc:
             click.echo(f"Malformed input file {file_path}: {exc}", err=True)
             sys.exit(3)
-        _warn_if_footer_stripped(file_path, file_stripped_counts[str(file_path)])
+        _warn_if_footer_stripped(
+            file_path, file_stripped_counts[str(file_path)], file_row_counts[str(file_path)]
+        )
 
     # ---- Pass 2: compute every source's transformed + harmonized rows and
     # run every safety-net check, still without writing anything. A
