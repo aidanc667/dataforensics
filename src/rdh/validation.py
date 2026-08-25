@@ -108,7 +108,6 @@ def validate(rows: list[dict], rules: dict) -> dict:
                 break
 
         if is_numeric:
-            checks_evaluated += 1
             outliers = dictionary.detect_outliers(numeric_values)
             for idx in outliers["outlier_indices"]:
                 raw_value, row_key = values_with_keys[idx]
@@ -134,7 +133,6 @@ def validate(rows: list[dict], rules: dict) -> dict:
         looks_categorical = unique_count > 1 and unique_count < (non_null_count / 2)
 
         if looks_categorical:
-            checks_evaluated += 1
             for raw_value, row_key in values_with_keys:
                 if value_counts[raw_value] == 1:
                     suggestions.append(

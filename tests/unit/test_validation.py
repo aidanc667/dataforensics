@@ -120,3 +120,23 @@ def test_id_shaped_column_not_flagged_as_rare_category():
     result = validate(rows, rules)
     rare = [s for s in result["suggestions"] if s["rule"] == "rare_category"]
     assert rare == []
+
+
+def test_composite_primary_key_duplicate_detection():
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id", "visit_date"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [
+        {"participant_id": "1", "visit_date": "2024-01-01", "age": "40"},
+        {"participant_id": "1", "visit_date": "2024-06-01", "age": "41"},  # same participant, different visit -> NOT a duplicate
+        {"participant_id": "1", "visit_date": "2024-01-01", "age": "99"},  # exact same (participant_id, visit_date) -> IS a duplicate
+    ]
+    result = validate(rows, rules)
+    dup_errors = [e for e in result["errors"] if e["rule"] == "duplicate_primary_key"]
+    assert len(dup_errors) == 1
+    assert dup_errors[0]["row_key"] == {"participant_id": "1", "visit_date": "2024-01-01"}
