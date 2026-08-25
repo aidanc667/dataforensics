@@ -1,7 +1,7 @@
 from itertools import zip_longest
 from pathlib import Path
 
-from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
+from rdh.ingest import check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
 from rdh.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
 
 # Never claim "PII-safe" or "HIPAA-compliant" here — the honest phrasing is
@@ -41,6 +41,7 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False) -> dict
     if not data_lines:
         return {}
     header = data_lines[0].split(delimiter)
+    check_header_has_no_duplicates(header)
     body_rows = [line.split(delimiter) for line in data_lines[1:]]
     n_rows = len(body_rows)
 
@@ -138,6 +139,7 @@ def read_rows(path: Path) -> list[dict]:
     if not data_lines:
         return []
     header = data_lines[0].split(delimiter)
+    check_header_has_no_duplicates(header)
     return [dict(zip_longest(header, line.split(delimiter), fillvalue="")) for line in data_lines[1:]]
 
 

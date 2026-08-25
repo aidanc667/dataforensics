@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from rdh.dictionary import build_data_dictionary, read_rows
+from rdh.ingest import DuplicateHeaderError
 
 
 def test_dictionary_basic_fields(tmp_path):
@@ -83,3 +86,20 @@ def test_read_rows_empty_file_returns_empty_list(tmp_path):
     f = tmp_path / "empty.csv"
     f.write_text("")
     assert read_rows(f) == []
+
+
+def test_read_rows_duplicate_header_raises_instead_of_silently_dropping_data(tmp_path):
+    # header "pid,sex,sex" with values "1,M,F": without duplicate-header
+    # detection, dict(zip_longest(...)) collapses both "sex" columns into
+    # one key and the "M" value is silently lost with no error, exit 0.
+    f = tmp_path / "dup.csv"
+    f.write_text("pid,sex,sex\n1,M,F\n")
+    with pytest.raises(DuplicateHeaderError, match="sex"):
+        read_rows(f)
+
+
+def test_build_data_dictionary_duplicate_header_raises(tmp_path):
+    f = tmp_path / "dup.csv"
+    f.write_text("pid,sex,sex\n1,M,F\n")
+    with pytest.raises(DuplicateHeaderError, match="sex"):
+        build_data_dictionary(f)

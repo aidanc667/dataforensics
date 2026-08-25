@@ -6,6 +6,34 @@ _CANDIDATE_DELIMITERS = [",", "\t", ";", "|"]
 _FOOTER_MISMATCH_RUN = 2
 
 
+class DuplicateHeaderError(Exception):
+    """Raised when a CSV header row contains the same column name more than
+    once. Every header-parsing site in this codebase (build_data_dictionary,
+    read_rows, and cli._read_header) shares this check via
+    check_header_has_no_duplicates -- without it, dict-based row/column
+    construction (dict(zip(...)), {name: [] for name in header}) silently
+    collapses same-named columns, and earlier-occurring columns' data is
+    lost with no error and exit 0. This is a malformed-input-file condition,
+    not a config problem; callers should map it to a runtime/IO failure
+    (exit code 3), not a config error (exit code 2)."""
+
+
+def check_header_has_no_duplicates(header: list[str]) -> None:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for name in header:
+        if name in seen and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        names = ", ".join(f"'{d}'" for d in duplicates)
+        raise DuplicateHeaderError(
+            f"Duplicate column name(s) in header: {names} — every same-named "
+            "column after the first would silently lose its data if this were "
+            "allowed to proceed"
+        )
+
+
 def detect_encoding(path: Path) -> str:
     result = from_path(str(path)).best()
     if result is None:
