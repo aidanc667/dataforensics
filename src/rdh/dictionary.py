@@ -2,7 +2,12 @@ from itertools import zip_longest
 from pathlib import Path
 
 from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
-from rdh.typing_guards import is_id_like_column, preserves_leading_zero
+from rdh.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
+
+# Never claim "PII-safe" or "HIPAA-compliant" here — the honest phrasing is
+# "potential identifier pattern detected," which is a naming-convention
+# heuristic, not a guarantee about the actual contents of the column.
+_PII_MASK_MESSAGE = "[masked: potential identifier pattern detected]"
 
 # Absolute floor on the cardinality cap. A pure "5% of N" cap collapses to 0
 # or 1 for small samples (e.g. N=4 rows -> int(0.05*4) == 0), which would
@@ -31,7 +36,7 @@ def _cardinality_cap(n_rows: int) -> int:
     return min(_CARDINALITY_MAX, max(_CARDINALITY_FLOOR, ratio_cap))
 
 
-def build_data_dictionary(path: Path) -> dict:
+def build_data_dictionary(path: Path, include_raw_samples: bool = False) -> dict:
     data_lines, delimiter = _read_cleaned_lines(path)
     if not data_lines:
         return {}
@@ -61,6 +66,8 @@ def build_data_dictionary(path: Path) -> dict:
         zero_count = sum(1 for v in non_null_values if v == "0")
 
         id_like = is_id_like_column(name) or preserves_leading_zero(non_null_values)
+        pii_like = is_pii_like_column(name)
+        mask_pii = pii_like and not include_raw_samples
 
         if id_like:
             category = "id"
@@ -73,7 +80,14 @@ def build_data_dictionary(path: Path) -> dict:
             levels = None
 
         numeric_values = []
-        if category != "id":
+        # Skip numeric parsing for masked PII-like columns too: outliers and
+        # top_code_spike below carry an actual raw value from the column
+        # (the max value / the flagged indices' underlying magnitude), which
+        # would leak a real identifier value (e.g. a recurring MRN) around
+        # the masking done just below. When include_raw_samples=True the
+        # column behaves exactly like any other, so numeric detection still
+        # runs.
+        if category != "id" and not mask_pii:
             for v in non_null_values:
                 try:
                     numeric_values.append(float(v))
@@ -83,6 +97,9 @@ def build_data_dictionary(path: Path) -> dict:
 
         outliers = detect_outliers(numeric_values) if numeric_values else None
         top_code_spike = detect_top_code_spike(numeric_values) if numeric_values else None
+
+        if mask_pii:
+            levels = _PII_MASK_MESSAGE
 
         result[name] = {
             "dtype": "Utf8",
