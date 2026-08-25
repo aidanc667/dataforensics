@@ -3,6 +3,7 @@ from pathlib import Path
 from charset_normalizer import from_path
 
 _CANDIDATE_DELIMITERS = [",", "\t", ";", "|"]
+_FOOTER_MISMATCH_RUN = 2
 
 
 def detect_encoding(path: Path) -> str:
@@ -36,3 +37,26 @@ def detect_delimiter(sample_lines: list[str]) -> str:
             best_score = score
             best_delim = delim
     return best_delim
+
+
+def strip_footer(lines: list[str], delimiter: str) -> tuple[list[str], list[str]]:
+    if not lines:
+        return [], []
+
+    header_fields = lines[0].count(delimiter) + 1
+    mismatch_start = None
+    run_length = 0
+
+    for i in range(1, len(lines)):
+        fields = lines[i].count(delimiter) + 1
+        if fields != header_fields:
+            run_length += 1
+            if run_length >= _FOOTER_MISMATCH_RUN:
+                mismatch_start = i - _FOOTER_MISMATCH_RUN + 1
+                break
+        else:
+            run_length = 0
+
+    if mismatch_start is None:
+        return lines, []
+    return lines[:mismatch_start], lines[mismatch_start:]
