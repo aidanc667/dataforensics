@@ -95,6 +95,22 @@ The design spec's non-goals list permits exactly one exception: a thin, read-onl
 over JSON the CLI already produces (no write path, no new engine logic). That viewer is now built
 — see "Viewer (optional)" above.
 
+## Known limitations
+
+**Footer detection is not CSV-quote-aware.** `strip_footer` (used by every parse path — `scan`,
+`harmonize`, and the crosswalk mode) decides whether a trailing line is a footer by counting
+delimiter characters on the raw line (`line.count(delimiter)`), not by running a real CSV-quoting
+parser. A genuine data row containing a quoted delimiter — e.g. a comma-delimited file with a value
+like `"Delta Clinic, North"` — has a higher raw comma count than the header and can, in rare cases,
+be misclassified as a footer line and silently excluded from parsing. Properly fixing this would
+mean rewriting the parser to be CSV-quote-aware (e.g. using Python's `csv` module instead of
+hand-rolled `.split(delimiter)`), which is a larger change than this tool currently makes. As a
+mitigation, `scan` and `harmonize` both print a stderr warning naming how many lines were stripped
+whenever `strip_footer` actually discards anything, and `harmonize --execute` also records the
+count in `*.manifest.json`'s `stripped_footer_lines` field — so a misclassification like this is
+never silent, even though it isn't automatically prevented. If you see this warning unexpectedly,
+check the input file for a data row with a quoted delimiter near the point where stripping started.
+
 ## Project status
 
 The core engine — ingest, data dictionary, three-tier validation, single-file harmonize, and

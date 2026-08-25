@@ -9,7 +9,7 @@ _FOOTER_MISMATCH_RUN = 2
 class DuplicateHeaderError(Exception):
     """Raised when a CSV header row contains the same column name more than
     once. Every header-parsing site in this codebase (build_data_dictionary,
-    read_rows, and cli._read_header) shares this check via
+    read_rows, and cli._read_header_and_row_count) shares this check via
     check_header_has_no_duplicates -- without it, dict-based row/column
     construction (dict(zip(...)), {name: [] for name in header}) silently
     collapses same-named columns, and earlier-occurring columns' data is
@@ -68,6 +68,23 @@ def detect_delimiter(sample_lines: list[str]) -> str:
 
 
 def strip_footer(lines: list[str], delimiter: str) -> tuple[list[str], list[str]]:
+    """Split ``lines`` into (data_lines, stripped_lines) by looking for a run
+    of consecutive lines whose delimiter-count disagrees with the header's
+    (e.g. a CDC WONDER-style "Query Parameters:" footer block).
+
+    Known limitation: this field-count heuristic uses ``line.count(delimiter)``
+    on the raw line, which is NOT CSV-quote-aware -- there is no real CSV
+    dialect parser here (e.g. Python's ``csv`` module), just a hand-rolled
+    split-by-delimiter count. A genuine data row containing a quoted
+    delimiter (e.g. a comma-delimited file with a value like
+    ``"Delta Clinic, North"``) has a higher raw delimiter count than the
+    header and can, in rare cases, be misclassified as a footer line and
+    silently dropped. Properly fixing this would mean rewriting the parser
+    to be CSV-quote-aware, which is a larger architectural change; callers
+    should instead surface ``stripped_lines`` to the user (see
+    ``cli._warn_if_footer_stripped``) rather than discarding it silently, so
+    a misclassification like this is at least visible instead of silent.
+    """
     if not lines:
         return [], []
 

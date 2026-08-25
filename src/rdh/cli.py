@@ -31,11 +31,18 @@ _REPORT_TITLES = {
 }
 
 
-def _read_header_and_row_count(path: Path) -> tuple[list[str], int]:
-    """Read the header row and the on-disk data-row count directly from the
-    input file, via cli.py's own re-implementation of the parse
-    (detect_encoding / detect_delimiter / strip_footer), independent of
-    ``dictionary.read_rows``.
+def _read_header_and_row_count(path: Path) -> tuple[list[str], int, int]:
+    """Read the header row, the on-disk data-row count, and the number of
+    lines ``strip_footer`` stripped, directly from the input file, via
+    cli.py's own re-implementation of the parse (detect_encoding /
+    detect_delimiter / strip_footer), independent of ``dictionary.read_rows``.
+
+    Returns ``(header, row_count, stripped_line_count)``. ``stripped_line_count``
+    lets callers surface footer-stripping to the user (stderr warning, and
+    optionally the manifest) instead of leaving it invisible -- strip_footer's
+    field-count heuristic is not CSV-quote-aware and can, in rare cases,
+    misclassify a genuine data row as a footer line (see strip_footer's
+    module-level docs in ingest.py).
 
     Used as the safety-net anchor for both
     ``harmonize.assert_row_and_column_integrity``'s ``input_columns`` and
@@ -49,32 +56,51 @@ def _read_header_and_row_count(path: Path) -> tuple[list[str], int]:
     Deliberately re-implemented here rather than calling into
     ``dictionary.py`` (e.g. its private ``_read_cleaned_lines``): if this
     anchor shared dictionary.py's own parse call, a regression introduced
-    inside that shared path (e.g. ``read_rows`` mis-slicing its data lines,
-    or a bug specific to how dictionary.py drives ``strip_footer``) could
-    corrupt both this anchor and ``read_rows``'s output identically, and
-    the safety net would again pass trivially on already-corrupted data --
-    exactly the failure mode this anchor exists to close. Keeping this as
-    cli.py's own separate call path means a regression confined to
-    dictionary.py's parsing does not automatically propagate into the
-    anchor too.
+    inside that shared path's *composition* (e.g. ``read_rows`` mis-slicing
+    its data lines, or a bug specific to how dictionary.py drives
+    ``strip_footer``) could corrupt both this anchor and ``read_rows``'s
+    output identically, and the safety net would again pass trivially on
+    already-corrupted data. Keeping this as cli.py's own separate call path
+    means a regression confined to dictionary.py's parsing composition does
+    not automatically propagate into the anchor too.
+
+    This independence is bounded, though: this function calls the exact
+    same ``ingest.strip_footer`` / ``detect_delimiter`` / ``detect_encoding``
+    functions that ``dictionary.py`` calls -- two bindings of one function
+    each, not two independent implementations -- so a regression inside one
+    of those shared primitives themselves (e.g. ``strip_footer``'s
+    field-count heuristic misclassifying and dropping a genuine data line)
+    corrupts this anchor and ``read_rows``'s output identically, and would
+    NOT be caught by the safety net this anchor feeds.
     """
     encoding = detect_encoding(path)
     raw_lines = path.read_text(encoding=encoding).splitlines()
     delimiter = detect_delimiter(raw_lines[:10])
-    data_lines, _stripped = strip_footer(raw_lines, delimiter)
+    data_lines, stripped = strip_footer(raw_lines, delimiter)
     if not data_lines:
-        return [], 0
+        return [], 0, len(stripped)
     header = data_lines[0].split(delimiter)
     check_header_has_no_duplicates(header)
-    return header, len(data_lines) - 1
+    return header, len(data_lines) - 1, len(stripped)
 
 
-def _read_header(path: Path) -> list[str]:
-    """Header-only convenience wrapper around ``_read_header_and_row_count``
-    for call sites that don't need the row count (e.g. the header-only
-    fieldnames fallback)."""
-    header, _row_count = _read_header_and_row_count(path)
-    return header
+def _warn_if_footer_stripped(file_path: Path, stripped_count: int) -> None:
+    """Print a stderr warning (never an error -- footer-stripping is often
+    correct and must not block a run) whenever strip_footer actually
+    discarded one or more lines from ``file_path``. strip_footer's
+    field-count heuristic is not CSV-quote-aware (see its module-level docs
+    in ingest.py), so a genuine data row containing a quoted delimiter can,
+    in rare cases, be misclassified as a footer line and end up in this
+    count -- surfacing the count lets a user notice and check, instead of
+    the drop staying silent."""
+    if stripped_count:
+        click.echo(
+            f"Warning: {stripped_count} trailing line(s) in {file_path.name} were "
+            "classified as a footer/non-data block and excluded from parsing -- "
+            "review the input if this is unexpected (see README's Known Limitations: "
+            "footer detection is not CSV-quote-aware)",
+            err=True,
+        )
 
 
 @click.group()
@@ -99,6 +125,18 @@ def scan(file, rules_path, out_dir):
     except DuplicateHeaderError as exc:
         click.echo(f"Malformed input file {file_path}: {exc}", err=True)
         sys.exit(3)
+
+    # Surface footer-stripping instead of leaving it invisible -- the
+    # duplicate-header check has already succeeded above, so this re-parse
+    # is only to learn the stripped-line count, not to re-validate the
+    # header; a DuplicateHeaderError here would be unexpected but is handled
+    # defensively rather than left to crash uncaught.
+    try:
+        _stripped_header, _stripped_row_count, stripped_count = _read_header_and_row_count(file_path)
+    except DuplicateHeaderError:
+        stripped_count = 0
+    _warn_if_footer_stripped(file_path, stripped_count)
+
     (out_dir_path / f"{stem}.data_dictionary.json").write_text(json.dumps(dictionary, indent=2))
     (out_dir_path / f"{stem}.data_dictionary.md").write_text(
         render_markdown(f"Data Dictionary: {file_path.name}", dictionary)
@@ -205,12 +243,16 @@ def _harmonize_single_file(file, rules_path, output, execute):
     # Anchor both the column check and the row-count check to a header/count
     # re-derived independently from disk, not to rows[0].keys()/len(rows) --
     # the latter are already the *output* of read_rows, so a bug inside
-    # read_rows's own parsing (e.g. a duplicate header silently
-    # dict-collapsing, or strip_footer misclassifying a genuine data line as
-    # a footer line and dropping it) would corrupt both sides of this
-    # comparison identically and the check would pass trivially on
-    # already-corrupted data.
-    anchor_header, anchor_row_count = _read_header_and_row_count(file_path)
+    # read_rows's own parse *composition* (e.g. a duplicate header silently
+    # dict-collapsing) would corrupt both sides of this comparison
+    # identically and the check would pass trivially on already-corrupted
+    # data. NOTE: this anchor and read_rows both call the same
+    # ingest.strip_footer -- a bug inside strip_footer itself (e.g. its
+    # field-count heuristic misclassifying and dropping a genuine data line
+    # as a footer line) would corrupt both sides identically too, and would
+    # NOT be caught by this check.
+    anchor_header, anchor_row_count, anchor_stripped_count = _read_header_and_row_count(file_path)
+    _warn_if_footer_stripped(file_path, anchor_stripped_count)
 
     try:
         assert_row_and_column_integrity(
@@ -238,6 +280,7 @@ def _harmonize_single_file(file, rules_path, output, execute):
 
     manifest = build_manifest([file_path], [Path(rules_path)])
     manifest["mutations"] = mutations
+    manifest["stripped_footer_lines"] = anchor_stripped_count
     manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
     atomic_write(manifest_path, json.dumps(manifest, indent=2))
 
@@ -337,14 +380,18 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
     # twice.
     file_headers: dict[str, list[str]] = {}
     file_row_counts: dict[str, int] = {}
+    file_stripped_counts: dict[str, int] = {}
     for file_path in file_paths:
         try:
-            file_headers[str(file_path)], file_row_counts[str(file_path)] = _read_header_and_row_count(
-                file_path
-            )
+            (
+                file_headers[str(file_path)],
+                file_row_counts[str(file_path)],
+                file_stripped_counts[str(file_path)],
+            ) = _read_header_and_row_count(file_path)
         except DuplicateHeaderError as exc:
             click.echo(f"Malformed input file {file_path}: {exc}", err=True)
             sys.exit(3)
+        _warn_if_footer_stripped(file_path, file_stripped_counts[str(file_path)])
 
     # ---- Pass 2: compute every source's transformed + harmonized rows and
     # run every safety-net check, still without writing anything. A
@@ -363,7 +410,7 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
             rows = read_rows(file_path)
         except DuplicateHeaderError as exc:
             # Defensive backstop only -- pass 1 already validated every
-            # source's header via _read_header above.
+            # source's header via _read_header_and_row_count above.
             click.echo(f"Malformed input file {file_path}: {exc}", err=True)
             sys.exit(3)
         transformed_rows, mutations = apply_transformations(rows, rules)
@@ -431,6 +478,9 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
     if execute:
         manifest = build_manifest(file_paths, schema_paths)
         manifest["mutations"] = all_mutations
+        manifest["stripped_footer_lines"] = {
+            file_path.stem: file_stripped_counts[str(file_path)] for file_path in file_paths
+        }
         atomic_write(output_dir_path / "crosswalk.manifest.json", json.dumps(manifest, indent=2))
         click.echo(
             f"crosswalk harmonize complete: {len(files)} sources written to "

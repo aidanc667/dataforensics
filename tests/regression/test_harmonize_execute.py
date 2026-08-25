@@ -162,13 +162,14 @@ def test_safety_net_catches_regression_even_if_ingest_duplicate_header_guard_is_
     # silently destroying data. Before the fix, the row/column safety net
     # only compared already-collapsed rows against themselves and passed
     # trivially (exit 0, "harmonize complete", data destroyed). After the
-    # fix (anchoring to cli._read_header, re-derived independently from
-    # disk), the safety net must still catch this and refuse to write.
+    # fix (anchoring to cli._read_header_and_row_count, re-derived
+    # independently from disk), the safety net must still catch this and
+    # refuse to write.
     #
     # check_header_has_no_duplicates is imported directly into both
-    # rdh.dictionary (used by read_rows) and rdh.cli (used by _read_header),
-    # so both local bindings must be patched to truly disable the guard
-    # everywhere, the way a real regression would.
+    # rdh.dictionary (used by read_rows) and rdh.cli (used by
+    # _read_header_and_row_count), so both local bindings must be patched to
+    # truly disable the guard everywhere, the way a real regression would.
     import rdh.cli as cli_module
     import rdh.dictionary as dictionary_module
 
@@ -196,15 +197,24 @@ def test_safety_net_catches_regression_even_if_ingest_duplicate_header_guard_is_
 
 
 def test_execute_refuses_when_parse_stage_silently_drops_a_real_data_row(tmp_path, monkeypatch):
-    # Reproduces the exact blocking scenario from the final review round: a
-    # regression *inside the initial file parse itself* (e.g. strip_footer
-    # misclassifying a genuine trailing data line as a footer line and
-    # dropping it) must still be caught by the row-count safety net, even
-    # though both `rows` (read_rows's output) and `transformed_rows`
-    # (apply_transformations's output) are derived from that same
-    # already-shrunk parse and would silently agree with each other --
-    # before the fix, this went completely undetected (4 real rows became
-    # 3 in the output, exit 0, "harmonize complete").
+    # Reproduces a regression confined to dictionary.py's parse
+    # *composition* -- NOT a regression inside ingest.strip_footer itself.
+    # This test monkeypatches dictionary.py's *local binding* of
+    # strip_footer to simulate a bug specific to how dictionary.py drives
+    # that function (its own mis-slicing on top of a correct strip_footer
+    # result), while cli.py's `_read_header_and_row_count` keeps calling the
+    # real, unpatched `ingest.strip_footer` through its own separate binding
+    # -- so this demonstrates the anchor catching a composition-level drop,
+    # not a drop caused by strip_footer's own logic. (If the *real*
+    # ingest.strip_footer itself dropped a genuine data line -- e.g. its
+    # field-count heuristic misclassifying it as a footer line -- cli.py's
+    # anchor calls that exact same function and would be corrupted
+    # identically; that failure mode is NOT covered by this safety net, and
+    # is NOT what this test demonstrates.)
+    #
+    # Before the fix that introduced this anchor, even this narrower,
+    # composition-confined drop went completely undetected (4 real rows
+    # became 3 in the output, exit 0, "harmonize complete").
     #
     # dictionary.py imports strip_footer directly (`from rdh.ingest import
     # ... strip_footer`), so patching only that module's local binding
@@ -243,6 +253,57 @@ def test_execute_refuses_when_parse_stage_silently_drops_a_real_data_row(tmp_pat
     assert result.exit_code == 3
     assert not output_path.exists()
     assert "Refusing to write output" in result.output
+
+
+def test_execute_warns_on_stderr_and_records_manifest_when_footer_stripped(tmp_path):
+    # strip_footer's field-count heuristic is not CSV-quote-aware: two
+    # consecutive genuine data rows containing a quoted delimiter raise the
+    # raw comma count above the header's and get misclassified as a footer
+    # block. This is a known, documented limitation (see README's "Known
+    # limitations") -- this test isn't asserting the misclassification is
+    # prevented (it isn't), only that it's surfaced instead of silent: a
+    # stderr warning, and a stripped_footer_lines count in the manifest.
+    src = tmp_path / "clinics.csv"
+    src.write_text(
+        "participant_id,site\n"
+        "1,Bob\n"
+        '2,"Delta Clinic, North"\n'
+        '3,"Acme Labs, South"\n'
+    )
+    rules_path = tmp_path / "rules.yaml"
+    rules_path.write_text("version: 1\nprimary_key: [participant_id]\ncolumns: {}\n")
+    output_path = tmp_path / "out.csv"
+
+    result = CliRunner().invoke(
+        main,
+        ["harmonize", str(src), "--rules", str(rules_path), "--output", str(output_path), "--execute"],
+    )
+
+    assert result.exit_code == 0
+    assert "Warning" in result.output
+    assert "2" in result.output  # 2 lines stripped
+    assert "clinics.csv" in result.output
+
+    manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stripped_footer_lines"] == 2
+
+
+def test_execute_no_warning_or_stripped_count_when_nothing_stripped(tmp_path):
+    src, rules_path = _write_input_and_rules(tmp_path)
+    output_path = tmp_path / "out.csv"
+
+    result = CliRunner().invoke(
+        main,
+        ["harmonize", str(src), "--rules", str(rules_path), "--output", str(output_path), "--execute"],
+    )
+
+    assert result.exit_code == 0
+    assert "Warning" not in result.output
+
+    manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stripped_footer_lines"] == 0
 
 
 def test_execute_on_header_only_csv_preserves_columns(tmp_path):
