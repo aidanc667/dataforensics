@@ -13,6 +13,8 @@ _CARDINALITY_FLOOR = 10
 _CARDINALITY_MAX = 50
 _CARDINALITY_RATIO = 0.05
 
+_TOP_CODE_SPIKE_THRESHOLD = 0.05
+
 
 def _read_cleaned_lines(path: Path) -> tuple[list[str], str]:
     encoding = detect_encoding(path)
@@ -68,6 +70,18 @@ def build_data_dictionary(path: Path) -> dict:
             category = "free_text"
             levels = None
 
+        numeric_values = []
+        if category != "id":
+            for v in non_null_values:
+                try:
+                    numeric_values.append(float(v))
+                except ValueError:
+                    numeric_values = []
+                    break
+
+        outliers = detect_outliers(numeric_values) if numeric_values else None
+        top_code_spike = detect_top_code_spike(numeric_values) if numeric_values else None
+
         result[name] = {
             "dtype": "Utf8",
             "category": category,
@@ -77,6 +91,34 @@ def build_data_dictionary(path: Path) -> dict:
             "zero_count": zero_count,
             "null_count": null_count,
             "levels": levels,
+            "outliers": outliers,
+            "top_code_spike": top_code_spike,
         }
 
     return result
+
+
+def detect_outliers(values: list[float]) -> dict:
+    if len(values) < 4:
+        return {"method": "IQR", "outlier_count": 0, "outlier_indices": []}
+
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    q1 = sorted_vals[(n - 1) // 4]
+    q3 = sorted_vals[(3 * (n - 1)) // 4]
+    iqr = q3 - q1
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
+
+    indices = [i for i, v in enumerate(values) if v < lower or v > upper]
+    return {"method": "IQR", "outlier_count": len(indices), "outlier_indices": indices}
+
+
+def detect_top_code_spike(values: list[float]) -> dict | None:
+    if not values:
+        return None
+    max_val = max(values)
+    fraction = sum(1 for v in values if v == max_val) / len(values)
+    if fraction >= _TOP_CODE_SPIKE_THRESHOLD and fraction > 1 / len(values):
+        return {"value": max_val, "fraction": round(fraction, 4)}
+    return None
