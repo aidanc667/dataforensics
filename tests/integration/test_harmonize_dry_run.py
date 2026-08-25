@@ -1,7 +1,7 @@
 from click.testing import CliRunner
 
-from datadiligence.cli import main
-from datadiligence.hashing import sha256_file
+from dataforensics.cli import main
+from dataforensics.hashing import sha256_file
 
 
 def _write_rules(tmp_path):

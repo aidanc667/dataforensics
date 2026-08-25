@@ -1,5 +1,5 @@
 [project]
-name = "datadiligence"
+name = "dataforensics"
 version = "0.1.0"
 description = "Auditable profiling, validation, and rules-driven harmonization for messy research tabular exports."
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ dev = ["pytest>=8.0"]
 viewer = ["streamlit>=1.30"]
 
 [project.scripts]
-datadiligence = "datadiligence.cli:main"
+dataforensics = "dataforensics.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

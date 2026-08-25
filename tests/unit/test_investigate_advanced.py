@@ -1,4 +1,4 @@
-from datadiligence.investigate import (
+from dataforensics.investigate import (
     check_referential_integrity,
     compare_fingerprints,
     compute_dataset_fingerprint,

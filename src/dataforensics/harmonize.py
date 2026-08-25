@@ -1,4 +1,4 @@
-from datadiligence.typing_guards import classify_sentinel, is_pii_like_column
+from dataforensics.typing_guards import classify_sentinel, is_pii_like_column
 
 # Same placeholder used by validation.py's _display_value and dictionary.py's
 # _PII_MASK_MESSAGE, kept identical across all three masking sites for

@@ -1,8 +1,8 @@
 import re
 from datetime import datetime
 
-from datadiligence import dictionary
-from datadiligence.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
+from dataforensics import dictionary
+from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")

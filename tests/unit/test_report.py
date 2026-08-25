@@ -1,4 +1,4 @@
-from datadiligence.report import render_html, render_markdown
+from dataforensics.report import render_html, render_markdown
 
 
 def test_render_markdown_includes_column_names_and_values():

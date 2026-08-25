@@ -1,5 +1,5 @@
-from datadiligence.dictionary import build_data_dictionary
-from datadiligence.typing_guards import is_pii_like_column
+from dataforensics.dictionary import build_data_dictionary
+from dataforensics.typing_guards import is_pii_like_column
 
 
 # --- is_pii_like_column: true positives -------------------------------------

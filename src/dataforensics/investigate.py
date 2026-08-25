@@ -22,7 +22,7 @@ import json
 import re
 from itertools import combinations
 
-from datadiligence.validation import is_ambiguous_date
+from dataforensics.validation import is_ambiguous_date
 
 _COMMON_SENTINEL_STRINGS = {
     "-99", "-9", "99", "999", "9999",
@@ -198,7 +198,7 @@ def infer_semantic_role(column_name: str, dictionary_entry: dict) -> dict | None
 # a fingerprint to disk itself; the caller (e.g. the app) offers the
 # current fingerprint as a download and accepts a previous one as an
 # upload to compare against. That keeps this tool exactly as stateless
-# as the rest of datadiligence (no server-side history, no cross-session storage,
+# as the rest of dataforensics (no server-side history, no cross-session storage,
 # no risk of one dataset's structure leaking into another session).
 # --------------------------------------------------------------------- #
 

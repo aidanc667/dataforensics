@@ -1,6 +1,6 @@
 import pytest
 
-from datadiligence.harmonize import HarmonizeSafetyError, assert_row_and_column_integrity
+from dataforensics.harmonize import HarmonizeSafetyError, assert_row_and_column_integrity
 
 
 def test_row_count_mismatch_raises():
@@ -127,7 +127,7 @@ def test_input_row_count_override_passes_when_output_matches_true_count():
 
 
 def test_column_union_detects_drift_missed_by_row_zero_alone():
-    from datadiligence.harmonize import column_union
+    from dataforensics.harmonize import column_union
 
     # row 0 has no "" key; row 1 does (e.g. a ragged/trailing-delimiter row) --
     # checking only rows[0] would miss this, exactly the bug this exists to catch.
@@ -136,13 +136,13 @@ def test_column_union_detects_drift_missed_by_row_zero_alone():
 
 
 def test_column_union_preserves_first_seen_order():
-    from datadiligence.harmonize import column_union
+    from dataforensics.harmonize import column_union
 
     rows = [{"b": "1", "a": "2"}, {"c": "3"}]
     assert column_union(rows) == ["b", "a", "c"]
 
 
 def test_column_union_empty_rows():
-    from datadiligence.harmonize import column_union
+    from dataforensics.harmonize import column_union
 
     assert column_union([]) == []

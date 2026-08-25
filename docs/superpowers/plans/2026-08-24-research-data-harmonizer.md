@@ -1,14 +1,14 @@
-# DataDiligence (datadiligence) Implementation Plan
+# DataForensics (dataforensics) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `datadiligence`, a Python CLI/package that profiles, validates, and (only via explicit rules) transforms messy research tabular exports — with zero silent mutation, a full audit manifest, and a genuine cross-dataset harmonization demo (CDC WONDER + ACS PUMS onto a shared schema).
+**Goal:** Build `dataforensics`, a Python CLI/package that profiles, validates, and (only via explicit rules) transforms messy research tabular exports — with zero silent mutation, a full audit manifest, and a genuine cross-dataset harmonization demo (CDC WONDER + ACS PUMS onto a shared schema).
 
-**Architecture:** A `src/datadiligence/` package with clearly separated concerns — `ingest` (encoding/dialect/footer), `typing_guards` (ID/FIPS/sentinel), `dictionary` (profiling), `validation` (three-tier engine), `harmonize` (rules-driven transform + crosswalk), `manifest` (versioning/hashing/atomic writes), `report` (JSON→Markdown), `config_schema` (rules YAML validation) — wired together by a thin `cli.py`. Built phase-by-phase so `datadiligence scan` works and is tested before `datadiligence harmonize` exists, and single-file `harmonize` works and is tested before the crosswalk path exists.
+**Architecture:** A `src/dataforensics/` package with clearly separated concerns — `ingest` (encoding/dialect/footer), `typing_guards` (ID/FIPS/sentinel), `dictionary` (profiling), `validation` (three-tier engine), `harmonize` (rules-driven transform + crosswalk), `manifest` (versioning/hashing/atomic writes), `report` (JSON→Markdown), `config_schema` (rules YAML validation) — wired together by a thin `cli.py`. Built phase-by-phase so `dataforensics scan` works and is tested before `dataforensics harmonize` exists, and single-file `harmonize` works and is tested before the crosswalk path exists.
 
 **Tech Stack:** Python 3.11+, Polars (lazy scan), Click (CLI), PyYAML, charset-normalizer (encoding detection), rapidfuzz (fuzzy category-merge suggestions), pytest.
 
-**Full spec:** `/Users/aidan/Desktop/data-diligence/MASTER_PROMPT.md` — read it before starting; this plan implements it task-by-task and does not restate every rationale.
+**Full spec:** `/Users/aidan/Desktop/data-forensics/MASTER_PROMPT.md` — read it before starting; this plan implements it task-by-task and does not restate every rationale.
 
 ## Global Constraints
 
@@ -27,12 +27,12 @@
 ## File Structure
 
 ```
-DataDiligence/
+DataForensics/
 ├── pyproject.toml
 ├── .gitignore
 ├── README.md                      # Task 18
 ├── WRITEUP.md                     # Task 17
-├── src/datadiligence/
+├── src/dataforensics/
 │   ├── __init__.py                # Task 1
 │   ├── cli.py                     # Tasks 1, 8, 11, 13, 14, 15
 │   ├── hashing.py                 # Task 2
@@ -70,20 +70,20 @@ DataDiligence/
 **Files:**
 - Create: `pyproject.toml`
 - Create: `.gitignore`
-- Create: `src/datadiligence/__init__.py`
-- Create: `src/datadiligence/cli.py`
+- Create: `src/dataforensics/__init__.py`
+- Create: `src/dataforensics/cli.py`
 - Test: `tests/unit/test_cli_stub.py`
 - Create: `.github/workflows/ci.yml`
 
 **Interfaces:**
-- Produces: `datadiligence.cli.main` (Click group), console-script entry `datadiligence`. Later tasks add real subcommand bodies in place of the stubs here.
+- Produces: `dataforensics.cli.main` (Click group), console-script entry `dataforensics`. Later tasks add real subcommand bodies in place of the stubs here.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/unit/test_cli_stub.py
 from click.testing import CliRunner
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 
 def test_help_lists_subcommands():
@@ -103,13 +103,13 @@ def test_scan_stub_exits_3():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_cli_stub.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics'`
 
 - [ ] **Step 3: Write pyproject.toml**
 
 ```toml
 [project]
-name = "DataDiligence"
+name = "DataForensics"
 version = "0.1.0"
 description = "Auditable profiling, validation, and rules-driven harmonization for messy research tabular exports."
 requires-python = ">=3.11"
@@ -125,7 +125,7 @@ dependencies = [
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-datadiligence = "datadiligence.cli:main"
+dataforensics = "dataforensics.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -150,26 +150,26 @@ data/cleaned/*
 !data/cleaned/.gitkeep
 ```
 
-- [ ] **Step 5: Write src/datadiligence/__init__.py**
+- [ ] **Step 5: Write src/dataforensics/__init__.py**
 
 ```python
 __version__ = "0.1.0"
 ```
 
-- [ ] **Step 6: Write src/datadiligence/cli.py**
+- [ ] **Step 6: Write src/dataforensics/cli.py**
 
 ```python
 import sys
 
 import click
 
-from datadiligence import __version__
+from dataforensics import __version__
 
 
 @click.group()
 @click.version_option(__version__)
 def main():
-    """datadiligence — auditable research-data profiling, validation, and harmonization."""
+    """dataforensics — auditable research-data profiling, validation, and harmonization."""
 
 
 @main.command()
@@ -229,7 +229,7 @@ jobs:
 - [ ] **Step 9: Commit**
 
 ```bash
-git add pyproject.toml .gitignore src/datadiligence/__init__.py src/datadiligence/cli.py tests/unit/test_cli_stub.py .github/workflows/ci.yml
+git add pyproject.toml .gitignore src/dataforensics/__init__.py src/dataforensics/cli.py tests/unit/test_cli_stub.py .github/workflows/ci.yml
 git commit -m "feat: package skeleton, CLI stubs, CI"
 ```
 
@@ -238,7 +238,7 @@ git commit -m "feat: package skeleton, CLI stubs, CI"
 ### Task 2: SHA-256 hashing utility
 
 **Files:**
-- Create: `src/datadiligence/hashing.py`
+- Create: `src/dataforensics/hashing.py`
 - Test: `tests/unit/test_hashing.py`
 
 **Interfaces:**
@@ -251,7 +251,7 @@ git commit -m "feat: package skeleton, CLI stubs, CI"
 import hashlib
 from pathlib import Path
 
-from datadiligence.hashing import sha256_file
+from dataforensics.hashing import sha256_file
 
 
 def test_sha256_file_matches_stdlib(tmp_path):
@@ -273,12 +273,12 @@ def test_sha256_file_handles_large_content(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_hashing.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.hashing'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.hashing'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/hashing.py
+# src/dataforensics/hashing.py
 import hashlib
 from pathlib import Path
 
@@ -301,7 +301,7 @@ Expected: PASS (2 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/datadiligence/hashing.py tests/unit/test_hashing.py
+git add src/dataforensics/hashing.py tests/unit/test_hashing.py
 git commit -m "feat: SHA-256 file hashing utility"
 ```
 
@@ -310,7 +310,7 @@ git commit -m "feat: SHA-256 file hashing utility"
 ### Task 3: Encoding and delimiter detection
 
 **Files:**
-- Create: `src/datadiligence/ingest.py`
+- Create: `src/dataforensics/ingest.py`
 - Test: `tests/unit/test_ingest_detection.py`
 
 **Interfaces:**
@@ -320,7 +320,7 @@ git commit -m "feat: SHA-256 file hashing utility"
 
 ```python
 # tests/unit/test_ingest_detection.py
-from datadiligence.ingest import detect_delimiter, detect_encoding
+from dataforensics.ingest import detect_delimiter, detect_encoding
 
 
 def test_detect_delimiter_comma():
@@ -353,12 +353,12 @@ def test_detect_encoding_latin1(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_ingest_detection.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.ingest'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.ingest'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/ingest.py
+# src/dataforensics/ingest.py
 from pathlib import Path
 
 from charset_normalizer import from_path
@@ -400,7 +400,7 @@ Expected: PASS (5 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/datadiligence/ingest.py tests/unit/test_ingest_detection.py
+git add src/dataforensics/ingest.py tests/unit/test_ingest_detection.py
 git commit -m "feat: encoding and delimiter detection"
 ```
 
@@ -409,7 +409,7 @@ git commit -m "feat: encoding and delimiter detection"
 ### Task 4: Footer/disclaimer stripping
 
 **Files:**
-- Modify: `src/datadiligence/ingest.py`
+- Modify: `src/dataforensics/ingest.py`
 - Test: `tests/unit/test_footer_stripping.py`
 
 **Interfaces:**
@@ -420,7 +420,7 @@ git commit -m "feat: encoding and delimiter detection"
 
 ```python
 # tests/unit/test_footer_stripping.py
-from datadiligence.ingest import strip_footer
+from dataforensics.ingest import strip_footer
 
 
 def test_strips_wonder_style_footer():
@@ -460,7 +460,7 @@ Expected: FAIL with `ImportError: cannot import name 'strip_footer'`
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/ingest.py (append)
+# src/dataforensics/ingest.py (append)
 _FOOTER_MISMATCH_RUN = 2
 
 
@@ -495,7 +495,7 @@ Expected: PASS (3 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/datadiligence/ingest.py tests/unit/test_footer_stripping.py
+git add src/dataforensics/ingest.py tests/unit/test_footer_stripping.py
 git commit -m "feat: footer/disclaimer stripping via sustained field-count mismatch"
 ```
 
@@ -504,7 +504,7 @@ git commit -m "feat: footer/disclaimer stripping via sustained field-count misma
 ### Task 5: ID/FIPS/ZIP typing guard and sentinel classification
 
 **Files:**
-- Create: `src/datadiligence/typing_guards.py`
+- Create: `src/dataforensics/typing_guards.py`
 - Test: `tests/unit/test_typing_guards.py`
 
 **Interfaces:**
@@ -514,7 +514,7 @@ git commit -m "feat: footer/disclaimer stripping via sustained field-count misma
 
 ```python
 # tests/unit/test_typing_guards.py
-from datadiligence.typing_guards import (
+from dataforensics.typing_guards import (
     classify_sentinel,
     is_id_like_column,
     preserves_leading_zero,
@@ -552,12 +552,12 @@ def test_classify_sentinel_none_for_ordinary_value():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_typing_guards.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.typing_guards'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.typing_guards'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/typing_guards.py
+# src/dataforensics/typing_guards.py
 import re
 
 _ID_LIKE_PATTERN = re.compile(r"(^|_)(id|fips|geoid|zip)(_|$)", re.IGNORECASE)
@@ -587,7 +587,7 @@ Expected: PASS (5 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/datadiligence/typing_guards.py tests/unit/test_typing_guards.py
+git add src/dataforensics/typing_guards.py tests/unit/test_typing_guards.py
 git commit -m "feat: ID/FIPS/ZIP typing guard and sentinel classification"
 ```
 
@@ -596,7 +596,7 @@ git commit -m "feat: ID/FIPS/ZIP typing guard and sentinel classification"
 ### Task 6: Data dictionary generation
 
 **Files:**
-- Create: `src/datadiligence/dictionary.py`
+- Create: `src/dataforensics/dictionary.py`
 - Test: `tests/unit/test_dictionary.py`
 
 **Interfaces:**
@@ -609,7 +609,7 @@ git commit -m "feat: ID/FIPS/ZIP typing guard and sentinel classification"
 # tests/unit/test_dictionary.py
 from pathlib import Path
 
-from datadiligence.dictionary import build_data_dictionary
+from dataforensics.dictionary import build_data_dictionary
 
 
 def test_dictionary_basic_fields(tmp_path):
@@ -660,18 +660,18 @@ def test_dictionary_high_cardinality_is_free_text(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_dictionary.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.dictionary'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.dictionary'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/dictionary.py
+# src/dataforensics/dictionary.py
 from pathlib import Path
 
 import polars as pl
 
-from datadiligence.ingest import detect_delimiter, detect_encoding, strip_footer
-from datadiligence.typing_guards import is_id_like_column, preserves_leading_zero
+from dataforensics.ingest import detect_delimiter, detect_encoding, strip_footer
+from dataforensics.typing_guards import is_id_like_column, preserves_leading_zero
 
 
 def _read_cleaned_lines(path: Path) -> tuple[list[str], str]:
@@ -740,7 +740,7 @@ Expected: PASS (4 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/datadiligence/dictionary.py tests/unit/test_dictionary.py
+git add src/dataforensics/dictionary.py tests/unit/test_dictionary.py
 git commit -m "feat: data dictionary generation (dtype, missingness, cardinality, zero-variance)"
 ```
 
@@ -749,7 +749,7 @@ git commit -m "feat: data dictionary generation (dtype, missingness, cardinality
 ### Task 7: Top-code spike and IQR outlier detection (Suggestion-tier only)
 
 **Files:**
-- Modify: `src/datadiligence/dictionary.py`
+- Modify: `src/dataforensics/dictionary.py`
 - Test: `tests/unit/test_outlier_detection.py`
 
 **Interfaces:**
@@ -759,7 +759,7 @@ git commit -m "feat: data dictionary generation (dtype, missingness, cardinality
 
 ```python
 # tests/unit/test_outlier_detection.py
-from datadiligence.dictionary import detect_outliers, detect_top_code_spike
+from dataforensics.dictionary import detect_outliers, detect_top_code_spike
 
 
 def test_iqr_outlier_detection_flags_extreme_value():
@@ -798,7 +798,7 @@ Expected: FAIL with `ImportError: cannot import name 'detect_outliers'`
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/dictionary.py (append)
+# src/dataforensics/dictionary.py (append)
 _TOP_CODE_SPIKE_THRESHOLD = 0.05
 
 
@@ -836,7 +836,7 @@ Expected: PASS (4 tests)
 - [ ] **Step 5: Wire into build_data_dictionary for numeric-looking columns**
 
 ```python
-# src/datadiligence/dictionary.py — inside build_data_dictionary, after computing `levels`, before building result[name]:
+# src/dataforensics/dictionary.py — inside build_data_dictionary, after computing `levels`, before building result[name]:
         numeric_values = []
         if category != "id":
             for v in non_null_values:
@@ -860,7 +860,7 @@ Expected: PASS (8 tests)
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/datadiligence/dictionary.py tests/unit/test_outlier_detection.py
+git add src/dataforensics/dictionary.py tests/unit/test_outlier_detection.py
 git commit -m "feat: IQR outlier and top-code spike detection, wired into data dictionary"
 ```
 
@@ -869,8 +869,8 @@ git commit -m "feat: IQR outlier and top-code spike detection, wired into data d
 ### Task 8: `report.py` rendering and real `scan` CLI wiring
 
 **Files:**
-- Create: `src/datadiligence/report.py`
-- Modify: `src/datadiligence/cli.py`
+- Create: `src/dataforensics/report.py`
+- Modify: `src/dataforensics/cli.py`
 - Test: `tests/unit/test_report.py`
 - Test: `tests/integration/test_scan_command.py`
 
@@ -882,7 +882,7 @@ git commit -m "feat: IQR outlier and top-code spike detection, wired into data d
 
 ```python
 # tests/unit/test_report.py
-from datadiligence.report import render_markdown
+from dataforensics.report import render_markdown
 
 
 def test_render_markdown_includes_column_names_and_values():
@@ -896,12 +896,12 @@ def test_render_markdown_includes_column_names_and_values():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_report.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.report'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.report'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/report.py
+# src/dataforensics/report.py
 def render_markdown(title: str, data: dict) -> str:
     lines = [f"# {title}", ""]
     for column, fields in data.items():
@@ -926,8 +926,8 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from datadiligence.cli import main
-from datadiligence.hashing import sha256_file
+from dataforensics.cli import main
+from dataforensics.hashing import sha256_file
 
 
 def test_scan_writes_dictionary_and_never_modifies_input(tmp_path):
@@ -957,12 +957,12 @@ Expected: FAIL — `scan` still prints "not implemented" and exits 3, or `--out-
 - [ ] **Step 7: Update cli.py's scan command**
 
 ```python
-# src/datadiligence/cli.py — replace the scan command body
+# src/dataforensics/cli.py — replace the scan command body
 import json
 from pathlib import Path
 
-from datadiligence.dictionary import build_data_dictionary
-from datadiligence.report import render_markdown
+from dataforensics.dictionary import build_data_dictionary
+from dataforensics.report import render_markdown
 
 
 @main.command()
@@ -1000,7 +1000,7 @@ Expected: PASS, all prior tests still green
 - [ ] **Step 10: Commit**
 
 ```bash
-git add src/datadiligence/report.py src/datadiligence/cli.py tests/unit/test_report.py tests/integration/test_scan_command.py
+git add src/dataforensics/report.py src/dataforensics/cli.py tests/unit/test_report.py tests/integration/test_scan_command.py
 git commit -m "feat: Markdown report rendering, wire scan to emit a real data dictionary"
 ```
 
@@ -1009,7 +1009,7 @@ git commit -m "feat: Markdown report rendering, wire scan to emit a real data di
 ### Task 9: Rules YAML schema and validation-on-load
 
 **Files:**
-- Create: `src/datadiligence/config_schema.py`
+- Create: `src/dataforensics/config_schema.py`
 - Test: `tests/unit/test_config_schema.py`
 
 **Interfaces:**
@@ -1021,7 +1021,7 @@ git commit -m "feat: Markdown report rendering, wire scan to emit a real data di
 # tests/unit/test_config_schema.py
 import pytest
 
-from datadiligence.config_schema import RulesConfigError, load_rules
+from dataforensics.config_schema import RulesConfigError, load_rules
 
 
 def test_load_valid_rules(tmp_path):
@@ -1074,12 +1074,12 @@ def test_load_rules_defaults_missing_optional_sections(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_config_schema.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.config_schema'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.config_schema'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/config_schema.py
+# src/dataforensics/config_schema.py
 from pathlib import Path
 
 import yaml
@@ -1122,7 +1122,7 @@ Expected: PASS (5 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/datadiligence/config_schema.py tests/unit/test_config_schema.py
+git add src/dataforensics/config_schema.py tests/unit/test_config_schema.py
 git commit -m "feat: rules YAML schema validation-on-load"
 ```
 
@@ -1131,7 +1131,7 @@ git commit -m "feat: rules YAML schema validation-on-load"
 ### Task 10: Three-tier validation engine
 
 **Files:**
-- Create: `src/datadiligence/validation.py`
+- Create: `src/dataforensics/validation.py`
 - Test: `tests/unit/test_validation.py`
 
 **Interfaces:**
@@ -1142,7 +1142,7 @@ git commit -m "feat: rules YAML schema validation-on-load"
 
 ```python
 # tests/unit/test_validation.py
-from datadiligence.validation import validate
+from dataforensics.validation import validate
 
 
 _RULES = {
@@ -1213,12 +1213,12 @@ def test_column_with_no_rule_is_not_evaluated():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_validation.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.validation'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.validation'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/validation.py
+# src/dataforensics/validation.py
 def _row_key(row: dict, primary_key: list[str]) -> dict:
     return {k: row.get(k) for k in primary_key}
 
@@ -1308,7 +1308,7 @@ Expected: PASS (6 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/datadiligence/validation.py tests/unit/test_validation.py
+git add src/dataforensics/validation.py tests/unit/test_validation.py
 git commit -m "feat: three-tier validation engine (error/warning/suggestion, NOT EVALUATED accounting)"
 ```
 
@@ -1317,8 +1317,8 @@ git commit -m "feat: three-tier validation engine (error/warning/suggestion, NOT
 ### Task 11: Wire validation report into `scan`; false-positive regression tests
 
 **Files:**
-- Modify: `src/datadiligence/cli.py`
-- Modify: `src/datadiligence/dictionary.py` (add a CSV-row-reading helper reused by validation)
+- Modify: `src/dataforensics/cli.py`
+- Modify: `src/dataforensics/dictionary.py` (add a CSV-row-reading helper reused by validation)
 - Test: `tests/integration/test_scan_validation_report.py`
 
 **Interfaces:**
@@ -1333,7 +1333,7 @@ import json
 
 from click.testing import CliRunner
 
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 
 def _write_rules(tmp_path):
@@ -1399,7 +1399,7 @@ Expected: FAIL — `scan` doesn't use `--rules` yet, always exits 0, no validati
 - [ ] **Step 3: Add a shared row-reading helper**
 
 ```python
-# src/datadiligence/dictionary.py (append)
+# src/dataforensics/dictionary.py (append)
 def read_rows(path: Path) -> list[dict]:
     data_lines, delimiter = _read_cleaned_lines(path)
     header = data_lines[0].split(delimiter)
@@ -1409,11 +1409,11 @@ def read_rows(path: Path) -> list[dict]:
 - [ ] **Step 4: Update cli.py's scan command**
 
 ```python
-# src/datadiligence/cli.py — replace the scan command body again
-from datadiligence.config_schema import RulesConfigError, load_rules
-from datadiligence.dictionary import build_data_dictionary, read_rows
-from datadiligence.report import render_markdown
-from datadiligence.validation import validate
+# src/dataforensics/cli.py — replace the scan command body again
+from dataforensics.config_schema import RulesConfigError, load_rules
+from dataforensics.dictionary import build_data_dictionary, read_rows
+from dataforensics.report import render_markdown
+from dataforensics.validation import validate
 
 
 @main.command()
@@ -1471,7 +1471,7 @@ Expected: PASS, all tests green
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/datadiligence/cli.py src/datadiligence/dictionary.py tests/integration/test_scan_validation_report.py
+git add src/dataforensics/cli.py src/dataforensics/dictionary.py tests/integration/test_scan_validation_report.py
 git commit -m "feat: wire three-tier validation report into scan; malformed rules exit 2"
 ```
 
@@ -1480,7 +1480,7 @@ git commit -m "feat: wire three-tier validation report into scan; malformed rule
 ### Task 12: Manifest module — versioning, hashing, atomic writes
 
 **Files:**
-- Create: `src/datadiligence/manifest.py`
+- Create: `src/dataforensics/manifest.py`
 - Test: `tests/unit/test_manifest.py`
 
 **Interfaces:**
@@ -1494,7 +1494,7 @@ git commit -m "feat: wire three-tier validation report into scan; malformed rule
 import os
 from pathlib import Path
 
-from datadiligence.manifest import atomic_write, build_manifest
+from dataforensics.manifest import atomic_write, build_manifest
 
 
 def test_build_manifest_has_required_fields(tmp_path):
@@ -1542,12 +1542,12 @@ def test_atomic_write_leaves_no_temp_file_behind(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_manifest.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.manifest'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.manifest'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/manifest.py
+# src/dataforensics/manifest.py
 import os
 import platform
 import sys
@@ -1557,8 +1557,8 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from datadiligence import __version__
-from datadiligence.hashing import sha256_file
+from dataforensics import __version__
+from dataforensics.hashing import sha256_file
 
 _DIRECT_DEPENDENCIES = ["polars", "click", "pyyaml", "charset-normalizer", "rapidfuzz"]
 
@@ -1610,7 +1610,7 @@ Expected: PASS (4 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/datadiligence/manifest.py tests/unit/test_manifest.py
+git add src/dataforensics/manifest.py tests/unit/test_manifest.py
 git commit -m "feat: manifest versioning/hashing envelope and atomic writes"
 ```
 
@@ -1619,8 +1619,8 @@ git commit -m "feat: manifest versioning/hashing envelope and atomic writes"
 ### Task 13: `harmonize` single-file — dry run
 
 **Files:**
-- Create: `src/datadiligence/harmonize.py`
-- Modify: `src/datadiligence/cli.py`
+- Create: `src/dataforensics/harmonize.py`
+- Modify: `src/dataforensics/cli.py`
 - Test: `tests/integration/test_harmonize_dry_run.py`
 
 **Interfaces:**
@@ -1633,8 +1633,8 @@ git commit -m "feat: manifest versioning/hashing envelope and atomic writes"
 # tests/integration/test_harmonize_dry_run.py
 from click.testing import CliRunner
 
-from datadiligence.cli import main
-from datadiligence.hashing import sha256_file
+from dataforensics.cli import main
+from dataforensics.hashing import sha256_file
 
 
 def _write_rules(tmp_path):
@@ -1688,7 +1688,7 @@ Expected: FAIL — `harmonize` still prints "not implemented" and exits 3
 - [ ] **Step 3: Write harmonize.py's planning function**
 
 ```python
-# src/datadiligence/harmonize.py
+# src/dataforensics/harmonize.py
 def plan_transformations(rows: list[dict], rules: dict) -> list[dict]:
     plan = []
     missing_values = rules.get("missing_values", {})
@@ -1722,8 +1722,8 @@ def plan_transformations(rows: list[dict], rules: dict) -> list[dict]:
 - [ ] **Step 4: Update cli.py's harmonize command (single-file branch only)**
 
 ```python
-# src/datadiligence/cli.py — replace the harmonize command body
-from datadiligence.harmonize import plan_transformations
+# src/dataforensics/cli.py — replace the harmonize command body
+from dataforensics.harmonize import plan_transformations
 
 
 @main.command()
@@ -1790,7 +1790,7 @@ Expected: PASS, all tests green
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/datadiligence/harmonize.py src/datadiligence/cli.py tests/integration/test_harmonize_dry_run.py
+git add src/dataforensics/harmonize.py src/dataforensics/cli.py tests/integration/test_harmonize_dry_run.py
 git commit -m "feat: harmonize dry-run for single-file case; refuse output==input"
 ```
 
@@ -1799,8 +1799,8 @@ git commit -m "feat: harmonize dry-run for single-file case; refuse output==inpu
 ### Task 14: `harmonize --execute` — apply rules, write manifest, prove idempotency
 
 **Files:**
-- Modify: `src/datadiligence/harmonize.py`
-- Modify: `src/datadiligence/cli.py`
+- Modify: `src/dataforensics/harmonize.py`
+- Modify: `src/dataforensics/cli.py`
 - Test: `tests/regression/test_harmonize_execute.py`
 
 **Interfaces:**
@@ -1816,8 +1816,8 @@ import json
 
 from click.testing import CliRunner
 
-from datadiligence.cli import main
-from datadiligence.hashing import sha256_file
+from dataforensics.cli import main
+from dataforensics.hashing import sha256_file
 
 
 def _write_input_and_rules(tmp_path):
@@ -1902,7 +1902,7 @@ Expected: FAIL — `--execute` still prints "not implemented" and exits 3
 - [ ] **Step 3: Write harmonize.py's apply function**
 
 ```python
-# src/datadiligence/harmonize.py (append)
+# src/dataforensics/harmonize.py (append)
 def apply_transformations(rows: list[dict], rules: dict) -> tuple[list[dict], list[dict]]:
     primary_key = rules["primary_key"]
     missing_values = rules.get("missing_values", {})
@@ -1953,12 +1953,12 @@ def apply_transformations(rows: list[dict], rules: dict) -> tuple[list[dict], li
 - [ ] **Step 4: Wire --execute in cli.py**
 
 ```python
-# src/datadiligence/cli.py — replace the "--execute not implemented yet" branch in _harmonize_single_file
+# src/dataforensics/cli.py — replace the "--execute not implemented yet" branch in _harmonize_single_file
 import csv
 import io
 
-from datadiligence.harmonize import apply_transformations
-from datadiligence.manifest import atomic_write, build_manifest
+from dataforensics.harmonize import apply_transformations
+from dataforensics.manifest import atomic_write, build_manifest
 
 
 def _harmonize_single_file(file, rules_path, output, execute):
@@ -1998,7 +1998,7 @@ Expected: PASS, all tests green
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/datadiligence/harmonize.py src/datadiligence/cli.py tests/regression/test_harmonize_execute.py
+git add src/dataforensics/harmonize.py src/dataforensics/cli.py tests/regression/test_harmonize_execute.py
 git commit -m "feat: harmonize --execute applies rules, writes atomic output + manifest, idempotent"
 ```
 
@@ -2007,8 +2007,8 @@ git commit -m "feat: harmonize --execute applies rules, writes atomic output + m
 ### Task 15: Cross-dataset crosswalk harmonization
 
 **Files:**
-- Modify: `src/datadiligence/harmonize.py`
-- Modify: `src/datadiligence/cli.py`
+- Modify: `src/dataforensics/harmonize.py`
+- Modify: `src/dataforensics/cli.py`
 - Test: `tests/integration/test_crosswalk.py`
 
 **Interfaces:**
@@ -2023,7 +2023,7 @@ import json
 
 from click.testing import CliRunner
 
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 
 def _setup(tmp_path):
@@ -2115,7 +2115,7 @@ Expected: FAIL — multi-file branch still exits 3 with "not implemented yet"
 - [ ] **Step 3: Write harmonize.py's crosswalk function**
 
 ```python
-# src/datadiligence/harmonize.py (append)
+# src/dataforensics/harmonize.py (append)
 def apply_crosswalk(rows: list[dict], source_crosswalk: dict) -> list[dict]:
     column_map = source_crosswalk.get("column_map", {})
     value_map = source_crosswalk.get("value_map", {})
@@ -2135,10 +2135,10 @@ def apply_crosswalk(rows: list[dict], source_crosswalk: dict) -> list[dict]:
 - [ ] **Step 4: Wire the multi-file branch in cli.py**
 
 ```python
-# src/datadiligence/cli.py — replace the multi-file branch in harmonize()
+# src/dataforensics/cli.py — replace the multi-file branch in harmonize()
 import yaml
 
-from datadiligence.harmonize import apply_crosswalk
+from dataforensics.harmonize import apply_crosswalk
 
 
 def _parse_rules_map(rules_map_str: str) -> dict:
@@ -2244,7 +2244,7 @@ Expected: PASS, all tests green
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/datadiligence/harmonize.py src/datadiligence/cli.py tests/integration/test_crosswalk.py
+git add src/dataforensics/harmonize.py src/dataforensics/cli.py tests/integration/test_crosswalk.py
 git commit -m "feat: cross-dataset crosswalk harmonization, one output table per source, never merged"
 ```
 
@@ -2269,7 +2269,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures"
 
@@ -2418,9 +2418,9 @@ Fill in `schemas/wonder_pums_crosswalk.yaml` following the same shape as `tests/
 - [ ] **Step 6: Run scan on all three real sources**
 
 ```bash
-datadiligence scan data/raw/cdc_wonder_export.tsv --rules schemas/cdc_wonder_rules.yaml --out-dir data/standardized
-datadiligence scan data/raw/acs_pums_extract.csv --rules schemas/acs_pums_rules.yaml --out-dir data/standardized
-datadiligence scan data/raw/openneuro_participants.tsv --out-dir data/standardized
+dataforensics scan data/raw/cdc_wonder_export.tsv --rules schemas/cdc_wonder_rules.yaml --out-dir data/standardized
+dataforensics scan data/raw/acs_pums_extract.csv --rules schemas/acs_pums_rules.yaml --out-dir data/standardized
+dataforensics scan data/raw/openneuro_participants.tsv --out-dir data/standardized
 ```
 
 Fix whatever breaks — footer-stripping thresholds, delimiter detection, or rule bounds may need adjustment against the real files. This is expected; that's the point of running real data.
@@ -2428,7 +2428,7 @@ Fix whatever breaks — footer-stripping thresholds, delimiter detection, or rul
 - [ ] **Step 7: Run the crosswalk demo for real**
 
 ```bash
-datadiligence harmonize data/raw/cdc_wonder_export.tsv data/raw/acs_pums_extract.csv \
+dataforensics harmonize data/raw/cdc_wonder_export.tsv data/raw/acs_pums_extract.csv \
   --rules-map "data/raw/cdc_wonder_export.tsv=schemas/cdc_wonder_rules.yaml,data/raw/acs_pums_extract.csv=schemas/acs_pums_rules.yaml" \
   --crosswalk schemas/wonder_pums_crosswalk.yaml \
   --output-dir data/cleaned/wonder_pums_harmonized \
@@ -2438,9 +2438,9 @@ datadiligence harmonize data/raw/cdc_wonder_export.tsv data/raw/acs_pums_extract
 - [ ] **Step 8: Write WRITEUP.md**
 
 ```markdown
-# DataDiligence: before/after
+# DataForensics: before/after
 
-One page. For each of the three datasets: what `datadiligence scan` found (errors/warnings/suggestions,
+One page. For each of the three datasets: what `dataforensics scan` found (errors/warnings/suggestions,
 with counts), the single most interesting real issue caught, and — for the WONDER/PUMS pair —
 what the crosswalk demo actually harmonized and why it's two tables, not one merged table.
 Fill in with your real scan/harmonize output from Steps 6-7 above.
@@ -2473,7 +2473,7 @@ git commit -m "feat: real dataset rules files, crosswalk config, and write-up sc
 # tests/unit/test_failure_modes.py
 from click.testing import CliRunner
 
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 
 def test_scan_nonexistent_file():
@@ -2520,7 +2520,7 @@ Expected: some pass already (Tasks 9/13 covered YAML and path-collision); the em
 - [ ] **Step 3: Harden `build_data_dictionary` against an empty file**
 
 ```python
-# src/datadiligence/dictionary.py — guard at the top of build_data_dictionary
+# src/dataforensics/dictionary.py — guard at the top of build_data_dictionary
 def build_data_dictionary(path: Path) -> dict:
     data_lines, delimiter = _read_cleaned_lines(path)
     if not data_lines:
@@ -2539,9 +2539,9 @@ Expected: PASS (4 tests)
 - [ ] **Step 5: Write README.md**
 
 ```markdown
-# DataDiligence (datadiligence)
+# DataForensics (dataforensics)
 
-Most research-data cleanup tools profile a file and hope for the best. `datadiligence` is built around
+Most research-data cleanup tools profile a file and hope for the best. `dataforensics` is built around
 one rule instead: **when it's uncertain, it preserves the data and reports the uncertainty —
 it never guesses.** No transformation happens without an explicit rule you wrote down; every
 one that does happen is logged to an audit trail with enough detail to answer "exactly what
@@ -2549,7 +2549,7 @@ happened to this dataset, and why."
 
 ## Why not ydata-profiling / great_expectations / pointblank?
 
-Those are excellent generic profilers. `datadiligence` is narrower and more opinionated, tuned specifically
+Those are excellent generic profilers. `dataforensics` is narrower and more opinionated, tuned specifically
 to research-export quirks those tools don't target: REDCap-style missing-value sentinels (`-99`,
 `"Refused"`) kept distinct from true nulls, FIPS/ZIP/ID columns protected from integer-cast
 leading-zero truncation, Census/NHANES-style top-coding distinguished from genuine outliers, and
@@ -2560,8 +2560,8 @@ those, use a generic profiler — it'll do less, but it'll also ask you for less
 
 \`\`\`bash
 pip install -e ".[dev]"
-datadiligence scan fixtures/sample.csv --rules fixtures/sample_rules.yaml
-datadiligence harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output /tmp/out.csv
+dataforensics scan fixtures/sample.csv --rules fixtures/sample_rules.yaml
+dataforensics harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output /tmp/out.csv
 \`\`\`
 
 The first command profiles the bundled fixture and reports its planted issues (a duplicate ID,
@@ -2589,7 +2589,7 @@ Expected: PASS, every test across unit/integration/regression/e2e green
 - [ ] **Step 7: Commit**
 
 ```bash
-git add README.md src/datadiligence/dictionary.py tests/unit/test_failure_modes.py
+git add README.md src/dataforensics/dictionary.py tests/unit/test_failure_modes.py
 git commit -m "feat: README, empty-file hardening, failure-mode test coverage"
 ```
 
@@ -2597,10 +2597,10 @@ git commit -m "feat: README, empty-file hardening, failure-mode test coverage"
 
 ### Task 19: Read-only Streamlit viewer over JSON reports
 
-Added after the CLI-only scope was reopened (2026-08-24) — Aidan wants a viewer matching the pattern in the sibling `hospital-price-concentration` project. Scope stays narrow: **pure presentation over files `datadiligence` already produces**, no write path, no calling the CLI from within the app, no new business logic. Do this task after Task 18 — it needs real report JSON shapes to render, which only exist once `scan`/`harmonize` are fully built.
+Added after the CLI-only scope was reopened (2026-08-24) — Aidan wants a viewer matching the pattern in the sibling `hospital-price-concentration` project. Scope stays narrow: **pure presentation over files `dataforensics` already produces**, no write path, no calling the CLI from within the app, no new business logic. Do this task after Task 18 — it needs real report JSON shapes to render, which only exist once `scan`/`harmonize` are fully built.
 
 **Files:**
-- Create: `src/datadiligence/viewer.py` (pure functions — classification/summary logic, framework-independent and directly testable)
+- Create: `src/dataforensics/viewer.py` (pure functions — classification/summary logic, framework-independent and directly testable)
 - Create: `app.py` (thin Streamlit script, not unit-tested directly — see Step 6)
 - Modify: `pyproject.toml` (add a `viewer` optional-dependency group so the core CLI install stays lightweight)
 - Test: `tests/unit/test_viewer.py`
@@ -2613,7 +2613,7 @@ Added after the CLI-only scope was reopened (2026-08-24) — Aidan wants a viewe
 
 ```python
 # tests/unit/test_viewer.py
-from datadiligence.viewer import classify_report, validation_summary
+from dataforensics.viewer import classify_report, validation_summary
 
 
 def test_classify_data_dictionary():
@@ -2656,12 +2656,12 @@ def test_validation_summary_counts_by_severity():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/unit/test_viewer.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'datadiligence.viewer'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dataforensics.viewer'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/viewer.py
+# src/dataforensics/viewer.py
 def classify_report(data: dict) -> str:
     if "mutations" in data and "run_id" in data:
         return "manifest"
@@ -2704,11 +2704,11 @@ import json
 
 import streamlit as st
 
-from datadiligence.viewer import classify_report, validation_summary
+from dataforensics.viewer import classify_report, validation_summary
 
-st.set_page_config(page_title="datadiligence report viewer", layout="wide")
-st.title("DataDiligence — report viewer")
-st.caption("Read-only. Upload a JSON file datadiligence already produced (data dictionary, validation report, or manifest).")
+st.set_page_config(page_title="dataforensics report viewer", layout="wide")
+st.title("DataForensics — report viewer")
+st.caption("Read-only. Upload a JSON file dataforensics already produced (data dictionary, validation report, or manifest).")
 
 uploaded = st.file_uploader("Upload a .json report", type="json")
 
@@ -2749,14 +2749,14 @@ else:
         st.dataframe(data.get("mutations", []), use_container_width=True)
 
     else:
-        st.error("Unrecognized report shape — this doesn't look like datadiligence output.")
+        st.error("Unrecognized report shape — this doesn't look like dataforensics output.")
 ```
 
 - [ ] **Step 7: Manual smoke test (not automated — thin rendering layer only)**
 
 ```bash
 pip install -e ".[dev,viewer]"
-datadiligence scan fixtures/sample.csv --rules fixtures/sample_rules.yaml --out-dir /tmp/rdh_demo
+dataforensics scan fixtures/sample.csv --rules fixtures/sample_rules.yaml --out-dir /tmp/rdh_demo
 streamlit run app.py
 ```
 
@@ -2764,7 +2764,7 @@ Upload `/tmp/rdh_demo/sample.validation_report.json`, confirm the metrics and ex
 
 - [ ] **Step 8: Update README and CI**
 
-Add a "Viewer (optional)" section to `README.md`'s quickstart pointing at Steps 6-7 above. Add `streamlit>=1.30` install to `.github/workflows/ci.yml`'s install step (`pip install -e ".[dev,viewer]"`) so `test_viewer.py`'s import of `datadiligence.viewer` — which itself has no Streamlit dependency — keeps working either way; this is only needed if a later task adds Streamlit-specific tests.
+Add a "Viewer (optional)" section to `README.md`'s quickstart pointing at Steps 6-7 above. Add `streamlit>=1.30` install to `.github/workflows/ci.yml`'s install step (`pip install -e ".[dev,viewer]"`) so `test_viewer.py`'s import of `dataforensics.viewer` — which itself has no Streamlit dependency — keeps working either way; this is only needed if a later task adds Streamlit-specific tests.
 
 - [ ] **Step 9: Run full suite**
 
@@ -2774,7 +2774,7 @@ Expected: PASS, all tests green including the 5 new viewer tests
 - [ ] **Step 10: Commit**
 
 ```bash
-git add src/datadiligence/viewer.py app.py pyproject.toml README.md tests/unit/test_viewer.py
+git add src/dataforensics/viewer.py app.py pyproject.toml README.md tests/unit/test_viewer.py
 git commit -m "feat: read-only Streamlit viewer over existing JSON report output"
 ```
 
@@ -2785,7 +2785,7 @@ git commit -m "feat: read-only Streamlit viewer over existing JSON report output
 **Found during a final readiness audit (2026-08-24):** MASTER_PROMPT.md's §1 principles and the original spec both call this out as one of the most important safety rules — "ambiguous dates are flagged as a Critical validation warning and never silently parsed" — and Task 16's own fixture plants a `03/04/2024` value specifically to exercise it. But no task in the plan as written actually implements date-column handling: `validation.py` (Task 10) only checks `minimum`/`maximum`, and `type: date`/`format` in the rules YAML (§6) was documented but never enforced. This task closes that gap.
 
 **Files:**
-- Modify: `src/datadiligence/validation.py`
+- Modify: `src/dataforensics/validation.py`
 - Test: `tests/unit/test_date_validation.py`
 
 **Interfaces:**
@@ -2795,7 +2795,7 @@ git commit -m "feat: read-only Streamlit viewer over existing JSON report output
 
 ```python
 # tests/unit/test_date_validation.py
-from datadiligence.validation import is_ambiguous_date, validate
+from dataforensics.validation import is_ambiguous_date, validate
 
 _DATE_RULES = {
     "version": 1,
@@ -2857,7 +2857,7 @@ Expected: FAIL — `is_ambiguous_date` doesn't exist; date columns aren't checke
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/datadiligence/validation.py — add near the top
+# src/dataforensics/validation.py — add near the top
 import re
 from datetime import datetime
 
@@ -2872,7 +2872,7 @@ def is_ambiguous_date(value: str) -> bool:
 ```
 
 ```python
-# src/datadiligence/validation.py — inside validate()'s per-row, per-column loop, alongside the
+# src/dataforensics/validation.py — inside validate()'s per-row, per-column loop, alongside the
 # existing "minimum"/"maximum" checks (same indentation level, same row/column loop):
             if col_rules.get("type") == "date":
                 checks_evaluated += 1
@@ -2910,28 +2910,28 @@ Expected: PASS (6 tests)
 - [ ] **Step 5: Run full suite, confirm Task 16's fixture now actually catches its own planted issue**
 
 Run: `pytest -v`
-Expected: PASS. Additionally run `datadiligence scan fixtures/sample.csv --rules fixtures/sample_rules.yaml` by hand — the report should now include an `ambiguous_date_format` error for row 5's `03/04/2024`, closing the loop on what that fixture was always meant to demonstrate. (`fixtures/sample_rules.yaml` needs a `visit_date: {type: date}` entry added — add it now as part of this task.)
+Expected: PASS. Additionally run `dataforensics scan fixtures/sample.csv --rules fixtures/sample_rules.yaml` by hand — the report should now include an `ambiguous_date_format` error for row 5's `03/04/2024`, closing the loop on what that fixture was always meant to demonstrate. (`fixtures/sample_rules.yaml` needs a `visit_date: {type: date}` entry added — add it now as part of this task.)
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/datadiligence/validation.py tests/unit/test_date_validation.py fixtures/sample_rules.yaml
+git add src/dataforensics/validation.py tests/unit/test_date_validation.py fixtures/sample_rules.yaml
 git commit -m "feat: ambiguous date format detection (Error tier) — closes a gap the fixture already anticipated"
 ```
 
 ---
 
-### Task 21: Wire the `datadiligence report` command
+### Task 21: Wire the `dataforensics report` command
 
-**Found during the same final audit:** `datadiligence report <artifact.json>` is defined in MASTER_PROMPT.md §5 and stubbed out in Task 1 ("not implemented," exit 3) — but no later task ever replaces the stub. It's the only one of the three CLI verbs that stays permanently unimplemented across the whole plan as written.
+**Found during the same final audit:** `dataforensics report <artifact.json>` is defined in MASTER_PROMPT.md §5 and stubbed out in Task 1 ("not implemented," exit 3) — but no later task ever replaces the stub. It's the only one of the three CLI verbs that stays permanently unimplemented across the whole plan as written.
 
 **Files:**
-- Modify: `src/datadiligence/cli.py`
+- Modify: `src/dataforensics/cli.py`
 - Test: `tests/integration/test_report_command.py`
 
 **Interfaces:**
 - Consumes: `report.render_markdown` (Task 8), `viewer.classify_report` (Task 19 — reused here for a sensible title, e.g. "Validation Report" vs. "Data Dictionary," rather than duplicating that logic).
-- Produces: `datadiligence report <artifact.json> [--out <path>]` — prints rendered Markdown to stdout by default, or writes it to `--out` if given.
+- Produces: `dataforensics report <artifact.json> [--out <path>]` — prints rendered Markdown to stdout by default, or writes it to `--out` if given.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2941,7 +2941,7 @@ import json
 
 from click.testing import CliRunner
 
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 
 def test_report_renders_validation_report_to_stdout(tmp_path):
@@ -2972,8 +2972,8 @@ Expected: FAIL — `report` still prints "not implemented" and exits 3
 - [ ] **Step 3: Wire cli.py's report command**
 
 ```python
-# src/datadiligence/cli.py — replace the report command body
-from datadiligence.viewer import classify_report
+# src/dataforensics/cli.py — replace the report command body
+from dataforensics.viewer import classify_report
 
 _REPORT_TITLES = {
     "data_dictionary": "Data Dictionary",
@@ -3012,11 +3012,11 @@ Expected: PASS, all tests green — this is the last task, so this is the final 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/datadiligence/cli.py tests/integration/test_report_command.py
-git commit -m "feat: wire the previously-stubbed datadiligence report command"
+git add src/dataforensics/cli.py tests/integration/test_report_command.py
+git commit -m "feat: wire the previously-stubbed dataforensics report command"
 ```
 
-Note: this task depends on `viewer.classify_report` from Task 19. If Task 19 (Streamlit viewer) is ever descoped, inline a copy of `classify_report`'s three-line logic directly in `cli.py` instead of importing from `datadiligence.viewer` — don't make the core CLI's third verb depend on an optional-extras module.
+Note: this task depends on `viewer.classify_report` from Task 19. If Task 19 (Streamlit viewer) is ever descoped, inline a copy of `classify_report`'s three-line logic directly in `cli.py` instead of importing from `dataforensics.viewer` — don't make the core CLI's third verb depend on an optional-extras module.
 
 ---
 
@@ -3028,7 +3028,7 @@ Note: this task depends on `viewer.classify_report` from Task 19. If Task 19 (St
 
 ### Task 17.5: PII pattern masking in reports
 
-**Files:** Modify `src/datadiligence/dictionary.py`, `src/datadiligence/report.py`; Test: `tests/unit/test_pii_masking.py`
+**Files:** Modify `src/dataforensics/dictionary.py`, `src/dataforensics/report.py`; Test: `tests/unit/test_pii_masking.py`
 
 - [ ] Write a failing test asserting a column named `patient_name` or matching an SSN-shaped value pattern has its `levels`/sample values masked (e.g. `"levels": "[masked: potential identifier pattern detected]"`) in `build_data_dictionary`'s output by default, with raw values only shown when an explicit `include_raw_samples=True` argument is passed.
 - [ ] Add `_PII_COLUMN_PATTERN = re.compile(r"(name|ssn|mrn|email|phone|dob)", re.IGNORECASE)` to `typing_guards.py` and a `is_pii_like_column(name: str) -> bool` function, mirroring Task 5's style.
@@ -3037,7 +3037,7 @@ Note: this task depends on `viewer.classify_report` from Task 19. If Task 19 (St
 
 **Note on Task 19 vs. the original spec:** MASTER_PROMPT.md §10 lists "No GUI" as an explicit v1 non-goal. Task 19 was added afterward at Aidan's request and is a deliberate, logged scope change, not an inconsistency slipping through — it stays inside the spirit of the constraint (no *write* surface, no new engine logic, pure read-only presentation over files the CLI already produces) rather than reopening the GUI question generally. MASTER_PROMPT.md's non-goals section has been amended to reflect this so the two documents don't contradict each other.
 
-**Second gap-finding pass (2026-08-24, requested directly):** re-read the whole plan against MASTER_PROMPT.md looking specifically for spec requirements with no implementing task. Found two: (1) ambiguous-date detection — one of the most heavily emphasized safety rules in the original spec, and something Task 16's fixture already planted a test value for (`03/04/2024`) without any task ever actually checking it — added as Task 20. (2) `datadiligence report`, defined in §5 and stubbed in Task 1, was never wired to a real implementation in any later task — added as Task 21. Also noted and deliberately deferred rather than silently dropped: explicit unit-conversion rules (§1 allows them when schema-declared, but none of the three chosen demo datasets need one, so no task builds it — if a future dataset needs it, add a task following the same pattern as Task 14's `apply_transformations`, keyed off a new `unit_conversions:` rules-YAML section) and a `type: integer`-driven numeric cast on cleaned output (currently validated for range but left as a string in the output file, which is consistent with the spec's "preserve raw strings unless explicitly told to convert" principle, so this is a deliberate minimalism, not an oversight).
+**Second gap-finding pass (2026-08-24, requested directly):** re-read the whole plan against MASTER_PROMPT.md looking specifically for spec requirements with no implementing task. Found two: (1) ambiguous-date detection — one of the most heavily emphasized safety rules in the original spec, and something Task 16's fixture already planted a test value for (`03/04/2024`) without any task ever actually checking it — added as Task 20. (2) `dataforensics report`, defined in §5 and stubbed in Task 1, was never wired to a real implementation in any later task — added as Task 21. Also noted and deliberately deferred rather than silently dropped: explicit unit-conversion rules (§1 allows them when schema-declared, but none of the three chosen demo datasets need one, so no task builds it — if a future dataset needs it, add a task following the same pattern as Task 14's `apply_transformations`, keyed off a new `unit_conversions:` rules-YAML section) and a `type: integer`-driven numeric cast on cleaned output (currently validated for range but left as a string in the output file, which is consistent with the spec's "preserve raw strings unless explicitly told to convert" principle, so this is a deliberate minimalism, not an oversight).
 
 **Placeholder scan:** no TBD/TODO markers remain; the one intentionally-manual task (17) is manual because the underlying action (browser downloads) is not scriptable, not because content was deferred — every step in it has concrete URLs, commands, or file templates.
 
@@ -3045,7 +3045,7 @@ Note: this task depends on `viewer.classify_report` from Task 19. If Task 19 (St
 
 ---
 
-Plan complete and saved to `docs/superpowers/plans/2026-08-24-DataDiligence.md`. Two execution options:
+Plan complete and saved to `docs/superpowers/plans/2026-08-24-DataForensics.md`. Two execution options:
 
 **1. Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration
 

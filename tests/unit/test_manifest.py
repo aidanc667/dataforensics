@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from datadiligence.manifest import atomic_write, build_manifest
+from dataforensics.manifest import atomic_write, build_manifest
 
 
 def test_build_manifest_has_required_fields(tmp_path):
@@ -92,7 +92,7 @@ def test_build_manifest_unknown_dependency_version(tmp_path, monkeypatch):
     def fake_version(name):
         raise PackageNotFoundError(name)
 
-    import datadiligence.manifest as manifest_module
+    import dataforensics.manifest as manifest_module
 
     monkeypatch.setattr(manifest_module, "version", fake_version)
 

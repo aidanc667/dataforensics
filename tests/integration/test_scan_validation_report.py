@@ -2,7 +2,7 @@ import json
 
 from click.testing import CliRunner
 
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 
 def _write_rules(tmp_path):

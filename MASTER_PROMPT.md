@@ -1,4 +1,4 @@
-# Master build prompt: DataDiligence (`datadiligence`)
+# Master build prompt: DataForensics (`dataforensics`)
 
 Paste this whole document as the opening message to a fresh Claude Code session, pointed at this (empty, git-initialized) directory. It is the complete spec — do not ask the user to re-explain scope; everything you need is here. If something genuinely isn't decided below, stop and ask rather than guessing.
 
@@ -51,7 +51,7 @@ Organize your mental model around these five clusters. They are constraints on e
 - **The three datasets each have a genuinely different missing-value/metadata convention — make this explicit in the write-up, it's a real differentiator:** CDC WONDER's suppression + disclaimer footer; ACS PUMS's numeric top-codes plus a *separate* data dictionary file the Census Bureau ships (a real test of the "metadata is data too" principle — ingest and validate against it, don't just profile the CSV blind); OpenNeuro/BIDS's `"n/a"` string convention plus JSON sidecar files describing each column. Three different real conventions, one engine, driven entirely by config — that's the actual thesis of the project, say so explicitly in the README.
 - **Do not literally join/merge CDC WONDER rows with ACS PUMS rows.** WONDER (in most of its tables) is aggregate cell-count data (e.g. deaths by county × age band × sex); PUMS is individual/household-level microdata. Row-wise merging aggregate and individual data is methodologically wrong (an ecological-fallacy trap) and would undermine the project's credibility with anyone who understands the data. The harmonization demo must map both sources onto **one shared column schema and coding** (e.g. `age_band`, `sex`, `geography_fips`) and emit them as two independently-harmonized tables under that shared schema — never a merged/joined single table. State this scope decision explicitly in the README so it reads as a deliberate methodological choice, not an oversight.
 - **The rules YAML itself needs a defined, versioned format and validation on load** — a malformed rules file must fail fast with exit code 2 and a specific error, not partially apply.
-- **A working "5-minute quickstart" needs a bundled tiny synthetic fixture** (a 20-row CSV with a couple of planted issues) shipped in the repo, so a reviewer can run `datadiligence scan` and `datadiligence harmonize --dry-run` immediately without first downloading real government data.
+- **A working "5-minute quickstart" needs a bundled tiny synthetic fixture** (a 20-row CSV with a couple of planted issues) shipped in the repo, so a reviewer can run `dataforensics scan` and `dataforensics harmonize --dry-run` immediately without first downloading real government data.
 - **Soften "audit log as legal record" to "audit trail" in all user-facing docs.** Keep every field the original ask specified (who/what/when/why for every mutation) — just don't imply actual legal admissibility, which the tool can't guarantee and shouldn't claim.
 - **This project has grown well beyond a weekend script.** Build it in the phased order in §7 so it's demoable at every checkpoint — never let it sit half-wired across every module at once.
 - **Don't let "Polars throughout" quietly imply everything streams.** Polars' lazy engine streams the initial dtype/missingness/count pass on large files, which is what the "2GB+ file" requirement actually needs — but several heuristics genuinely require a materialized column (IQR/MAD outlier stats, top-code point-mass detection, string-similarity category clustering) and are not meaningfully streamable. Document exactly which pass streams and which doesn't in the README rather than claiming full streaming everywhere — an inflated scalability claim is a worse look than an honestly-scoped one (this is the project's own principle: don't fake scale you don't have).
@@ -75,11 +75,11 @@ Harmonization demo (§1, "never literally join"): CDC WONDER + ACS PUMS mapped o
 ## 4. Repo structure
 
 ```
-DataDiligence/
-├── pyproject.toml              # packaging + console_scripts entry: datadiligence; deps: polars, pyyaml, charset-normalizer, rapidfuzz
+DataForensics/
+├── pyproject.toml              # packaging + console_scripts entry: dataforensics; deps: polars, pyyaml, charset-normalizer, rapidfuzz
 ├── README.md                   # pitch, quickstart, differentiation vs. ydata-profiling/great_expectations, explicit non-goals
 ├── WRITEUP.md                  # 1-page before/after per dataset, specific issues caught
-├── src/datadiligence/
+├── src/dataforensics/
 │   ├── cli.py                  # scan / harmonize / report subcommands
 │   ├── ingest.py                # encoding/dialect detection, footer/disclaimer stripping
 │   ├── typing_guards.py         # ID/FIPS/ZIP string guard, sentinel handling
@@ -106,16 +106,16 @@ DataDiligence/
 ## 5. CLI specification
 
 ```
-datadiligence scan <file> [--rules schema.yaml]
+dataforensics scan <file> [--rules schema.yaml]
     Read-only. Writes data_dictionary.json/.md and validation_report.json/.md.
     Never writes to the input path or any transformed data file.
 
-datadiligence harmonize <file> --rules schema.yaml --output <path> [--execute]
+dataforensics harmonize <file> --rules schema.yaml --output <path> [--execute]
     Single-file standardization. Without --execute: dry run, writes nothing.
     With --execute: applies rules, writes <path> and <path>.manifest.json atomically.
     Refuses if --output equals the input path.
 
-datadiligence harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2.yaml --crosswalk crosswalk.yaml --output-dir <dir> [--execute]
+dataforensics harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2.yaml --crosswalk crosswalk.yaml --output-dir <dir> [--execute]
     Cross-dataset harmonization. Each input is validated/standardized against its OWN rules file first
     (per §1 "never literally join" — there is no single shared --rules file here, because each source
     has its own native schema until the crosswalk remaps it). The crosswalk file then maps each source's
@@ -124,7 +124,7 @@ datadiligence harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,fil
     one combined manifest recording both per-source rules hashes and the crosswalk hash — never a single
     merged/joined table. Refuses if --output-dir contains any input path.
 
-datadiligence report <artifact.json>
+dataforensics report <artifact.json>
     Renders a data_dictionary/validation_report/manifest JSON file to Markdown.
 ```
 
@@ -161,9 +161,9 @@ For the WONDER/PUMS harmonization, an additional crosswalk file maps each source
 
 ## 7. Build order (phased — keep it demoable at every step)
 
-1. **Skeleton**: packaging, `datadiligence` entry point, empty subcommands that print "not implemented," CI running an empty test suite. Commit.
-2. **Ingest + dictionary**: encoding/dialect detection, footer-stripping, ID/FIPS guard, `datadiligence scan` producing a data dictionary (no validation yet) against the fixtures. Commit + unit tests.
-3. **Validation engine**: three-tier model, PASSED/WARNING/FAILED/NOT EVALUATED states, rules YAML parsing + validation-on-load. `datadiligence scan` now emits the full validation report. Commit + unit tests including the false-positive cases (age=100, rare category must NOT error).
+1. **Skeleton**: packaging, `dataforensics` entry point, empty subcommands that print "not implemented," CI running an empty test suite. Commit.
+2. **Ingest + dictionary**: encoding/dialect detection, footer-stripping, ID/FIPS guard, `dataforensics scan` producing a data dictionary (no validation yet) against the fixtures. Commit + unit tests.
+3. **Validation engine**: three-tier model, PASSED/WARNING/FAILED/NOT EVALUATED states, rules YAML parsing + validation-on-load. `dataforensics scan` now emits the full validation report. Commit + unit tests including the false-positive cases (age=100, rare category must NOT error).
 4. **Harmonize (single file)**: dry-run printing, `--execute`, atomic writes, manifest with full versioning/hash block, idempotency test. Commit + regression tests (golden files).
 5. **Cross-dataset crosswalk**: WONDER + PUMS mapped to shared schema, emitted as two harmonized tables, not merged. Commit + a dedicated test on a synthetic fixture proving no row-level merge occurred.
 6. **Real datasets end-to-end**: run all three real sources through `scan`, run the crosswalk demo, capture before/after output for the write-up. Fix whatever real ingestion breaks (there will be something — that's the point).

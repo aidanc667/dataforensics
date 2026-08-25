@@ -1,6 +1,6 @@
-# DataDiligence (`datadiligence`)
+# DataForensics (`dataforensics`)
 
-Most research-data cleanup tools profile a file and hope for the best. **DataDiligence** is built
+Most research-data cleanup tools profile a file and hope for the best. **DataForensics** is built
 around one rule instead: **when it's uncertain, it preserves the data and reports the uncertainty —
 it never guesses.** No transformation happens without an explicit rule you wrote down (or
 explicitly approved in the app); every one that does happen is logged to an audit trail with
@@ -8,7 +8,7 @@ enough detail to answer "exactly what happened to this dataset, and why."
 
 ## Why not ydata-profiling / great_expectations / pointblank?
 
-Those are excellent generic profilers. DataDiligence is narrower and more opinionated, tuned specifically
+Those are excellent generic profilers. DataForensics is narrower and more opinionated, tuned specifically
 to research-export quirks those tools don't target: REDCap-style missing-value sentinels (`-99`,
 `"Refused"`) kept distinct from true nulls, FIPS/ZIP/ID columns protected from integer-cast
 leading-zero truncation, IQR-based outlier and top-code-spike detection reported as suggestions
@@ -20,8 +20,8 @@ you for less.
 
 ```bash
 pip install -e ".[dev]"
-datadiligence scan fixtures/sample.csv --rules fixtures/sample_rules.yaml
-datadiligence harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output /tmp/out.csv
+dataforensics scan fixtures/sample.csv --rules fixtures/sample_rules.yaml
+dataforensics harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output /tmp/out.csv
 ```
 
 The first command profiles the bundled fixture (writes `sample.data_dictionary.{json,md}` and
@@ -62,13 +62,13 @@ Three tabs:
 ## CLI reference (as actually implemented today)
 
 ```
-datadiligence scan <file> [--rules schema.yaml] [--out-dir DIR]
+dataforensics scan <file> [--rules schema.yaml] [--out-dir DIR]
     Read-only. Always writes <stem>.data_dictionary.{json,md}. If --rules is given, also
     writes <stem>.validation_report.{json,md}. Never writes to the input path.
     Exit 0 (clean or no --rules), 1 (validation errors found), 2 (malformed rules file),
     3 (malformed input file, e.g. a duplicate header column).
 
-datadiligence harmonize <file> --rules schema.yaml --output <path> [--execute]
+dataforensics harmonize <file> --rules schema.yaml --output <path> [--execute]
     Single-file mode. Without --execute: dry run, writes nothing, just lists proposed
     transformations (footer-stripping warnings, if any, are printed on the dry run too, not
     just --execute). With --execute: applies the rules, writes <path> and
@@ -76,7 +76,7 @@ datadiligence harmonize <file> --rules schema.yaml --output <path> [--execute]
     or if the rules file is malformed; exits 3 on a malformed input file or if a post-transform
     safety check fails (refuses to write rather than risk silent data loss).
 
-datadiligence harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2.yaml \
+dataforensics harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2.yaml \
     --crosswalk crosswalk.yaml --output-dir <dir> [--execute]
     Cross-dataset mode (2+ files). Each source is validated/standardized against its OWN
     rules file first, then the crosswalk file remaps each source's columns onto a shared
@@ -90,7 +90,7 @@ datadiligence harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,fil
     a failed safety check for any source (nothing is written for ANY source in that case —
     see the two-pass validate-then-write design below).
 
-datadiligence report <artifact.json> [--out <path>]
+dataforensics report <artifact.json> [--out <path>]
     Renders a data_dictionary/validation_report/manifest JSON artifact (the same JSON
     `scan`/`harmonize --execute` already write to disk) to Markdown. The artifact type is
     auto-detected from its shape (manifest: has `mutations` + `run_id`; validation_report:

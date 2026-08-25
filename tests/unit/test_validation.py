@@ -1,5 +1,5 @@
-from datadiligence.validation import validate
-from datadiligence.typing_guards import is_pii_like_column
+from dataforensics.validation import validate
+from dataforensics.typing_guards import is_pii_like_column
 
 
 _RULES = {
@@ -213,7 +213,7 @@ def test_leading_zero_id_like_column_never_flagged_as_outlier_even_without_id_li
     # checked is_id_like_column(column), so this column would still be
     # float()-cast (destroying the leading zero) and IQR-tested here,
     # contradicting dictionary.py's own classification of the same column.
-    from datadiligence.typing_guards import is_id_like_column, preserves_leading_zero
+    from dataforensics.typing_guards import is_id_like_column, preserves_leading_zero
 
     assert is_id_like_column("county_code") is False
     assert preserves_leading_zero(["06081", "02138", "48201"]) is True
@@ -250,7 +250,7 @@ def test_leading_zero_low_cardinality_column_not_flagged_as_rare_category():
     # heuristic and, before the fix, would get its singleton value flagged
     # as rare_category -- even though dictionary.py classifies this column
     # as category "id" via preserves_leading_zero, not "categorical".
-    from datadiligence.typing_guards import is_id_like_column, preserves_leading_zero
+    from dataforensics.typing_guards import is_id_like_column, preserves_leading_zero
 
     assert is_id_like_column("county_code") is False
     assert preserves_leading_zero(["06081", "02138"]) is True
@@ -278,7 +278,7 @@ def test_pii_like_column_never_flagged_as_outlier():
     # false -- i.e. it also excludes PII-like columns, not just ID-like
     # ones. validation.py's suggestion-tier guard must match that full
     # condition, not just the ID half of it.
-    from datadiligence.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
+    from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
 
     assert is_pii_like_column("phone") is True
     assert is_id_like_column("phone") is False
@@ -316,7 +316,7 @@ def test_pii_like_low_cardinality_column_not_flagged_as_rare_category():
     # value flagged as rare_category -- even though the message is
     # separately masked, the suggestion firing at all on a PII column
     # contradicts dictionary.py's treatment of the same column.
-    from datadiligence.typing_guards import is_pii_like_column
+    from dataforensics.typing_guards import is_pii_like_column
 
     assert is_pii_like_column("phone") is True
 

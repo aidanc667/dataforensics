@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from datadiligence import __version__
-from datadiligence.hashing import sha256_file
+from dataforensics import __version__
+from dataforensics.hashing import sha256_file
 
 _DIRECT_DEPENDENCIES = ["polars", "click", "pyyaml", "charset-normalizer", "rapidfuzz"]
 

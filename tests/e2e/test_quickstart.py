@@ -2,7 +2,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures"
 

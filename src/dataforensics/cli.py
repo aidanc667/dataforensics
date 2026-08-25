@@ -7,21 +7,21 @@ from pathlib import Path
 import click
 import yaml
 
-from datadiligence import __version__
-from datadiligence.config_schema import RulesConfigError, load_rules
-from datadiligence.dictionary import build_data_dictionary, read_rows
-from datadiligence.harmonize import (
+from dataforensics import __version__
+from dataforensics.config_schema import RulesConfigError, load_rules
+from dataforensics.dictionary import build_data_dictionary, read_rows
+from dataforensics.harmonize import (
     HarmonizeSafetyError,
     apply_crosswalk,
     apply_transformations,
     assert_row_and_column_integrity,
     plan_transformations,
 )
-from datadiligence.ingest import DuplicateHeaderError, check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
-from datadiligence.manifest import atomic_write, build_manifest
-from datadiligence.report import render_markdown
-from datadiligence.validation import validate
-from datadiligence.viewer import classify_report
+from dataforensics.ingest import DuplicateHeaderError, check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
+from dataforensics.manifest import atomic_write, build_manifest
+from dataforensics.report import render_markdown
+from dataforensics.validation import validate
+from dataforensics.viewer import classify_report
 
 _REPORT_TITLES = {
     "data_dictionary": "Data Dictionary",
@@ -120,7 +120,7 @@ def _warn_if_footer_stripped(file_path: Path, stripped_count: int, row_count: in
 @click.group()
 @click.version_option(__version__)
 def main():
-    """datadiligence — auditable research-data profiling, validation, and harmonization."""
+    """dataforensics — auditable research-data profiling, validation, and harmonization."""
 
 
 @main.command()
@@ -312,7 +312,7 @@ def _harmonize_single_file(file, rules_path, output, execute):
     # NOT be caught by this check.
     #
     # This read (and the footer-stripped warning it feeds) happens BEFORE
-    # the dry-run branch below, not after it, so that a plain `datadiligence harmonize`
+    # the dry-run branch below, not after it, so that a plain `dataforensics harmonize`
     # invocation (dry-run, the mode the README calls the "safe preview
     # before committing") surfaces the warning too -- not just `--execute`.
     # A dry run that silently hid rows being dropped by strip_footer would

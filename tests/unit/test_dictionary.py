@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from datadiligence.dictionary import build_data_dictionary, read_rows
-from datadiligence.ingest import DuplicateHeaderError
+from dataforensics.dictionary import build_data_dictionary, read_rows
+from dataforensics.ingest import DuplicateHeaderError
 
 
 def test_dictionary_basic_fields(tmp_path):

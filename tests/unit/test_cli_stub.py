@@ -1,5 +1,5 @@
 from click.testing import CliRunner
-from datadiligence.cli import main
+from dataforensics.cli import main
 
 
 def test_help_lists_subcommands():

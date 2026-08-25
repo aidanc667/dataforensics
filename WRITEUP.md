@@ -1,8 +1,8 @@
-# DataDiligence: Before/After Analysis
+# DataForensics: Before/After Analysis
 
 **Status:** Template/Scaffold — awaiting real data acquisition and scan execution (Task 17, Steps 1-7)
 
-This document captures the harmonization workflow on three real datasets: CDC WONDER mortality data, ACS PUMS microdata, and an OpenNeuro participants file. Once the raw data are downloaded and processed through `datadiligence scan` and `datadiligence harmonize` in Task 17 Steps 6-7, this scaffold will be filled with real findings and output examples.
+This document captures the harmonization workflow on three real datasets: CDC WONDER mortality data, ACS PUMS microdata, and an OpenNeuro participants file. Once the raw data are downloaded and processed through `dataforensics scan` and `dataforensics harmonize` in Task 17 Steps 6-7, this scaffold will be filled with real findings and output examples.
 
 ---
 
@@ -17,7 +17,7 @@ This document captures the harmonization workflow on three real datasets: CDC WO
 
 ### Scan Results
 ```
-[TODO: Insert full output from: datadiligence scan data/raw/cdc_wonder_export.tsv --rules schemas/cdc_wonder_rules.yaml]
+[TODO: Insert full output from: dataforensics scan data/raw/cdc_wonder_export.tsv --rules schemas/cdc_wonder_rules.yaml]
 ```
 
 **Summary:**
@@ -38,7 +38,7 @@ This document captures the harmonization workflow on three real datasets: CDC WO
 
 ### Scan Results
 ```
-[TODO: Insert full output from: datadiligence scan data/raw/acs_pums_extract.csv --rules schemas/acs_pums_rules.yaml]
+[TODO: Insert full output from: dataforensics scan data/raw/acs_pums_extract.csv --rules schemas/acs_pums_rules.yaml]
 ```
 
 **Summary:**
@@ -59,7 +59,7 @@ This document captures the harmonization workflow on three real datasets: CDC WO
 
 ### Scan Results
 ```
-[TODO: Insert full output from: datadiligence scan data/raw/openneuro_participants.tsv]
+[TODO: Insert full output from: dataforensics scan data/raw/openneuro_participants.tsv]
 ```
 
 **Summary:**
@@ -73,7 +73,7 @@ This document captures the harmonization workflow on three real datasets: CDC WO
 
 ### Command Executed
 ```bash
-datadiligence harmonize data/raw/cdc_wonder_export.tsv data/raw/acs_pums_extract.csv \
+dataforensics harmonize data/raw/cdc_wonder_export.tsv data/raw/acs_pums_extract.csv \
   --rules-map "data/raw/cdc_wonder_export.tsv=schemas/cdc_wonder_rules.yaml,data/raw/acs_pums_extract.csv=schemas/acs_pums_rules.yaml" \
   --crosswalk schemas/wonder_pums_crosswalk.yaml \
   --output-dir data/cleaned/wonder_pums_harmonized \

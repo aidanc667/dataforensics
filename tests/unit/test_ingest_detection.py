@@ -1,4 +1,4 @@
-from datadiligence.ingest import detect_delimiter, detect_encoding
+from dataforensics.ingest import detect_delimiter, detect_encoding
 
 
 def test_detect_delimiter_comma():
@@ -29,7 +29,7 @@ def test_detect_encoding_latin1(tmp_path):
     # across several similar single-byte code pages (charset_normalizer's
     # honest best guess can legitimately land on any of these depending on
     # its installed version/heuristics). Accepting the full set of plausible
-    # detections is correct here, not a bug to paper over: datadiligence reports what
+    # detections is correct here, not a bug to paper over: dataforensics reports what
     # was detected rather than silently coercing it to a single "canonical"
     # answer.
     assert detect_encoding(f).lower() in (
@@ -38,12 +38,12 @@ def test_detect_encoding_latin1(tmp_path):
 
 
 def test_deduplicate_header_appends_positional_suffix():
-    from datadiligence.ingest import deduplicate_header
+    from dataforensics.ingest import deduplicate_header
 
     assert deduplicate_header(["id", "name", "name", "name"]) == ["id", "name", "name_2", "name_3"]
 
 
 def test_deduplicate_header_no_change_when_no_duplicates():
-    from datadiligence.ingest import deduplicate_header
+    from dataforensics.ingest import deduplicate_header
 
     assert deduplicate_header(["id", "age", "sex"]) == ["id", "age", "sex"]
