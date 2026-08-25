@@ -8,7 +8,7 @@ import streamlit as st
 
 from rdh.config_schema import RulesConfigError, load_rules
 from rdh.dictionary import build_data_dictionary, read_rows
-from rdh.harmonize import apply_transformations
+from rdh.harmonize import apply_transformations, column_union
 from rdh.ingest import DuplicateHeaderError, check_header_has_no_duplicates, deduplicate_header
 from rdh.investigate import (
     check_referential_integrity,
@@ -218,6 +218,16 @@ with tab_analyze:
     dictionary = build_data_dictionary(data_path)
     rows = read_rows(data_path)
     columns = list(dictionary.keys())
+
+    ragged_row_count = sum(1 for r in rows if "" in r)
+    if ragged_row_count:
+        st.warning(
+            f"⚠ {ragged_row_count} row(s) have more fields than the header — usually an "
+            "unescaped comma/delimiter inside a text value (this parser isn't CSV-quote-aware; "
+            "see the README's Known Limitations). The overflow content is preserved under a "
+            "column named \"\" rather than dropped, but you may want to fix the source file's "
+            "quoting for a cleaner result."
+        )
 
     dup_rows = detect_duplicate_rows(rows)
     sentinels = detect_candidate_sentinels(rows, columns)
@@ -474,10 +484,22 @@ with tab_analyze:
         manifest["provenance"] = {"source": "interactive review", "approved_by": "user"}
 
         buffer = io.StringIO()
-        fieldnames = list(transformed_rows[0].keys()) if transformed_rows else columns
+        # column_union scans every row, not just row 0 -- a ragged input row
+        # (more fields than the header, usually an unescaped delimiter inside
+        # a free-text value) can add a stray "" key to just THAT row, which
+        # row-0-only fieldnames would miss entirely and crash on later.
+        fieldnames = column_union(transformed_rows) if transformed_rows else columns
         writer = csv.DictWriter(buffer, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(transformed_rows)
+        if "" in fieldnames:
+            st.warning(
+                "⚠ At least one row had more fields than the header (usually an unescaped "
+                "comma/delimiter inside a text value) — the overflow content was preserved "
+                "under a column literally named \"\" rather than being dropped. Open the "
+                "cleaned CSV and check that column; you may want to fix the source file's "
+                "quoting and re-run."
+            )
 
         st.success(f"Done — {len(mutations)} approved change(s) applied and logged.")
 

@@ -37,7 +37,7 @@ class HarmonizeSafetyError(Exception):
     below."""
 
 
-def _column_union(rows: list[dict]) -> list[str]:
+def column_union(rows: list[dict]) -> list[str]:
     """Union of keys across every row, preserving first-seen order.
 
     Checking only rows[0] misses per-row column drift -- e.g. one row
@@ -115,8 +115,8 @@ def assert_row_and_column_integrity(
     if columns == "skip" or not input_rows:
         return
 
-    resolved_input_columns = list(input_columns) if input_columns is not None else _column_union(input_rows)
-    output_columns = _column_union(output_rows)
+    resolved_input_columns = list(input_columns) if input_columns is not None else column_union(input_rows)
+    output_columns = column_union(output_rows)
 
     if columns == "exact":
         if len(resolved_input_columns) != len(output_columns) or set(resolved_input_columns) != set(

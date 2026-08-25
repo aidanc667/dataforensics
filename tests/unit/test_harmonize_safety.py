@@ -124,3 +124,25 @@ def test_input_row_count_override_passes_when_output_matches_true_count():
     assert_row_and_column_integrity(
         input_rows, output_rows, context="test", columns="exact", input_row_count=2
     )
+
+
+def test_column_union_detects_drift_missed_by_row_zero_alone():
+    from rdh.harmonize import column_union
+
+    # row 0 has no "" key; row 1 does (e.g. a ragged/trailing-delimiter row) --
+    # checking only rows[0] would miss this, exactly the bug this exists to catch.
+    rows = [{"id": "1", "age": "30"}, {"id": "2", "age": "40", "": "extra"}]
+    assert column_union(rows) == ["id", "age", ""]
+
+
+def test_column_union_preserves_first_seen_order():
+    from rdh.harmonize import column_union
+
+    rows = [{"b": "1", "a": "2"}, {"c": "3"}]
+    assert column_union(rows) == ["b", "a", "c"]
+
+
+def test_column_union_empty_rows():
+    from rdh.harmonize import column_union
+
+    assert column_union([]) == []
