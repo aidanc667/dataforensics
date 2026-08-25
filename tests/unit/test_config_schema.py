@@ -274,6 +274,81 @@ def test_load_rules_rejects_list_as_a_single_missing_values_mapping(tmp_path):
         load_rules(f)
 
 
+def test_load_rules_rejects_empty_columns_key(tmp_path):
+    # "columns:" present with nothing indented beneath it parses to `None`,
+    # not `{}` -- and unlike missing_values/category_mappings, `columns` is
+    # a REQUIRED key with no setdefault fallback, so this has the exact same
+    # None-instead-of-dict failure mode and must be caught the same way,
+    # rather than crashing later in validation.py's `columns_rules.items()`
+    # with an uncaught AttributeError.
+    f = tmp_path / "rules.yaml"
+    f.write_text("version: 1\nprimary_key: [id]\ncolumns:\n")
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_scalar_columns(tmp_path):
+    # "columns: 5" -- a bare scalar instead of a mapping.
+    f = tmp_path / "rules.yaml"
+    f.write_text("version: 1\nprimary_key: [id]\ncolumns: 5\n")
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_non_dict_single_column_ruleset(tmp_path):
+    # "columns:\n  age: 5" -- a bare scalar instead of a column's rule-set
+    # dict. Would otherwise crash later in validation.py's
+    # `"minimum" in col_rules` with an uncaught TypeError.
+    f = tmp_path / "rules.yaml"
+    f.write_text("version: 1\nprimary_key: [id]\ncolumns:\n  age: 5\n")
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_non_numeric_minimum(tmp_path):
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns:\n"
+        "  age:\n"
+        "    minimum: \"not-a-number\"\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_non_numeric_maximum(tmp_path):
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns:\n"
+        "  age:\n"
+        "    maximum: \"not-a-number\"\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_accepts_numeric_minimum_and_maximum(tmp_path):
+    # Sanity check the new columns validation doesn't over-fire on an
+    # ordinary, well-formed columns block (int and float bounds both
+    # accepted).
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns:\n"
+        "  age:\n"
+        "    minimum: 0\n"
+        "    maximum: 120.5\n"
+    )
+    rules = load_rules(f)
+    assert rules["columns"]["age"]["minimum"] == 0
+    assert rules["columns"]["age"]["maximum"] == 120.5
+
+
 def test_load_rules_accepts_non_chained_missing_values(tmp_path):
     # Sanity check the missing_values chain check doesn't over-fire on an
     # ordinary sentinel mapping, matching schemas/cdc_wonder_rules.yaml's

@@ -41,13 +41,40 @@ def load_rules(path: Path) -> dict:
     # clean, actionable RulesConfigError -- catch it here, immediately after
     # the defaults are applied and before anything downstream assumes a
     # dict.
-    for rule_name in ("missing_values", "category_mappings"):
+    #
+    # `columns` is a REQUIRED key (see _REQUIRED_KEYS above), so unlike
+    # missing_values/category_mappings there is no setdefault to fall back
+    # on -- but it has the exact same None/scalar failure mode ("columns:"
+    # with nothing indented beneath it parses to `None`; "columns: 5" is a
+    # bare scalar), and validation.py's `rules.get("columns", {})` /
+    # `columns_rules.items()` would otherwise crash with the same uncaught
+    # TypeError class. Validate it here too.
+    for rule_name in ("missing_values", "category_mappings", "columns"):
         if not isinstance(raw[rule_name], dict):
             raise RulesConfigError(
                 f"Rules file {path}: '{rule_name}' must be a YAML mapping of column name -> "
                 f"rule (got {raw[rule_name]!r}) — if you don't need any {rule_name} rules, "
                 "omit the key entirely rather than leaving it empty"
             )
+
+    # Each column's own rule-set under `columns` must itself be a dict (e.g.
+    # "columns:\n  age: 5" is a bare scalar instead of a rule-set), and any
+    # `minimum`/`maximum` bound within it must be numeric -- validation.py's
+    # `col_rules["minimum"]` / `numeric < col_rules["minimum"]` comparisons
+    # would otherwise crash with an uncaught TypeError (or silently compare
+    # against a non-numeric value) instead of failing cleanly here.
+    for column, col_rules in raw["columns"].items():
+        if not isinstance(col_rules, dict):
+            raise RulesConfigError(
+                f"Rules file {path}: columns['{column}'] must be a YAML mapping of rule "
+                f"name -> value (got {col_rules!r})"
+            )
+        for bound_key in ("minimum", "maximum"):
+            if bound_key in col_rules and not isinstance(col_rules[bound_key], (int, float)):
+                raise RulesConfigError(
+                    f"Rules file {path}: columns['{column}']['{bound_key}'] must be numeric "
+                    f"(got {col_rules[bound_key]!r})"
+                )
 
     overlap = sorted(set(raw["missing_values"]) & set(raw["category_mappings"]))
     if overlap:
