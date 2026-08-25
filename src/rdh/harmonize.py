@@ -4,7 +4,7 @@ from rdh.typing_guards import classify_sentinel, is_pii_like_column
 # _PII_MASK_MESSAGE, kept identical across all three masking sites for
 # consistency. This is a naming-convention heuristic, not a guarantee about
 # the column's actual contents, so we never claim "PII-safe" here either.
-_PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern]"
+_PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern detected]"
 
 
 def plan_transformations(rows: list[dict], rules: dict) -> list[dict]:

@@ -10,7 +10,7 @@ _SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
 # Same honest phrasing as dictionary.py's _PII_MASK_MESSAGE: this is a
 # naming-convention heuristic, not a guarantee about the column's actual
 # contents, so we never claim "PII-safe" or "HIPAA-compliant" here either.
-_PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern]"
+_PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern detected]"
 
 
 def is_ambiguous_date(value: str) -> bool:
