@@ -101,3 +101,128 @@ def test_load_rules_accepts_non_chained_category_mappings(tmp_path):
     )
     rules = load_rules(f)
     assert rules["category_mappings"]["sex"] == {"M": "Male", "F": "Female"}
+
+
+def test_load_rules_accepts_idempotent_self_mapping(tmp_path):
+    # {M: Male, Male: Male} is a common, safe defensive pattern -- map the
+    # short code, and leave the already-canonical value as a no-op
+    # self-mapping. It is already idempotent (running it twice changes
+    # nothing further) and must NOT be rejected as "chained".
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "category_mappings:\n"
+        "  sex:\n"
+        "    M: Male\n"
+        "    Male: Male\n"
+    )
+    rules = load_rules(f)
+    assert rules["category_mappings"]["sex"] == {"M": "Male", "Male": "Male"}
+
+
+def test_load_rules_accepts_bare_self_mapping(tmp_path):
+    # A bare {Male: Male} (no short-code entry at all) is likewise idempotent
+    # and must not be rejected.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "category_mappings:\n"
+        "  sex:\n"
+        "    Male: Male\n"
+    )
+    rules = load_rules(f)
+    assert rules["category_mappings"]["sex"] == {"Male": "Male"}
+
+
+def test_load_rules_still_rejects_chained_mapping_alongside_a_self_mapping(tmp_path):
+    # Sanity check that excluding self-mappings from the intersection
+    # doesn't accidentally blind the check to a genuine chain in a
+    # different column of the same rules file.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "category_mappings:\n"
+        "  sex:\n"
+        "    Male: Male\n"
+        "  race:\n"
+        "    M: Male\n"
+        "    Male: Female\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_non_hashable_category_mapping_target(tmp_path):
+    # A rules YAML with a list as a mapping target (e.g. category_mappings:
+    # {age: {M: [a, b]}}) must not crash with an uncaught
+    # `TypeError: unhashable type: 'list'` from set(mapping.values()) -- it
+    # must be reported as a normal invalid-config error (RulesConfigError),
+    # matching every other malformed-config case in this file.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "category_mappings:\n"
+        "  age:\n"
+        "    M: [a, b]\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_non_hashable_missing_values_target(tmp_path):
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "missing_values:\n"
+        "  age:\n"
+        "    \"99\": [a, b]\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_chained_missing_values(tmp_path):
+    # {"99": "Refused", "Refused": "Unknown"} chains exactly like a chained
+    # category_mappings entry: run 1 turns "99" -> "Refused"; run 2 on that
+    # same output would turn "Refused" -> "Unknown". Must be rejected the
+    # same way.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "missing_values:\n"
+        "  smoking_status:\n"
+        "    \"99\": Refused\n"
+        "    Refused: Unknown\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_accepts_non_chained_missing_values(tmp_path):
+    # Sanity check the missing_values chain check doesn't over-fire on an
+    # ordinary sentinel mapping, matching schemas/cdc_wonder_rules.yaml's
+    # real-world shape.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "missing_values:\n"
+        "  deaths:\n"
+        "    Suppressed: \"Suppressed (small-cell)\"\n"
+        "    Not Applicable: Not Applicable\n"
+    )
+    rules = load_rules(f)
+    assert rules["missing_values"]["deaths"]["Suppressed"] == "Suppressed (small-cell)"
