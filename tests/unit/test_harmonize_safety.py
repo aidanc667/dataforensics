@@ -87,3 +87,40 @@ def test_column_check_union_passes_when_all_rows_consistent():
     input_rows = [{"a": "1", "b": "2"}, {"a": "3", "b": "4"}]
     output_rows = [{"a": "1", "b": "99"}, {"a": "3", "b": "88"}]
     assert_row_and_column_integrity(input_rows, output_rows, context="test", columns="exact")
+
+
+def test_input_row_count_override_anchors_to_true_file_row_count():
+    # Mirrors test_input_columns_override_anchors_to_true_file_header, but
+    # for the row-count check: simulates a regression *inside* the shared
+    # upstream parse (e.g. strip_footer dropping a genuine data line)
+    # that shrinks both input_rows and output_rows identically before this
+    # check ever runs. If the row check only compares len(input_rows) to
+    # len(output_rows), it passes trivially even though a real on-disk row
+    # went missing. The input_row_count override lets the caller anchor the
+    # *input* side to the true on-disk row count (4) instead, so the
+    # mismatch against the already-shrunk output (3 rows) is still caught.
+    shrunk_rows = [{"a": "1"}, {"a": "2"}, {"a": "3"}]  # 4th row silently dropped upstream
+    with pytest.raises(HarmonizeSafetyError, match="row"):
+        assert_row_and_column_integrity(
+            shrunk_rows,
+            shrunk_rows,
+            context="test",
+            columns="exact",
+            input_row_count=4,  # true on-disk row count
+        )
+
+
+def test_input_row_count_override_not_given_falls_back_to_len_input_rows():
+    input_rows = [{"a": "1"}, {"a": "2"}]
+    output_rows = [{"a": "1"}, {"a": "2"}]
+    assert_row_and_column_integrity(input_rows, output_rows, context="test", columns="exact")
+
+
+def test_input_row_count_override_passes_when_output_matches_true_count():
+    # Sanity check: passing the true anchor count doesn't spuriously fail
+    # when nothing was actually dropped.
+    input_rows = [{"a": "1"}, {"a": "2"}]
+    output_rows = [{"a": "1"}, {"a": "2"}]
+    assert_row_and_column_integrity(
+        input_rows, output_rows, context="test", columns="exact", input_row_count=2
+    )

@@ -31,23 +31,49 @@ _REPORT_TITLES = {
 }
 
 
-def _read_header(path: Path) -> list[str]:
-    """Read the header row directly from the input file, independent of row count.
+def _read_header_and_row_count(path: Path) -> tuple[list[str], int]:
+    """Read the header row and the on-disk data-row count directly from the
+    input file, via cli.py's own re-implementation of the parse
+    (detect_encoding / detect_delimiter / strip_footer), independent of
+    ``dictionary.read_rows``.
 
-    Used as the source of truth for output CSV column structure when
+    Used as the safety-net anchor for both
+    ``harmonize.assert_row_and_column_integrity``'s ``input_columns`` and
+    ``input_row_count`` (the column check and the row-count check), and as
+    the source of truth for output CSV column structure when
     ``transformed_rows`` is empty (e.g. a valid header-only input with zero
     data rows) — falling back to ``transformed_rows[0].keys()`` in that case
     would silently produce an empty fieldnames list and destroy the input's
     column structure in the output.
+
+    Deliberately re-implemented here rather than calling into
+    ``dictionary.py`` (e.g. its private ``_read_cleaned_lines``): if this
+    anchor shared dictionary.py's own parse call, a regression introduced
+    inside that shared path (e.g. ``read_rows`` mis-slicing its data lines,
+    or a bug specific to how dictionary.py drives ``strip_footer``) could
+    corrupt both this anchor and ``read_rows``'s output identically, and
+    the safety net would again pass trivially on already-corrupted data --
+    exactly the failure mode this anchor exists to close. Keeping this as
+    cli.py's own separate call path means a regression confined to
+    dictionary.py's parsing does not automatically propagate into the
+    anchor too.
     """
     encoding = detect_encoding(path)
     raw_lines = path.read_text(encoding=encoding).splitlines()
     delimiter = detect_delimiter(raw_lines[:10])
     data_lines, _stripped = strip_footer(raw_lines, delimiter)
     if not data_lines:
-        return []
+        return [], 0
     header = data_lines[0].split(delimiter)
     check_header_has_no_duplicates(header)
+    return header, len(data_lines) - 1
+
+
+def _read_header(path: Path) -> list[str]:
+    """Header-only convenience wrapper around ``_read_header_and_row_count``
+    for call sites that don't need the row count (e.g. the header-only
+    fieldnames fallback)."""
+    header, _row_count = _read_header_and_row_count(path)
     return header
 
 
@@ -176,19 +202,24 @@ def _harmonize_single_file(file, rules_path, output, execute):
 
     transformed_rows, mutations = apply_transformations(rows, rules)
 
+    # Anchor both the column check and the row-count check to a header/count
+    # re-derived independently from disk, not to rows[0].keys()/len(rows) --
+    # the latter are already the *output* of read_rows, so a bug inside
+    # read_rows's own parsing (e.g. a duplicate header silently
+    # dict-collapsing, or strip_footer misclassifying a genuine data line as
+    # a footer line and dropping it) would corrupt both sides of this
+    # comparison identically and the check would pass trivially on
+    # already-corrupted data.
+    anchor_header, anchor_row_count = _read_header_and_row_count(file_path)
+
     try:
         assert_row_and_column_integrity(
             rows,
             transformed_rows,
             context=f"harmonize {file_path.name}",
             columns="exact",
-            # Anchor to the header re-derived independently from disk, not
-            # rows[0].keys() -- the latter is already the *output* of
-            # read_rows, so a bug inside read_rows itself (e.g. a duplicate
-            # header silently dict-collapsing) would corrupt both sides of
-            # this comparison identically and this check would pass
-            # trivially on already-corrupted data.
-            input_columns=_read_header(file_path),
+            input_columns=anchor_header,
+            input_row_count=anchor_row_count,
         )
     except HarmonizeSafetyError as exc:
         click.echo(f"Refusing to write output: {exc}", err=True)
@@ -197,7 +228,7 @@ def _harmonize_single_file(file, rules_path, output, execute):
     if transformed_rows:
         fieldnames = list(transformed_rows[0].keys())
     else:
-        fieldnames = _read_header(file_path)
+        fieldnames = anchor_header
 
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=fieldnames)
@@ -301,12 +332,16 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
 
     # Independently re-derived from disk (also re-validates "no duplicate
     # header column" for every source up front) -- and reused below both to
-    # anchor each source's safety-net column check and as the header-only
-    # fieldnames fallback, so we don't re-read/re-parse the file twice.
+    # anchor each source's safety-net row-count/column check and as the
+    # header-only fieldnames fallback, so we don't re-read/re-parse the file
+    # twice.
     file_headers: dict[str, list[str]] = {}
+    file_row_counts: dict[str, int] = {}
     for file_path in file_paths:
         try:
-            file_headers[str(file_path)] = _read_header(file_path)
+            file_headers[str(file_path)], file_row_counts[str(file_path)] = _read_header_and_row_count(
+                file_path
+            )
         except DuplicateHeaderError as exc:
             click.echo(f"Malformed input file {file_path}: {exc}", err=True)
             sys.exit(3)
@@ -341,6 +376,7 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
                 context=f"harmonize {file_path.name}",
                 columns="exact",
                 input_columns=file_headers[source_key],
+                input_row_count=file_row_counts[source_key],
             )
         except HarmonizeSafetyError as exc:
             click.echo(f"Refusing to write output: {exc}", err=True)

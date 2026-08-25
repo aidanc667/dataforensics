@@ -195,6 +195,56 @@ def test_safety_net_catches_regression_even_if_ingest_duplicate_header_guard_is_
     assert "Refusing to write output" in result.output
 
 
+def test_execute_refuses_when_parse_stage_silently_drops_a_real_data_row(tmp_path, monkeypatch):
+    # Reproduces the exact blocking scenario from the final review round: a
+    # regression *inside the initial file parse itself* (e.g. strip_footer
+    # misclassifying a genuine trailing data line as a footer line and
+    # dropping it) must still be caught by the row-count safety net, even
+    # though both `rows` (read_rows's output) and `transformed_rows`
+    # (apply_transformations's output) are derived from that same
+    # already-shrunk parse and would silently agree with each other --
+    # before the fix, this went completely undetected (4 real rows became
+    # 3 in the output, exit 0, "harmonize complete").
+    #
+    # dictionary.py imports strip_footer directly (`from rdh.ingest import
+    # ... strip_footer`), so patching only that module's local binding
+    # simulates a regression confined to read_rows's parse path.
+    # cli.py's `_read_header_and_row_count` is a deliberately separate
+    # re-implementation with its own independent `strip_footer` binding
+    # (unaffected by this patch) -- it is that anchor which must catch the
+    # drop.
+    import rdh.dictionary as dictionary_module
+    from rdh.ingest import strip_footer as real_strip_footer
+
+    def _row_dropping_strip_footer(lines, delimiter):
+        data_lines, stripped = real_strip_footer(lines, delimiter)
+        # Simulate strip_footer accidentally eating the last real data line.
+        return data_lines[:-1], stripped
+
+    monkeypatch.setattr(dictionary_module, "strip_footer", _row_dropping_strip_footer)
+
+    src = tmp_path / "sample.csv"
+    src.write_text(
+        "participant_id,smoking_status\n"
+        "1,10\n"
+        "2,20\n"
+        "3,30\n"
+        "4,40\n"
+    )
+    rules_path = tmp_path / "rules.yaml"
+    rules_path.write_text("version: 1\nprimary_key: [participant_id]\ncolumns: {}\n")
+    output_path = tmp_path / "out.csv"
+
+    result = CliRunner().invoke(
+        main,
+        ["harmonize", str(src), "--rules", str(rules_path), "--output", str(output_path), "--execute"],
+    )
+
+    assert result.exit_code == 3
+    assert not output_path.exists()
+    assert "Refusing to write output" in result.output
+
+
 def test_execute_on_header_only_csv_preserves_columns(tmp_path):
     src = tmp_path / "empty.csv"
     src.write_text("participant_id,smoking_status\n")

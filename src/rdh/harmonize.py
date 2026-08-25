@@ -16,12 +16,17 @@ class HarmonizeSafetyError(Exception):
     after every run unless a rule explicitly removed something." No rule
     type in this codebase currently declares a column removal, so the
     column check is unconditional wherever it applies. When callers pass
-    ``input_columns`` derived independently from the on-disk file (see
-    ``assert_row_and_column_integrity``'s docstring), this check is
-    independent of any single upstream fix (e.g. duplicate-header detection
-    in ingest.py) -- a future regression anywhere in the transform pipeline,
-    including inside the initial file parse itself, is still caught here,
-    before anything is written to disk."""
+    ``input_columns`` AND ``input_row_count`` derived independently from
+    the on-disk file (see ``assert_row_and_column_integrity``'s docstring
+    -- cli.py does this via ``cli._read_header_and_row_count``), both
+    the column check and the row check are independent of any single
+    upstream fix (e.g. duplicate-header detection in ingest.py) -- a future
+    regression anywhere in the transform pipeline, including inside the
+    initial file parse itself (e.g. strip_footer dropping a genuine data
+    line), is still caught here, before anything is written to disk. If a
+    caller omits ``input_row_count`` (or ``input_columns``), that half of
+    the check falls back to comparing against ``input_rows`` itself and
+    loses this independence -- see the parameter docs below."""
 
 
 def _column_union(rows: list[dict]) -> list[str]:
@@ -50,20 +55,24 @@ def assert_row_and_column_integrity(
     context: str,
     columns: str = "exact",
     input_columns: list[str] | None = None,
+    input_row_count: int | None = None,
 ) -> None:
     """Assert output_rows has exactly as many rows as input_rows, and
     (depending on ``columns``) the same column structure.
 
     ``input_columns``, when given, overrides the column set derived from
-    ``input_rows`` for the column-structure check (the row-count check
-    always uses ``input_rows``/``output_rows`` directly). Callers anchoring
-    this check to the actual on-disk file header (e.g. cli.py, via
-    ``_read_header``) should pass it explicitly -- otherwise this check only
-    compares two views that were both already derived from the same
-    upstream parse (e.g. dictionary.read_rows), so a bug *inside* that parse
-    (such as a duplicate-header dict-collapse) would corrupt both sides
-    identically and this check would pass trivially on already-corrupted
-    data. Passing the independently re-derived file header closes that gap.
+    ``input_rows`` for the column-structure check. ``input_row_count``,
+    when given, overrides the row count derived from ``input_rows`` for the
+    row-count check, the same way ``input_columns`` overrides it for the
+    column check. Callers anchoring this check to the actual on-disk file
+    (e.g. cli.py, via ``cli._read_header_and_row_count``) should pass
+    both explicitly -- otherwise this check only compares two views that
+    were both already derived from the same upstream parse (e.g.
+    dictionary.read_rows), so a bug *inside* that parse (such as a
+    duplicate-header dict-collapse, or ``strip_footer`` dropping a genuine
+    data line) would corrupt both sides identically and this check would
+    pass trivially on already-corrupted data. Passing the independently
+    re-derived file header and row count closes that gap for both checks.
 
     ``columns``:
       - "exact": output column *names* must exactly match input column names
@@ -81,9 +90,10 @@ def assert_row_and_column_integrity(
       - "skip": no column check (e.g. when input_rows is empty and there is
         nothing meaningful to compare).
     """
-    if len(output_rows) != len(input_rows):
+    expected_row_count = len(input_rows) if input_row_count is None else input_row_count
+    if len(output_rows) != expected_row_count:
         raise HarmonizeSafetyError(
-            f"{context}: {len(input_rows)} input row(s) became {len(output_rows)} output "
+            f"{context}: {expected_row_count} input row(s) became {len(output_rows)} output "
             "row(s) -- rows must never be silently added or dropped"
         )
 
