@@ -1,0 +1,94 @@
+{
+  "participant_id": {
+    "dtype": "Utf8",
+    "category": "id",
+    "non_null_pct": 100.0,
+    "unique_count": 19,
+    "is_zero_variance": false,
+    "zero_count": 0,
+    "null_count": 0,
+    "levels": null,
+    "outliers": null,
+    "top_code_spike": null
+  },
+  "age": {
+    "dtype": "Utf8",
+    "category": "free_text",
+    "non_null_pct": 100.0,
+    "unique_count": 19,
+    "is_zero_variance": false,
+    "zero_count": 0,
+    "null_count": 0,
+    "levels": null,
+    "outliers": {
+      "method": "IQR",
+      "outlier_count": 1,
+      "outlier_indices": [
+        2
+      ]
+    },
+    "top_code_spike": null
+  },
+  "sex": {
+    "dtype": "Utf8",
+    "category": "categorical",
+    "non_null_pct": 100.0,
+    "unique_count": 2,
+    "is_zero_variance": false,
+    "zero_count": 0,
+    "null_count": 0,
+    "levels": [
+      "F",
+      "M"
+    ],
+    "outliers": null,
+    "top_code_spike": null
+  },
+  "smoking_status": {
+    "dtype": "Utf8",
+    "category": "free_text",
+    "non_null_pct": 100.0,
+    "unique_count": 15,
+    "is_zero_variance": false,
+    "zero_count": 2,
+    "null_count": 0,
+    "levels": null,
+    "outliers": {
+      "method": "IQR",
+      "outlier_count": 3,
+      "outlier_indices": [
+        1,
+        5,
+        14
+      ]
+    },
+    "top_code_spike": {
+      "value": 99.0,
+      "fraction": 0.15
+    }
+  },
+  "county_fips": {
+    "dtype": "Utf8",
+    "category": "id",
+    "non_null_pct": 100.0,
+    "unique_count": 4,
+    "is_zero_variance": false,
+    "zero_count": 0,
+    "null_count": 0,
+    "levels": null,
+    "outliers": null,
+    "top_code_spike": null
+  },
+  "visit_date": {
+    "dtype": "Utf8",
+    "category": "free_text",
+    "non_null_pct": 100.0,
+    "unique_count": 19,
+    "is_zero_variance": false,
+    "zero_count": 0,
+    "null_count": 0,
+    "levels": null,
+    "outliers": null,
+    "top_code_spike": null
+  }
+}
