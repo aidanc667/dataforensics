@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 
 from rdh import dictionary
-from rdh.typing_guards import is_pii_like_column
+from rdh.typing_guards import is_id_like_column, is_pii_like_column
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
@@ -165,10 +165,17 @@ def validate(rows: list[dict], rules: dict) -> dict:
 
         # 1. Outlier suggestions (IQR method) — only if the entire column
         # parses as numeric, mirroring build_data_dictionary's numeric
-        # detection in dictionary.py.
+        # detection in dictionary.py. ID-like columns (is_id_like_column) are
+        # never numerically cast or outlier-tested here either, mirroring
+        # dictionary.py's identical guard — e.g. a FIPS code like "48201"
+        # must never be float()-cast and IQR-tested just because it happens
+        # to parse as a number; dictionary.py already classifies such
+        # columns as category "id" and this check must respect that.
         numeric_values: list[float] = []
-        is_numeric = True
+        is_numeric = not is_id_like_column(column)
         for raw_value, _row_key_ in values_with_keys:
+            if not is_numeric:
+                break
             try:
                 numeric_values.append(float(raw_value))
             except ValueError:

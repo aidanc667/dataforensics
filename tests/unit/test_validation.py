@@ -174,6 +174,35 @@ def test_duplicate_primary_key_message_masks_pii_like_primary_key_value():
     assert "[masked" in dup_errors[0]["message"]
 
 
+def test_id_like_numeric_column_never_flagged_as_outlier():
+    # county_fips is id-like (matches typing_guards.is_id_like_column) and
+    # its values happen to parse as floats ("06081" -> 6081.0), but it must
+    # never enter the IQR-outlier path -- dictionary.py already classifies
+    # such columns as category "id" and never numerically casts or
+    # outlier-tests them; validation.py's suggestion-tier check must match.
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [
+        {"participant_id": "1", "county_fips": "06081"},
+        {"participant_id": "2", "county_fips": "06001"},
+        {"participant_id": "3", "county_fips": "02138"},
+        {"participant_id": "4", "county_fips": "48201"},  # would be a numeric outlier if cast
+        {"participant_id": "5", "county_fips": "06081"},
+        {"participant_id": "6", "county_fips": "02138"},
+        {"participant_id": "7", "county_fips": "06001"},
+        {"participant_id": "8", "county_fips": "48201"},
+    ]
+    result = validate(rows, rules)
+    outlier_suggestions = [s for s in result["suggestions"] if s["rule"] == "iqr_outlier" and s["column"] == "county_fips"]
+    assert outlier_suggestions == []
+
+
 def test_composite_primary_key_duplicate_detection():
     rules = {
         "version": 1,
