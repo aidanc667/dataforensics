@@ -203,6 +203,73 @@ def test_id_like_numeric_column_never_flagged_as_outlier():
     assert outlier_suggestions == []
 
 
+def test_leading_zero_id_like_column_never_flagged_as_outlier_even_without_id_like_name():
+    # "county_code" does NOT match is_id_like_column's naming pattern, but
+    # its values ("06081", "02138", "48201", ...) preserve leading zeros --
+    # dictionary.py classifies such a column as category "id" via
+    # `is_id_like_column(name) OR preserves_leading_zero(values)`, not via
+    # the name pattern alone. Before the fix, validation.py's guard only
+    # checked is_id_like_column(column), so this column would still be
+    # float()-cast (destroying the leading zero) and IQR-tested here,
+    # contradicting dictionary.py's own classification of the same column.
+    from rdh.typing_guards import is_id_like_column, preserves_leading_zero
+
+    assert is_id_like_column("county_code") is False
+    assert preserves_leading_zero(["06081", "02138", "48201"]) is True
+
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [
+        {"participant_id": "1", "county_code": "06081"},
+        {"participant_id": "2", "county_code": "06001"},
+        {"participant_id": "3", "county_code": "02138"},
+        {"participant_id": "4", "county_code": "48201"},  # would be a numeric outlier if cast
+        {"participant_id": "5", "county_code": "06081"},
+        {"participant_id": "6", "county_code": "02138"},
+        {"participant_id": "7", "county_code": "06001"},
+        {"participant_id": "8", "county_code": "48201"},
+    ]
+    result = validate(rows, rules)
+    outlier_suggestions = [
+        s for s in result["suggestions"] if s["rule"] == "iqr_outlier" and s["column"] == "county_code"
+    ]
+    assert outlier_suggestions == []
+
+
+def test_leading_zero_low_cardinality_column_not_flagged_as_rare_category():
+    # Same contradiction as the outlier case above, but for rare_category:
+    # a low-cardinality leading-zero-preserving column (only 2 distinct
+    # values across many rows) satisfies the "looks categorical" cardinality
+    # heuristic and, before the fix, would get its singleton value flagged
+    # as rare_category -- even though dictionary.py classifies this column
+    # as category "id" via preserves_leading_zero, not "categorical".
+    from rdh.typing_guards import is_id_like_column, preserves_leading_zero
+
+    assert is_id_like_column("county_code") is False
+    assert preserves_leading_zero(["06081", "02138"]) is True
+
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [{"participant_id": str(i), "county_code": "06081"} for i in range(8)] + [
+        {"participant_id": "8", "county_code": "02138"}  # would look "rare" if treated as categorical
+    ]
+    result = validate(rows, rules)
+    rare = [s for s in result["suggestions"] if s["rule"] == "rare_category" and s["column"] == "county_code"]
+    assert rare == []
+
+
 def test_composite_primary_key_duplicate_detection():
     rules = {
         "version": 1,

@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 
 from rdh import dictionary
-from rdh.typing_guards import is_id_like_column, is_pii_like_column
+from rdh.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
@@ -165,14 +165,20 @@ def validate(rows: list[dict], rules: dict) -> dict:
 
         # 1. Outlier suggestions (IQR method) — only if the entire column
         # parses as numeric, mirroring build_data_dictionary's numeric
-        # detection in dictionary.py. ID-like columns (is_id_like_column) are
-        # never numerically cast or outlier-tested here either, mirroring
-        # dictionary.py's identical guard — e.g. a FIPS code like "48201"
-        # must never be float()-cast and IQR-tested just because it happens
-        # to parse as a number; dictionary.py already classifies such
-        # columns as category "id" and this check must respect that.
+        # detection in dictionary.py. dictionary.py classifies a column as
+        # category "id" (and never numerically casts or outlier-tests it)
+        # when EITHER is_id_like_column(name) matches OR
+        # preserves_leading_zero(non_null_values) is true — e.g. a column
+        # named "county_code" doesn't match the ID-name pattern, but its
+        # leading-zero values ("06081") must still never be float()-cast and
+        # IQR-tested, or the leading zero would be destroyed and this check
+        # would contradict dictionary.py's own classification of the same
+        # column. Both conditions must be checked here to actually mirror
+        # dictionary.py's logic.
+        column_values = [v for v, _ in values_with_keys]
+        is_id_like = is_id_like_column(column) or preserves_leading_zero(column_values)
+        is_numeric = not is_id_like
         numeric_values: list[float] = []
-        is_numeric = not is_id_like_column(column)
         for raw_value, _row_key_ in values_with_keys:
             if not is_numeric:
                 break
@@ -198,14 +204,23 @@ def validate(rows: list[dict], rules: dict) -> dict:
 
         # 2. Rare category suggestions — only run on columns that look
         # categorical-ish (unique-value count < half the non-null row
-        # count), so ID-shaped/free-text columns aren't flagged wholesale.
+        # count), so free-text columns aren't flagged wholesale. The
+        # cardinality heuristic alone isn't enough to exclude ID-shaped
+        # columns, though: a *low-cardinality* ID-shaped column (e.g.
+        # county_fips with only 2 distinct leading-zero values across many
+        # rows) can still satisfy "unique_count < half the row count" and
+        # get flagged as a rare category despite dictionary.py classifying
+        # it category "id" — so apply the same combined ID guard used for
+        # outlier suggestions above.
         value_counts: dict[str, int] = {}
         for raw_value, _row_key_ in values_with_keys:
             value_counts[raw_value] = value_counts.get(raw_value, 0) + 1
 
         unique_count = len(value_counts)
         non_null_count = len(values_with_keys)
-        looks_categorical = unique_count > 1 and unique_count < (non_null_count / 2)
+        looks_categorical = (
+            not is_id_like and unique_count > 1 and unique_count < (non_null_count / 2)
+        )
 
         if looks_categorical:
             for raw_value, row_key in values_with_keys:
