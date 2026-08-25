@@ -50,3 +50,11 @@ def test_id_like_column_matches_census_geo_columns():
     assert is_id_like_column("GEOID10") is True
     assert is_id_like_column("GEOID20") is True
     assert is_id_like_column("PUMA") is True
+
+
+def test_id_like_column_matches_puma_vintage_variants():
+    assert is_id_like_column("PUMA00") is True
+    assert is_id_like_column("PUMA10") is True
+    assert is_id_like_column("MIGPUMA") is True
+    assert is_id_like_column("MIGPUMA00") is True
+    assert is_id_like_column("MIGPUMA10") is True
