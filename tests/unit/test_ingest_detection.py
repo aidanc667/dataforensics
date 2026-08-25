@@ -35,3 +35,15 @@ def test_detect_encoding_latin1(tmp_path):
     assert detect_encoding(f).lower() in (
         "latin-1", "iso-8859-1", "cp1252", "cp1250",
     )
+
+
+def test_deduplicate_header_appends_positional_suffix():
+    from rdh.ingest import deduplicate_header
+
+    assert deduplicate_header(["id", "name", "name", "name"]) == ["id", "name", "name_2", "name_3"]
+
+
+def test_deduplicate_header_no_change_when_no_duplicates():
+    from rdh.ingest import deduplicate_header
+
+    assert deduplicate_header(["id", "age", "sex"]) == ["id", "age", "sex"]

@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import tempfile
 from pathlib import Path
@@ -6,45 +8,113 @@ import streamlit as st
 
 from rdh.config_schema import RulesConfigError, load_rules
 from rdh.dictionary import build_data_dictionary, read_rows
-from rdh.harmonize import apply_transformations, plan_transformations
+from rdh.harmonize import apply_transformations
+from rdh.ingest import DuplicateHeaderError, check_header_has_no_duplicates, deduplicate_header
+from rdh.investigate import (
+    detect_ambiguous_date_columns,
+    detect_candidate_sentinels,
+    detect_duplicate_rows,
+    detect_similar_categories,
+)
 from rdh.manifest import build_manifest
+from rdh.report import render_markdown
 from rdh.validation import validate
 from rdh.viewer import classify_report, validation_summary
 
-st.set_page_config(page_title="rdh", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="rdh — research data harmonizer", layout="wide", page_icon="🧬")
 
 st.markdown(
     """
     <style>
-    .block-container { padding-top: 2.5rem; max-width: 1100px; }
-    h1 { font-size: 1.9rem; margin-bottom: 0; }
-    .rdh-tagline { color: var(--text-color, #6b7280); opacity: 0.75; margin-top: 0.2rem; margin-bottom: 1.6rem; }
-    div[data-testid="stMetric"] { background: rgba(127,127,127,0.06); border-radius: 10px; padding: 0.75rem 0.9rem; }
-    .rdh-error   { border-left: 4px solid #dc2626; padding: 0.5rem 0.9rem; margin: 0.35rem 0; border-radius: 0 6px 6px 0; background: rgba(220,38,38,0.06); }
-    .rdh-warning { border-left: 4px solid #d97706; padding: 0.5rem 0.9rem; margin: 0.35rem 0; border-radius: 0 6px 6px 0; background: rgba(217,119,6,0.06); }
-    .rdh-suggestion { border-left: 4px solid #2563eb; padding: 0.5rem 0.9rem; margin: 0.35rem 0; border-radius: 0 6px 6px 0; background: rgba(37,99,235,0.06); }
-    .rdh-mono { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+    #MainMenu, footer { visibility: hidden; }
+    .block-container { padding-top: 2rem; padding-bottom: 4rem; max-width: 1180px; }
+
+    html, body, [class*="css"] {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    }
+
+    .rdh-hero { display: flex; align-items: center; gap: 0.9rem; margin-bottom: 0.15rem; }
+    .rdh-hero-badge {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 46px; height: 46px; border-radius: 12px;
+        background: linear-gradient(135deg, #4F46E5, #7C3AED);
+        font-size: 1.4rem;
+    }
+    .rdh-hero h1 { font-size: 1.65rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    .rdh-tagline { color: #64748B; font-size: 0.95rem; margin: 0.35rem 0 1.6rem 0; max-width: 720px; }
+
+    .rdh-steps { display: flex; gap: 0.5rem; margin-bottom: 1.8rem; }
+    .rdh-step {
+        flex: 1; padding: 0.55rem 0.9rem; border-radius: 10px;
+        background: #F1F5F9; border: 1px solid #E2E8F0;
+        font-size: 0.82rem; font-weight: 600; color: #94A3B8;
+        display: flex; align-items: center; gap: 0.5rem;
+    }
+    .rdh-step.active { background: #EEF2FF; border-color: #C7D2FE; color: #4338CA; }
+    .rdh-step.done { background: #F0FDF4; border-color: #BBF7D0; color: #15803D; }
+    .rdh-step-num {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 20px; height: 20px; border-radius: 50%; background: currentColor;
+        font-size: 0.7rem; flex-shrink: 0;
+    }
+    .rdh-step-num span { color: white; }
+
+    .rdh-card {
+        border: 1px solid #E2E8F0; border-radius: 12px; padding: 1rem 1.2rem;
+        margin-bottom: 0.6rem; background: white;
+    }
+    .rdh-card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.15rem; }
+    .rdh-card-evidence { color: #64748B; font-size: 0.85rem; font-family: ui-monospace, monospace; }
+
+    .rdh-badge {
+        display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px;
+        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase;
+        margin-right: 0.4rem;
+    }
+    .rdh-badge-error { background: #FEE2E2; color: #B91C1C; }
+    .rdh-badge-warning { background: #FEF3C7; color: #B45309; }
+    .rdh-badge-suggestion { background: #DBEAFE; color: #1D4ED8; }
+    .rdh-badge-high { background: #DCFCE7; color: #166534; }
+    .rdh-badge-medium { background: #FEF9C3; color: #854D0E; }
+
+    .rdh-bucket-header { font-size: 1.05rem; font-weight: 700; margin: 1.6rem 0 0.5rem 0; display: flex; align-items: center; gap: 0.4rem; }
+
+    div[data-testid="stMetric"] { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 0.75rem 0.9rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("🧹 research-data-harmonizer")
 st.markdown(
-    '<p class="rdh-tagline">Upload a messy research export. See exactly what\'s wrong, '
-    "what a rules-driven cleanup would change, and download the result — with a full audit trail.</p>",
+    """
+    <div class="rdh-hero">
+        <div class="rdh-hero-badge">🧬</div>
+        <h1>research-data-harmonizer</h1>
+    </div>
+    <p class="rdh-tagline">
+        Upload a messy research export. rdh investigates it first — profiling every column,
+        surfacing duplicates, inconsistent categories, ambiguous dates, and outliers with evidence,
+        not blind fixes. You review and approve what to change. Nothing is altered until you say so,
+        and every change is logged.
+    </p>
+    """,
     unsafe_allow_html=True,
 )
 
-_EXAMPLES_DIR = Path(__file__).parent / "examples"
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
-_REPORT_EXAMPLES = {
-    "Validation report — errors, warnings, suggestions": "validation_report.json",
-    "Data dictionary — per-column profile": "data_dictionary.json",
-    "Manifest — single-file harmonize audit trail": "manifest.json",
-    "Manifest — cross-dataset crosswalk (2 sources, never merged)": "crosswalk_manifest.json",
-    "Unrecognized shape — not an rdh report at all": "unrecognized_shape.json",
-}
+_EXAMPLES_DIR = Path(__file__).parent / "examples"
+
+
+def _step_bar(current: int) -> None:
+    labels = ["Upload", "Investigate", "Review & Approve", "Cleaned Dataset"]
+    html = ['<div class="rdh-steps">']
+    for i, label in enumerate(labels, start=1):
+        cls = "done" if i < current else ("active" if i == current else "")
+        html.append(
+            f'<div class="rdh-step {cls}"><span class="rdh-step-num"><span>{i}</span></span>{label}</div>'
+        )
+    html.append("</div>")
+    st.markdown("".join(html), unsafe_allow_html=True)
 
 
 def _write_temp(name: str, content: bytes) -> Path:
@@ -54,167 +124,318 @@ def _write_temp(name: str, content: bytes) -> Path:
     return path
 
 
-def _severity_box(kind: str, finding: dict) -> None:
-    css_class = {"errors": "rdh-error", "warnings": "rdh-warning", "suggestions": "rdh-suggestion"}[kind]
-    st.markdown(
-        f'<div class="{css_class}"><span class="rdh-mono">{finding.get("rule", "")}</span> — '
-        f'{finding.get("message", "")}<br>'
-        f'<span class="rdh-mono" style="opacity:0.7">row_key: {finding.get("row_key", {})}</span></div>',
-        unsafe_allow_html=True,
-    )
+def _sniff_header(path: Path) -> list[str]:
+    from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
+
+    encoding = detect_encoding(path)
+    raw_lines = path.read_text(encoding=encoding).splitlines()
+    delimiter = detect_delimiter(raw_lines[:10])
+    data_lines, _ = strip_footer(raw_lines, delimiter)
+    return data_lines[0].split(delimiter) if data_lines else []
 
 
-tab_analyze, tab_viewer = st.tabs(["🔍 Analyze & Clean", "📄 Report Viewer"])
+def _rewrite_with_deduplicated_header(path: Path) -> Path:
+    from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
 
-# ---------------------------------------------------------------------------
-# Tab 1: Analyze & Clean — the actual tool, running the real engine live.
-# ---------------------------------------------------------------------------
+    encoding = detect_encoding(path)
+    raw_lines = path.read_text(encoding=encoding).splitlines()
+    delimiter = detect_delimiter(raw_lines[:10])
+    data_lines, footer = strip_footer(raw_lines, delimiter)
+    if not data_lines:
+        return path
+    fixed_header = deduplicate_header(data_lines[0].split(delimiter))
+    new_lines = [delimiter.join(fixed_header)] + data_lines[1:] + footer
+    new_path = path.parent / f"deduped_{path.name}"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    return new_path
+
+
+tab_analyze, tab_viewer = st.tabs(["Analyze & Clean", "Report Viewer"])
+
 with tab_analyze:
-    left, right = st.columns([2, 1])
-    with left:
-        data_file = st.file_uploader("Upload a CSV/TSV file to analyze", type=["csv", "tsv"])
-    with right:
+    # ------------------------------------------------------------------ #
+    # Step 1: Upload
+    # ------------------------------------------------------------------ #
+    upload_col, example_col = st.columns([2, 1])
+    with upload_col:
+        data_file = st.file_uploader("Upload a CSV/TSV file", type=["csv", "tsv"], label_visibility="visible")
+    with example_col:
         st.write("")
         st.write("")
-        use_example_data = st.button("Use bundled example instead", use_container_width=True)
+        if st.button("Use bundled example", use_container_width=True):
+            st.session_state["rdh_data_bytes"] = (_FIXTURES_DIR / "sample.csv").read_bytes()
+            st.session_state["rdh_data_name"] = "sample.csv"
+            st.session_state.pop("rdh_dedup_choice_made", None)
 
-    if use_example_data:
-        st.session_state["rdh_data_bytes"] = (_FIXTURES_DIR / "sample.csv").read_bytes()
-        st.session_state["rdh_data_name"] = "sample.csv"
-    elif data_file is not None:
+    if data_file is not None and data_file.name != st.session_state.get("rdh_data_name"):
         st.session_state["rdh_data_bytes"] = data_file.getvalue()
         st.session_state["rdh_data_name"] = data_file.name
+        st.session_state.pop("rdh_dedup_choice_made", None)
 
-    if st.session_state.get("rdh_data_bytes"):
-        st.caption(f"Analyzing: **{st.session_state['rdh_data_name']}**")
+    if not st.session_state.get("rdh_data_bytes"):
+        _step_bar(1)
+        st.info("Upload a file above, or click \"Use bundled example\" to try it immediately.")
+        st.stop()
 
-        rules_col, example_rules_col = st.columns([2, 1])
-        with rules_col:
-            rules_file = st.file_uploader(
-                "Optional: upload a rules YAML (enables validation + cleaning)", type=["yaml", "yml"]
-            )
-        with example_rules_col:
-            st.write("")
-            st.write("")
-            use_example_rules = st.button("Use bundled example rules", use_container_width=True)
+    raw_path = _write_temp(st.session_state["rdh_data_name"], st.session_state["rdh_data_bytes"])
 
-        if use_example_rules:
-            st.session_state["rdh_rules_bytes"] = (_FIXTURES_DIR / "sample_rules.yaml").read_bytes()
-            st.session_state["rdh_rules_name"] = "sample_rules.yaml"
-        elif rules_file is not None:
-            st.session_state["rdh_rules_bytes"] = rules_file.getvalue()
-            st.session_state["rdh_rules_name"] = rules_file.name
-
-        data_path = _write_temp(st.session_state["rdh_data_name"], st.session_state["rdh_data_bytes"])
-
-        # --- Data dictionary (always runs — read-only, no rules needed) ---
-        st.subheader("Data dictionary")
-        try:
-            dictionary = build_data_dictionary(data_path)
-        except Exception as exc:  # surfaced to the user, never a bare crash
-            st.error(f"Could not profile this file: {exc}")
+    # --- Duplicate-header recovery: a real path forward, not a dead end ---
+    try:
+        check_header_has_no_duplicates(_sniff_header(raw_path))
+        data_path = raw_path
+    except DuplicateHeaderError as exc:
+        _step_bar(1)
+        st.markdown(
+            f'<div class="rdh-card"><span class="rdh-badge rdh-badge-error">Blocking</span>'
+            f'<div class="rdh-card-title">Duplicate column names found</div>'
+            f'<div class="rdh-card-evidence">{exc}</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.write(
+            "This file can't be profiled safely as-is — with two columns sharing a name, "
+            "one of them would silently lose its data. Choose how to proceed:"
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("Auto-rename duplicates and continue (e.g. name → name, name_2)", type="primary"):
+            data_path = _rewrite_with_deduplicated_header(raw_path)
+            st.session_state["rdh_dedup_choice_made"] = str(data_path)
+            st.rerun()
+        c2.write("...or fix the file yourself and re-upload it above.")
+        if st.session_state.get("rdh_dedup_choice_made"):
+            data_path = Path(st.session_state["rdh_dedup_choice_made"])
+        else:
             st.stop()
 
-        st.dataframe(
-            [{"column": col, **fields} for col, fields in dictionary.items()],
-            use_container_width=True,
+    # ------------------------------------------------------------------ #
+    # Step 2: Investigate — always runs, never mutates anything
+    # ------------------------------------------------------------------ #
+    _step_bar(2)
+    dictionary = build_data_dictionary(data_path)
+    rows = read_rows(data_path)
+    columns = list(dictionary.keys())
+
+    dup_rows = detect_duplicate_rows(rows)
+    sentinels = detect_candidate_sentinels(rows, columns)
+    ambiguous_dates = detect_ambiguous_date_columns(rows, columns)
+    category_clusters = {
+        col: detect_similar_categories(fields["levels"])
+        for col, fields in dictionary.items()
+        if fields.get("category") == "categorical" and fields.get("levels")
+    }
+    category_clusters = {col: c for col, c in category_clusters.items() if c}
+
+    st.subheader("Data dictionary")
+    st.dataframe([{"column": c, **f} for c, f in dictionary.items()], use_container_width=True)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Columns", len(columns))
+    m2.metric("Rows", len(rows))
+    m3.metric("Duplicate rows", len(dup_rows))
+    m4.metric("Candidate sentinels", sum(len(v) for v in sentinels.values()))
+    m5.metric("Category clusters", sum(len(v) for v in category_clusters.values()))
+
+    # ------------------------------------------------------------------ #
+    # Step 3: Review & Approve
+    # ------------------------------------------------------------------ #
+    st.divider()
+    _step_bar(3)
+    st.markdown("Each finding below is a **suggestion with evidence** — nothing is applied until you click *Apply approved changes*.")
+
+    id_like_defaults = [c for c, f in dictionary.items() if f.get("category") == "id"]
+    primary_key = st.multiselect(
+        "Primary key column(s) — used to detect duplicate/conflicting records",
+        options=columns,
+        default=id_like_defaults[:1] or columns[:1],
+    )
+
+    approved_sentinels: dict[str, dict[str, str]] = {}
+    approved_categories: dict[str, dict[str, str]] = {}
+    approved_date_formats: dict[str, str] = {}
+
+    if sentinels:
+        st.markdown('<div class="rdh-bucket-header">🔎 Candidate missing-value codes</div>', unsafe_allow_html=True)
+        for col, values in sentinels.items():
+            for val in values:
+                key = f"sentinel__{col}__{val}"
+                c1, c2, c3 = st.columns([0.5, 2.5, 2])
+                checked = c1.checkbox("", key=f"{key}_on")
+                c2.markdown(
+                    f'<div class="rdh-card-title">{col} = "{val}"</div>'
+                    f'<div class="rdh-card-evidence">looks like a common missing-value convention</div>',
+                    unsafe_allow_html=True,
+                )
+                label = c3.text_input("Map to", value="Missing", key=f"{key}_label", label_visibility="collapsed")
+                if checked:
+                    approved_sentinels.setdefault(col, {})[val] = label
+
+    if ambiguous_dates:
+        st.markdown('<div class="rdh-bucket-header">📅 Ambiguous dates</div>', unsafe_allow_html=True)
+        for col, count in ambiguous_dates.items():
+            key = f"date__{col}"
+            c1, c2, c3 = st.columns([0.5, 2.5, 2])
+            checked = c1.checkbox("", key=f"{key}_on")
+            c2.markdown(
+                f'<div class="rdh-card-title">{col}</div>'
+                f'<div class="rdh-card-evidence">{count} value(s) shaped like MM/DD or DD/MM with no way to '
+                f"tell which — never parsed automatically</div>",
+                unsafe_allow_html=True,
+            )
+            fmt_label = c3.selectbox(
+                "Format", ["MM/DD/YYYY", "DD/MM/YYYY"], key=f"{key}_fmt", label_visibility="collapsed"
+            )
+            if checked:
+                approved_date_formats[col] = "%m/%d/%Y" if fmt_label == "MM/DD/YYYY" else "%d/%m/%Y"
+
+    if category_clusters:
+        st.markdown('<div class="rdh-bucket-header">🏷️ Inconsistent categories</div>', unsafe_allow_html=True)
+        for col, clusters in category_clusters.items():
+            for i, cluster in enumerate(clusters):
+                key = f"cat__{col}__{i}"
+                badge_cls = "rdh-badge-high" if cluster["confidence"] == "high" else "rdh-badge-medium"
+                c1, c2 = st.columns([0.5, 4])
+                checked = c1.checkbox("", key=f"{key}_on", value=(cluster["confidence"] == "high"))
+                values_str = " / ".join(f'"{v}"' for v in cluster["values"])
+                c2.markdown(
+                    f'<span class="rdh-badge {badge_cls}">{cluster["confidence"]} confidence</span>'
+                    f'<div class="rdh-card-title">{col}: {values_str}</div>'
+                    f'<div class="rdh-card-evidence">would merge onto "{cluster["suggested_canonical"]}"</div>',
+                    unsafe_allow_html=True,
+                )
+                if checked:
+                    approved_categories.setdefault(col, {})
+                    for v in cluster["values"]:
+                        if v != cluster["suggested_canonical"]:
+                            approved_categories[col][v] = cluster["suggested_canonical"]
+
+    outlier_cols = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
+    top_code_cols = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
+    if outlier_cols or top_code_cols or dup_rows:
+        st.markdown('<div class="rdh-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
+        st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
+        for c, f in outlier_cols.items():
+            st.markdown(
+                f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Suggestion</span>'
+                f'<div class="rdh-card-title">{c}: {f["outliers"]["outlier_count"]} statistical outlier(s)</div>'
+                f'<div class="rdh-card-evidence">IQR method — statistically unusual, not necessarily wrong</div></div>',
+                unsafe_allow_html=True,
+            )
+        for c, f in top_code_cols.items():
+            st.markdown(
+                f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Suggestion</span>'
+                f'<div class="rdh-card-title">{c}: possible top-coding at {f["top_code_spike"]["value"]}</div>'
+                f'<div class="rdh-card-evidence">{f["top_code_spike"]["fraction"]:.1%} of values sit at the observed max</div></div>',
+                unsafe_allow_html=True,
+            )
+        if dup_rows:
+            st.markdown(
+                f'<div class="rdh-card"><span class="rdh-badge rdh-badge-warning">Warning</span>'
+                f'<div class="rdh-card-title">{len(dup_rows)} exact duplicate row(s)</div>'
+                f'<div class="rdh-card-evidence">rdh never auto-deletes rows — could be a data-entry duplicate '
+                f"or a legitimate repeated record (e.g. a second visit)</div></div>",
+                unsafe_allow_html=True,
+            )
+
+    rules = {
+        "version": 1,
+        "primary_key": primary_key or columns[:1],
+        "columns": {col: {"type": "date", "format": fmt} for col, fmt in approved_date_formats.items()},
+        "missing_values": approved_sentinels,
+        "category_mappings": approved_categories,
+        "weights_strata": {"columns": []},
+    }
+
+    st.divider()
+    overlap_columns = set(approved_sentinels) & set(approved_categories)
+    if overlap_columns:
+        st.warning(
+            f"You approved both a missing-value mapping and a category mapping for the same "
+            f"column(s) ({', '.join(sorted(overlap_columns))}) — which one applies first is "
+            "ambiguous, so rdh refuses this combination rather than guess. Un-check one of the "
+            "two for each column listed before applying."
+        )
+        apply_clicked = False
+    else:
+        apply_clicked = st.button("✅ Apply approved changes", type="primary")
+
+    # ------------------------------------------------------------------ #
+    # Step 4: Cleaned dataset + audit report
+    # ------------------------------------------------------------------ #
+    if apply_clicked:
+        _step_bar(4)
+        try:
+            report = validate(rows, rules)
+        except Exception as exc:
+            st.error(f"Could not validate with the current rules: {exc}")
+            st.stop()
+
+        transformed_rows, mutations = apply_transformations(rows, rules)
+
+        manifest = build_manifest([data_path], [])
+        manifest["mutations"] = mutations
+        manifest["schema_sha256"] = []  # rules were assembled interactively, not from a file
+        manifest["provenance"] = {"source": "interactive review", "approved_by": "user"}
+
+        buffer = io.StringIO()
+        fieldnames = list(transformed_rows[0].keys()) if transformed_rows else columns
+        writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(transformed_rows)
+
+        st.success(f"Done — {len(mutations)} approved change(s) applied and logged.")
+
+        dl1, dl2, dl3 = st.columns(3)
+        dl1.download_button(
+            "⬇ Cleaned CSV", data=buffer.getvalue(),
+            file_name=f"cleaned_{st.session_state['rdh_data_name']}", mime="text/csv", use_container_width=True,
+        )
+        dl2.download_button(
+            "⬇ Audit manifest (.json)", data=json.dumps(manifest, indent=2),
+            file_name="manifest.json", mime="application/json", use_container_width=True,
+        )
+        dl3.download_button(
+            "⬇ Human-readable report (.md)",
+            data=render_markdown("Validation Report", report) + "\n\n" + render_markdown("Manifest", manifest),
+            file_name="audit_report.md", mime="text/markdown", use_container_width=True,
         )
 
-        rules = None
-        rules_error = None
-        rules_path = None
-        if st.session_state.get("rdh_rules_bytes"):
-            rules_path = _write_temp(st.session_state["rdh_rules_name"], st.session_state["rdh_rules_bytes"])
-            try:
-                rules = load_rules(rules_path)
-            except RulesConfigError as exc:
-                rules_error = str(exc)
-
-        if rules_error:
-            st.error(f"Invalid rules file: {rules_error}")
-
-        if rules is not None:
-            rows = read_rows(data_path)
-
-            # --- Validation report ---
-            st.subheader("Validation report")
-            report = validate(rows, rules)
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Errors", len(report["errors"]))
-            m2.metric("Warnings", len(report["warnings"]))
-            m3.metric("Suggestions", len(report["suggestions"]))
-            m4.metric("Checks evaluated", report["checks_evaluated"])
-            m5.metric("Checks passed", report["checks_passed"])
-
-            for kind, label in (("errors", "Errors"), ("warnings", "Warnings"), ("suggestions", "Suggestions")):
-                findings = report[kind]
-                if not findings:
-                    continue
-                with st.expander(f"{label} ({len(findings)})", expanded=(kind == "errors")):
-                    for finding in findings:
-                        _severity_box(kind, finding)
-
-            if not report["errors"] and not report["warnings"] and not report["suggestions"]:
-                st.success("No issues found against the configured rules.")
-
-            # --- Harmonize preview (dry run — always safe, never writes) ---
-            st.subheader("Harmonize preview")
-            st.caption("Dry run — nothing is changed until you click Generate below.")
-            plan = plan_transformations(rows, rules)
-            if plan:
-                st.dataframe(plan, use_container_width=True)
-            else:
-                st.info("No transformations would be applied — nothing in this file matches a missing-value or category-mapping rule.")
-
-            # --- Generate cleaned dataset + manifest, download only (never written to server disk for the user) ---
-            st.subheader("Generate cleaned dataset")
-            if st.button("Run harmonize --execute", type="primary"):
-                transformed_rows, mutations = apply_transformations(rows, rules)
-                manifest = build_manifest([data_path], [rules_path])
-                manifest["mutations"] = mutations
-
-                import csv
-                import io
-
-                buffer = io.StringIO()
-                fieldnames = list(transformed_rows[0].keys()) if transformed_rows else list(dictionary.keys())
-                writer = csv.DictWriter(buffer, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(transformed_rows)
-
-                st.success(f"Done — {len(mutations)} mutation(s) logged.")
-                dl1, dl2 = st.columns(2)
-                dl1.download_button(
-                    "⬇ Download cleaned CSV",
-                    data=buffer.getvalue(),
-                    file_name=f"cleaned_{st.session_state['rdh_data_name']}",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-                dl2.download_button(
-                    "⬇ Download audit manifest (.json)",
-                    data=json.dumps(manifest, indent=2),
-                    file_name="manifest.json",
-                    mime="application/json",
-                    use_container_width=True,
-                )
-                if mutations:
-                    with st.expander(f"Mutations logged ({len(mutations)})"):
-                        st.dataframe(mutations, use_container_width=True)
+        st.markdown('<div class="rdh-bucket-header">✅ Detected & changed</div>', unsafe_allow_html=True)
+        if mutations:
+            st.dataframe(mutations, use_container_width=True)
         else:
-            st.info("Upload a rules YAML (or use the bundled example) to see validation and enable cleaning.")
-    else:
-        st.info("Upload a CSV/TSV file above, or click \"Use bundled example instead\" to try it immediately.")
+            st.caption("Nothing was approved for change.")
 
-# ---------------------------------------------------------------------------
-# Tab 2: Report Viewer — inspect a JSON artifact rdh already produced elsewhere.
-# ---------------------------------------------------------------------------
+        st.markdown('<div class="rdh-bucket-header">👁️ Detected, left untouched</div>', unsafe_allow_html=True)
+        unapproved_sentinels = sum(len(v) for v in sentinels.values()) - sum(len(v) for v in approved_sentinels.values())
+        st.caption(
+            f"{len(dup_rows)} duplicate row(s) · {len(outlier_cols)} column(s) with outliers · "
+            f"{len(top_code_cols)} possible top-coded column(s) · {unapproved_sentinels} sentinel(s) not mapped — "
+            "none of these were altered."
+        )
+
+        st.markdown('<div class="rdh-bucket-header">🚩 Still needs human review</div>', unsafe_allow_html=True)
+        if report["errors"]:
+            for finding in report["errors"]:
+                st.markdown(
+                    f'<div class="rdh-card"><span class="rdh-badge rdh-badge-error">Error</span>'
+                    f'<span class="rdh-card-title">{finding["rule"]}</span> — {finding["message"]}<br>'
+                    f'<span class="rdh-card-evidence">row_key: {finding["row_key"]}</span></div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.success("No unresolved blocking errors.")
+
 with tab_viewer:
-    st.caption("Read-only. View a data_dictionary / validation_report / manifest JSON file rdh produced via the CLI.")
-
+    st.caption("Read-only. View a data_dictionary / validation_report / manifest JSON file rdh produced elsewhere.")
+    report_examples = {
+        "Validation report — errors, warnings, suggestions": "validation_report.json",
+        "Data dictionary — per-column profile": "data_dictionary.json",
+        "Manifest — single-file harmonize audit trail": "manifest.json",
+        "Manifest — cross-dataset crosswalk (2 sources, never merged)": "crosswalk_manifest.json",
+        "Unrecognized shape — not an rdh report at all": "unrecognized_shape.json",
+    }
     st.markdown("**Try an example**")
-    example_cols = st.columns(len(_REPORT_EXAMPLES))
-    for col, (label, filename) in zip(example_cols, _REPORT_EXAMPLES.items()):
+    example_cols = st.columns(len(report_examples))
+    for col, (label, filename) in zip(example_cols, report_examples.items()):
         if col.button(label, use_container_width=True, key=f"ex_{filename}"):
             st.session_state["rdh_selected_example"] = filename
             st.session_state["rdh_uploaded_bytes"] = None
@@ -241,13 +462,8 @@ with tab_viewer:
             for severity in ("errors", "warnings", "suggestions"):
                 with st.expander(f"{severity.capitalize()} ({len(data[severity])})"):
                     st.json(data[severity])
-
         elif kind == "data_dictionary":
-            st.dataframe(
-                [{"column": col, **fields} for col, fields in data.items()],
-                use_container_width=True,
-            )
-
+            st.dataframe([{"column": c, **f} for c, f in data.items()], use_container_width=True)
         elif kind == "manifest":
             st.write(
                 {
@@ -260,7 +476,6 @@ with tab_viewer:
             )
             st.subheader(f"Mutations ({len(data.get('mutations', []))})")
             st.dataframe(data.get("mutations", []), use_container_width=True)
-
         else:
             st.error("Unrecognized report shape — this doesn't look like rdh output.")
 

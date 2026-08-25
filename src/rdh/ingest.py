@@ -34,6 +34,30 @@ def check_header_has_no_duplicates(header: list[str]) -> None:
         )
 
 
+def deduplicate_header(header: list[str]) -> list[str]:
+    """Deterministically rename duplicate header entries by appending a
+    positional suffix (second 'name' -> 'name_2', third -> 'name_3', ...).
+
+    This is NOT called anywhere in the default CLI path -- `scan`/`harmonize`
+    still refuse via `check_header_has_no_duplicates` by default, since a
+    silent rename could surprise a scripted/automated caller. It exists for
+    an interactive caller (e.g. a UI) to offer as an explicit, opt-in,
+    clearly-logged remediation: renaming is lossless (every column survives
+    under a distinguishable name) and fully deterministic, unlike merging or
+    dropping, so it's safe to offer as a one-click fix -- but only ever with
+    the human choosing it, never automatically.
+    """
+    seen_counts: dict[str, int] = {}
+    result = []
+    for name in header:
+        seen_counts[name] = seen_counts.get(name, 0) + 1
+        if seen_counts[name] == 1:
+            result.append(name)
+        else:
+            result.append(f"{name}_{seen_counts[name]}")
+    return result
+
+
 def detect_encoding(path: Path) -> str:
     result = from_path(str(path)).best()
     if result is None:
