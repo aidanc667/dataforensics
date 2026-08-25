@@ -65,3 +65,39 @@ def test_load_rules_rejects_column_in_both_missing_values_and_category_mappings(
     )
     with pytest.raises(RulesConfigError):
         load_rules(f)
+
+
+def test_load_rules_rejects_chained_category_mappings(tmp_path):
+    # {M: Male, Male: Female} chains: applying once turns "M" -> "Male";
+    # applying the same rules again over that output would turn "Male" ->
+    # "Female", violating "running harmonize twice on the same output must
+    # not change it further."
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "category_mappings:\n"
+        "  sex:\n"
+        "    M: Male\n"
+        "    Male: Female\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_accepts_non_chained_category_mappings(tmp_path):
+    # Sanity check that the chained-mapping rejection doesn't over-fire on
+    # an ordinary, non-overlapping category mapping.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "category_mappings:\n"
+        "  sex:\n"
+        "    M: Male\n"
+        "    F: Female\n"
+    )
+    rules = load_rules(f)
+    assert rules["category_mappings"]["sex"] == {"M": "Male", "F": "Female"}

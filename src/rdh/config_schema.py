@@ -40,4 +40,24 @@ def load_rules(path: Path) -> dict:
             "this ordering is ambiguous and not supported; use only one rule type per column"
         )
 
+    # A category_mappings entry whose mapping targets (values) overlap with
+    # its own mapping sources (keys) chains on re-application: e.g.
+    # {M: Male, Male: Female} turns "M" -> "Male" on the first run, then
+    # "Male" -> "Female" on a second run over that same output. This
+    # violates "running harmonize twice on the same output must not change
+    # it further" (idempotency), so it's rejected up front here, the same
+    # way the missing_values/category_mappings column overlap above is.
+    for column, mapping in raw["category_mappings"].items():
+        if not isinstance(mapping, dict):
+            continue
+        chained = sorted(set(mapping.values()) & set(mapping.keys()))
+        if chained:
+            targets = ", ".join(f"'{c}'" for c in chained)
+            raise RulesConfigError(
+                f"category_mappings for column '{column}' chains: {targets} appear as both "
+                "a mapping target and a mapping source — this breaks idempotency (re-running "
+                "harmonize on already-harmonized output would keep changing values); use "
+                "non-overlapping source/target values"
+            )
+
     return raw
