@@ -214,7 +214,10 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
         transformed_rows, mutations = apply_transformations(rows, rules)
 
         source_name = file_path.stem
-        source_crosswalk = crosswalk.get("sources", {}).get(source_name, {})
+        if source_name not in crosswalk.get("sources", {}):
+            click.echo(f"No crosswalk entry for source '{source_name}' under 'sources:' in {crosswalk_path}", err=True)
+            sys.exit(2)
+        source_crosswalk = crosswalk["sources"][source_name]
         harmonized_rows = apply_crosswalk(transformed_rows, source_crosswalk)
         all_mutations.extend(mutations)
 

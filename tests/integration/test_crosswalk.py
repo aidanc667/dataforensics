@@ -84,3 +84,30 @@ def test_crosswalk_writes_two_separate_tables_never_merged(tmp_path):
 
     manifest = json.loads((output_dir / "crosswalk.manifest.json").read_text())
     assert len(manifest["schema_sha256"]) == 3  # wonder rules + pums rules + crosswalk
+
+
+def test_crosswalk_missing_source_entry_exits_2(tmp_path):
+    wonder, wonder_rules, pums, pums_rules, crosswalk = _setup(tmp_path)
+    # crosswalk fixture from _setup only defines "wonder" and "pums" sources;
+    # rename one input file so its stem no longer matches any crosswalk entry
+    renamed = tmp_path / "unmapped_source.csv"
+    renamed.write_text(wonder.read_text())
+    output_dir = tmp_path / "harmonized"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "harmonize",
+            str(renamed),
+            str(pums),
+            "--rules-map",
+            f"{renamed}={wonder_rules},{pums}={pums_rules}",
+            "--crosswalk",
+            str(crosswalk),
+            "--output-dir",
+            str(output_dir),
+            "--execute",
+        ],
+    )
+    assert result.exit_code == 2
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
