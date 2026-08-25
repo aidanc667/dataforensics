@@ -11,13 +11,18 @@ from rdh.dictionary import build_data_dictionary, read_rows
 from rdh.harmonize import apply_transformations
 from rdh.ingest import DuplicateHeaderError, check_header_has_no_duplicates, deduplicate_header
 from rdh.investigate import (
+    check_referential_integrity,
+    compare_fingerprints,
+    compute_dataset_fingerprint,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
     detect_duplicate_rows,
     detect_similar_categories,
+    discover_shared_key_columns,
+    infer_semantic_role,
 )
 from rdh.manifest import build_manifest
-from rdh.report import render_markdown
+from rdh.report import render_html, render_markdown
 from rdh.validation import validate
 from rdh.viewer import classify_report, validation_summary
 
@@ -150,7 +155,7 @@ def _rewrite_with_deduplicated_header(path: Path) -> Path:
     return new_path
 
 
-tab_analyze, tab_viewer = st.tabs(["Analyze & Clean", "Report Viewer"])
+tab_analyze, tab_multifile, tab_viewer = st.tabs(["Analyze & Clean", "Multi-File Relationships", "Report Viewer"])
 
 with tab_analyze:
     # ------------------------------------------------------------------ #
@@ -234,6 +239,97 @@ with tab_analyze:
     m4.metric("Candidate sentinels", sum(len(v) for v in sentinels.values()))
     m5.metric("Category clusters", sum(len(v) for v in category_clusters.values()))
 
+    # --- Findings summary dashboard ---
+    outlier_cols_preview = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
+    top_code_cols_preview = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
+    n_structural = (1 if dup_rows else 0)
+    n_quality = len(outlier_cols_preview) + len(top_code_cols_preview)
+    n_metadata = sum(len(v) for v in sentinels.values()) + len(ambiguous_dates)
+    n_harmonization = sum(len(v) for v in category_clusters.values())
+
+    st.markdown(
+        f"""
+        <div style="display:flex; gap:0.6rem; margin: 0.6rem 0 1.2rem 0;">
+          <div class="rdh-card" style="flex:1; border-left:4px solid #DC2626;">
+            <div style="font-size:1.4rem; font-weight:700;">{n_structural}</div>
+            <div class="rdh-card-evidence">🔴 structural issue(s)</div>
+          </div>
+          <div class="rdh-card" style="flex:1; border-left:4px solid #D97706;">
+            <div style="font-size:1.4rem; font-weight:700;">{n_quality}</div>
+            <div class="rdh-card-evidence">🟠 quality issue(s)</div>
+          </div>
+          <div class="rdh-card" style="flex:1; border-left:4px solid #CA8A04;">
+            <div style="font-size:1.4rem; font-weight:700;">{n_metadata}</div>
+            <div class="rdh-card-evidence">🟡 metadata inconsistency/ies</div>
+          </div>
+          <div class="rdh-card" style="flex:1; border-left:4px solid #2563EB;">
+            <div style="font-size:1.4rem; font-weight:700;">{n_harmonization}</div>
+            <div class="rdh-card-evidence">🔵 harmonization opportunity/ies</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # --- Suggested variable roles (informational only — never drives any transformation) ---
+    role_suggestions = {
+        col: role for col in columns
+        if (role := infer_semantic_role(col, dictionary[col])) is not None
+    }
+    if role_suggestions:
+        with st.expander(f"🧭 Suggested variable roles ({len(role_suggestions)}) — informational only"):
+            st.caption("Based on column naming conventions only. Never applied to anything — for your reference.")
+            st.dataframe(
+                [{"column": c, "suggested role": r["role"], "confidence": r["confidence"], "evidence": r["evidence"]} for c, r in role_suggestions.items()],
+                use_container_width=True,
+            )
+
+    # --- Dataset fingerprint: compare against a previous version, fully stateless ---
+    # The downloadable bundle embeds the full per-column dictionary alongside the
+    # fingerprint hashes -- not just the hashes -- so that re-uploading it later
+    # gives compare_fingerprints() real previous-version stats to diff against,
+    # rather than an empty stand-in that would misreport every column as changed.
+    fingerprint = compute_dataset_fingerprint(dictionary, len(rows))
+    fingerprint_bundle = {"fingerprint": fingerprint, "dictionary": dictionary}
+    with st.expander("🔗 Dataset fingerprint — compare against a previous version of this file"):
+        st.caption(
+            "Fully stateless: rdh keeps no history on its own. Download this fingerprint now; "
+            "next time you analyze a newer version of this dataset, upload today's fingerprint "
+            "here to see exactly what changed."
+        )
+        st.download_button(
+            "⬇ Download this fingerprint (.json)",
+            data=json.dumps(fingerprint_bundle, indent=2),
+            file_name=f"fingerprint_{st.session_state['rdh_data_name']}.json",
+            mime="application/json",
+        )
+        prev_fp_file = st.file_uploader("Upload a previous fingerprint.json to compare", type="json", key="fp_upload")
+        if prev_fp_file is not None:
+            try:
+                prev_bundle = json.loads(prev_fp_file.getvalue())
+                prev_fp = prev_bundle["fingerprint"]
+                prev_dict = prev_bundle["dictionary"]
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                st.error(f"Not a valid rdh fingerprint file: {exc}")
+                prev_fp = None
+            if prev_fp is not None:
+                if prev_fp.get("schema_fingerprint") == fingerprint["schema_fingerprint"] and prev_fp.get("value_fingerprint") == fingerprint["value_fingerprint"]:
+                    st.success("Identical to the previous version — no structural or distributional change detected.")
+                else:
+                    st.warning("⚠ This dataset has changed since the uploaded fingerprint.")
+                    diff = compare_fingerprints(prev_fp, fingerprint, prev_dict, dictionary)
+                    if diff["columns_added"]:
+                        st.write(f"**+{len(diff['columns_added'])} column(s):** {', '.join(diff['columns_added'])}")
+                    if diff["columns_removed"]:
+                        st.write(f"**-{len(diff['columns_removed'])} column(s):** {', '.join(diff['columns_removed'])}")
+                    st.write(f"**Row count:** {'+' if diff['row_count_delta'] >= 0 else ''}{diff['row_count_delta']}")
+                    if diff["changed_columns"]:
+                        st.write("**Changed columns:**")
+                        st.dataframe(
+                            [{"column": c["column"], **{f"{k} (before → after)": f"{v['before']} → {v['after']}" for k, v in c["changes"].items()}} for c in diff["changed_columns"]],
+                            use_container_width=True,
+                        )
+
     # ------------------------------------------------------------------ #
     # Step 3: Review & Approve
     # ------------------------------------------------------------------ #
@@ -258,7 +354,7 @@ with tab_analyze:
             for val in values:
                 key = f"sentinel__{col}__{val}"
                 c1, c2, c3 = st.columns([0.5, 2.5, 2])
-                checked = c1.checkbox("", key=f"{key}_on")
+                checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
                 c2.markdown(
                     f'<div class="rdh-card-title">{col} = "{val}"</div>'
                     f'<div class="rdh-card-evidence">looks like a common missing-value convention</div>',
@@ -273,7 +369,7 @@ with tab_analyze:
         for col, count in ambiguous_dates.items():
             key = f"date__{col}"
             c1, c2, c3 = st.columns([0.5, 2.5, 2])
-            checked = c1.checkbox("", key=f"{key}_on")
+            checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
             c2.markdown(
                 f'<div class="rdh-card-title">{col}</div>'
                 f'<div class="rdh-card-evidence">{count} value(s) shaped like MM/DD or DD/MM with no way to '
@@ -293,7 +389,7 @@ with tab_analyze:
                 key = f"cat__{col}__{i}"
                 badge_cls = "rdh-badge-high" if cluster["confidence"] == "high" else "rdh-badge-medium"
                 c1, c2 = st.columns([0.5, 4])
-                checked = c1.checkbox("", key=f"{key}_on", value=(cluster["confidence"] == "high"))
+                checked = c1.checkbox("approve", key=f"{key}_on", value=(cluster["confidence"] == "high"), label_visibility="collapsed")
                 values_str = " / ".join(f'"{v}"' for v in cluster["values"])
                 c2.markdown(
                     f'<span class="rdh-badge {badge_cls}">{cluster["confidence"]} confidence</span>'
@@ -368,7 +464,9 @@ with tab_analyze:
             st.error(f"Could not validate with the current rules: {exc}")
             st.stop()
 
-        transformed_rows, mutations = apply_transformations(rows, rules)
+        transformed_rows, mutations = apply_transformations(
+            rows, rules, reason="Approved by user during interactive review"
+        )
 
         manifest = build_manifest([data_path], [])
         manifest["mutations"] = mutations
@@ -383,18 +481,31 @@ with tab_analyze:
 
         st.success(f"Done — {len(mutations)} approved change(s) applied and logged.")
 
+        st.caption("Full deliverable bundle — matching a defensible research-data audit trail:")
         dl1, dl2, dl3 = st.columns(3)
         dl1.download_button(
-            "⬇ Cleaned CSV", data=buffer.getvalue(),
+            "⬇ Cleaned CSV (analysis-ready)", data=buffer.getvalue(),
             file_name=f"cleaned_{st.session_state['rdh_data_name']}", mime="text/csv", use_container_width=True,
         )
         dl2.download_button(
-            "⬇ Audit manifest (.json)", data=json.dumps(manifest, indent=2),
-            file_name="manifest.json", mime="application/json", use_container_width=True,
+            "⬇ provenance.json", data=json.dumps(manifest, indent=2),
+            file_name="provenance.json", mime="application/json", use_container_width=True,
         )
         dl3.download_button(
-            "⬇ Human-readable report (.md)",
-            data=render_markdown("Validation Report", report) + "\n\n" + render_markdown("Manifest", manifest),
+            "⬇ validation_results.json", data=json.dumps(report, indent=2),
+            file_name="validation_results.json", mime="application/json", use_container_width=True,
+        )
+        dl4, dl5, dl6 = st.columns(3)
+        dl4.download_button(
+            "⬇ data_dictionary.html", data=render_html("Data Dictionary", dictionary),
+            file_name="data_dictionary.html", mime="text/html", use_container_width=True,
+        )
+        dl5.download_button(
+            "⬇ quality_report.html", data=render_html("Quality Report", report),
+            file_name="quality_report.html", mime="text/html", use_container_width=True,
+        )
+        dl6.download_button(
+            "⬇ audit_report.md", data=render_markdown("Validation Report", report) + "\n\n" + render_markdown("Provenance", manifest),
             file_name="audit_report.md", mime="text/markdown", use_container_width=True,
         )
 
@@ -423,6 +534,73 @@ with tab_analyze:
                 )
         else:
             st.success("No unresolved blocking errors.")
+
+with tab_multifile:
+    st.caption(
+        "Upload 2+ files from the same study (e.g. participants.csv, visits.csv, labs.csv). "
+        "rdh suggests which columns look like shared keys — by name AND by real value overlap, "
+        "not name alone — and checks referential integrity across a pair you pick. "
+        "Nothing here is ever joined or merged; this is discovery only."
+    )
+    multi_files = st.file_uploader(
+        "Upload 2 or more CSV/TSV files", type=["csv", "tsv"], accept_multiple_files=True, key="multifile_uploader"
+    )
+
+    if multi_files and len(multi_files) >= 2:
+        file_rows: dict[str, list[dict]] = {}
+        skipped = []
+        for f in multi_files:
+            path = _write_temp(f.name, f.getvalue())
+            try:
+                check_header_has_no_duplicates(_sniff_header(path))
+                file_rows[f.name] = read_rows(path)
+            except DuplicateHeaderError:
+                skipped.append(f.name)
+
+        if skipped:
+            st.warning(
+                f"Skipped {', '.join(skipped)} — duplicate column names. "
+                "Fix and re-upload, or use the Analyze & Clean tab's auto-rename option first."
+            )
+
+        if len(file_rows) >= 2:
+            st.subheader("Suggested shared keys")
+            candidates = discover_shared_key_columns(file_rows)
+            if not candidates:
+                st.info("No column pairs found with matching names and substantial value overlap across these files.")
+            else:
+                for i, cand in enumerate(candidates):
+                    st.markdown(
+                        f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Candidate key</span>'
+                        f'<div class="rdh-card-title">{cand["file_a"]}.{cand["column_a"]} ↔ {cand["file_b"]}.{cand["column_b"]}</div>'
+                        f'<div class="rdh-card-evidence">{cand["overlap_fraction"]:.0%} of the smaller file\'s distinct values '
+                        f"appear in the other — a plausible join key, not a confirmed one</div></div>",
+                        unsafe_allow_html=True,
+                    )
+
+                st.subheader("Check referential integrity")
+                cand_labels = [f'{c["file_a"]}.{c["column_a"]} ↔ {c["file_b"]}.{c["column_b"]}' for c in candidates]
+                chosen = st.selectbox("Pick a candidate key to check", cand_labels)
+                cand = candidates[cand_labels.index(chosen)]
+                parent_values = {str(r[cand["column_a"]]) for r in file_rows[cand["file_a"]] if r.get(cand["column_a"]) not in (None, "")}
+                child_values = {str(r[cand["column_b"]]) for r in file_rows[cand["file_b"]] if r.get(cand["column_b"]) not in (None, "")}
+                integrity = check_referential_integrity(parent_values, child_values)
+                c1, c2 = st.columns(2)
+                c1.metric(f"{cand['column_b']} values in {cand['file_b']}", integrity["child_count"])
+                c2.metric("Not found in " + cand["file_a"], integrity["orphan_count"])
+                if integrity["orphan_count"]:
+                    st.warning(
+                        f"⚠ {integrity['orphan_count']} record(s) in {cand['file_b']} reference a "
+                        f"{cand['column_b']} value absent from {cand['file_a']}. This may be expected "
+                        "by the study design, or may indicate a data issue — rdh doesn't assume either."
+                    )
+                    st.write("Examples:", integrity["orphan_examples"])
+                else:
+                    st.success(f"Every {cand['column_b']} value in {cand['file_b']} is present in {cand['file_a']}.")
+    elif multi_files:
+        st.info("Upload at least 2 files to discover relationships between them.")
+    else:
+        st.info("Upload 2 or more files to get started.")
 
 with tab_viewer:
     st.caption("Read-only. View a data_dictionary / validation_report / manifest JSON file rdh produced elsewhere.")

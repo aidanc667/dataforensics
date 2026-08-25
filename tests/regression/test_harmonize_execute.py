@@ -322,3 +322,29 @@ def test_execute_on_header_only_csv_preserves_columns(tmp_path):
     assert result.exit_code == 0
     content = output_path.read_text()
     assert content.strip().startswith("participant_id,smoking_status") or content.strip() == "participant_id,smoking_status"
+
+
+def test_apply_transformations_records_custom_reason():
+    from rdh.harmonize import apply_transformations
+
+    rules = {
+        "primary_key": ["id"],
+        "missing_values": {"status": {"99": "Refused"}},
+        "category_mappings": {},
+    }
+    rows = [{"id": "1", "status": "99"}]
+    _, mutations = apply_transformations(rows, rules, reason="Approved by user during interactive review")
+    assert mutations[0]["reason"] == "Approved by user during interactive review"
+
+
+def test_apply_transformations_default_reason():
+    from rdh.harmonize import apply_transformations
+
+    rules = {
+        "primary_key": ["id"],
+        "missing_values": {"status": {"99": "Refused"}},
+        "category_mappings": {},
+    }
+    rows = [{"id": "1", "status": "99"}]
+    _, mutations = apply_transformations(rows, rules)
+    assert mutations[0]["reason"] == "Specified in the rules file"

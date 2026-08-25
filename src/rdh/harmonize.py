@@ -171,7 +171,17 @@ def plan_transformations(rows: list[dict], rules: dict) -> list[dict]:
     return plan
 
 
-def apply_transformations(rows: list[dict], rules: dict) -> tuple[list[dict], list[dict]]:
+def apply_transformations(
+    rows: list[dict], rules: dict, *, reason: str = "Specified in the rules file"
+) -> tuple[list[dict], list[dict]]:
+    """Apply `rules`'s missing_values/category_mappings to `rows`.
+
+    `reason` is recorded verbatim on every mutation this call produces --
+    it's the human-facing "why" in the provenance log (e.g. "Specified in
+    the rules file" for the CLI's --rules path, or "Approved by user during
+    interactive review" for an app that assembled rules from clicked
+    approvals). It does not affect behavior, only the audit trail.
+    """
     primary_key = rules["primary_key"]
     missing_values = rules.get("missing_values", {})
     category_mappings = rules.get("category_mappings", {})
@@ -200,6 +210,7 @@ def apply_transformations(rows: list[dict], rules: dict) -> tuple[list[dict], li
                         "original_value": _PII_MASK_PLACEHOLDER if pii else original,
                         "new_value": _PII_MASK_PLACEHOLDER if pii else new_value,
                         "transformation_rule": f"missing_value_sentinel:{column}",
+                        "reason": reason,
                     }
                 )
                 new_row[column] = new_value
@@ -216,6 +227,7 @@ def apply_transformations(rows: list[dict], rules: dict) -> tuple[list[dict], li
                         "original_value": _PII_MASK_PLACEHOLDER if pii else original,
                         "new_value": _PII_MASK_PLACEHOLDER if pii else new_value,
                         "transformation_rule": f"category_mapping:{column}",
+                        "reason": reason,
                     }
                 )
                 new_row[column] = new_value

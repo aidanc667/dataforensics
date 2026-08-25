@@ -8,3 +8,5 @@ data/standardized/*
 !data/standardized/.gitkeep
 data/cleaned/*
 !data/cleaned/.gitkeep
+.venv/
+.streamlit/secrets.toml
