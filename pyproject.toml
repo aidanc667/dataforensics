@@ -13,6 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+viewer = ["streamlit>=1.30"]
 
 [project.scripts]
 rdh = "rdh.cli:main"

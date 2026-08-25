@@ -31,6 +31,21 @@ exit code `1` because errors were found. The second command previews — without
 what the same rules file would change (a `missing_values` sentinel remap on `smoking_status`). Add
 `--execute` to actually write `/tmp/out.csv` plus `/tmp/out.csv.manifest.json`.
 
+## Viewer (optional)
+
+A thin, read-only Streamlit viewer renders the JSON reports `scan`/`harmonize --execute` already
+produce — no write path, no way to trigger a CLI command from the UI, no new business logic.
+
+```bash
+pip install -e ".[dev,viewer]"
+rdh scan fixtures/sample.csv --rules fixtures/sample_rules.yaml --out-dir /tmp/rdh_demo
+streamlit run app.py
+```
+
+Upload `/tmp/rdh_demo/sample.validation_report.json` to see error/warning/suggestion counts and
+expandable detail, or `/tmp/rdh_demo/sample.data_dictionary.json` to see the per-column profile
+table. A `*.manifest.json` from `harmonize --execute` renders the run metadata and mutation log.
+
 ## CLI reference (as actually implemented today)
 
 ```
@@ -75,8 +90,8 @@ violations of configured rules detected." No row-level merging of cross-dataset 
 crosswalk harmonize path aligns column schemas across sources, it never joins them into one table.
 
 The design spec's non-goals list permits exactly one exception: a thin, read-only Streamlit viewer
-over JSON the CLI already produces (no write path, no new engine logic). That viewer is planned,
-not yet built.
+over JSON the CLI already produces (no write path, no new engine logic). That viewer is now built
+— see "Viewer (optional)" above.
 
 ## Project status
 
