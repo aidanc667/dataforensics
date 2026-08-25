@@ -5,11 +5,12 @@ import sys
 from pathlib import Path
 
 import click
+import yaml
 
 from rdh import __version__
 from rdh.config_schema import RulesConfigError, load_rules
 from rdh.dictionary import build_data_dictionary, read_rows
-from rdh.harmonize import apply_transformations, plan_transformations
+from rdh.harmonize import apply_crosswalk, apply_transformations, plan_transformations
 from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
 from rdh.manifest import atomic_write, build_manifest
 from rdh.report import render_markdown
@@ -80,22 +81,38 @@ def scan(file, rules_path, out_dir):
     sys.exit(1 if report_data["errors"] else 0)
 
 
+def _parse_rules_map(rules_map_str: str) -> dict:
+    result = {}
+    for pair in rules_map_str.split(","):
+        file_str, rules_str = pair.split("=", 1)
+        result[file_str] = rules_str
+    return result
+
+
 @main.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True), required=True)
 @click.option("--rules", "rules_path", type=click.Path(exists=True), default=None)
 @click.option("--output", type=click.Path(), default=None)
 @click.option("--rules-map", default=None)
-@click.option("--crosswalk", type=click.Path(exists=True), default=None)
+@click.option("--crosswalk", "crosswalk_path", type=click.Path(exists=True), default=None)
 @click.option("--output-dir", type=click.Path(), default=None)
 @click.option("--execute", is_flag=True, default=False)
-def harmonize(files, rules_path, output, rules_map, crosswalk, output_dir, execute):
+def harmonize(files, rules_path, output, rules_map, crosswalk_path, output_dir, execute):
     """Rules-driven, dry-run-by-default transform. Single file or cross-dataset crosswalk."""
     if len(files) == 1 and rules_path is not None:
         _harmonize_single_file(files[0], rules_path, output, execute)
         return
 
-    click.echo("harmonize: multi-file crosswalk not implemented yet", err=True)
-    sys.exit(3)
+    if len(files) >= 2 and rules_map and crosswalk_path and output_dir:
+        _harmonize_crosswalk(files, rules_map, crosswalk_path, output_dir, execute)
+        return
+
+    click.echo(
+        "Invalid arguments: use --rules/--output for one file, "
+        "or --rules-map/--crosswalk/--output-dir for 2+ files",
+        err=True,
+    )
+    sys.exit(2)
 
 
 def _harmonize_single_file(file, rules_path, output, execute):
@@ -146,6 +163,94 @@ def _harmonize_single_file(file, rules_path, output, execute):
     atomic_write(manifest_path, json.dumps(manifest, indent=2))
 
     click.echo(f"harmonize complete: wrote {output_path}, {len(mutations)} mutations logged")
+    sys.exit(0)
+
+
+def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execute):
+    """Map each source's columns/values onto a shared target schema.
+
+    Writes exactly one output file per input source into ``output_dir`` --
+    sources are NEVER row-joined or merged into a combined table. Mixing
+    aggregate data (e.g. CDC WONDER) with individual microdata (e.g. Census
+    ACS PUMS) in a single joined table would be an ecological-fallacy trap;
+    keeping each source as its own table on a common column schema avoids
+    that while still letting the schemas be compared/analyzed together.
+    """
+    rules_map = _parse_rules_map(rules_map_str)
+    output_dir_path = Path(output_dir)
+
+    for f in files:
+        if Path(f).resolve() == output_dir_path.resolve():
+            click.echo("--output-dir must not be one of the input paths", err=True)
+            sys.exit(2)
+
+    try:
+        crosswalk = yaml.safe_load(Path(crosswalk_path).read_text())
+    except yaml.YAMLError as exc:
+        click.echo(f"Invalid crosswalk file: {exc}", err=True)
+        sys.exit(2)
+
+    all_mutations = []
+    schema_paths = []
+
+    if execute:
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    for f in files:
+        file_path = Path(f)
+        source_key = str(file_path)
+        if source_key not in rules_map:
+            click.echo(f"No --rules-map entry for {source_key}", err=True)
+            sys.exit(2)
+
+        try:
+            rules = load_rules(Path(rules_map[source_key]))
+        except RulesConfigError as exc:
+            click.echo(f"Invalid rules file for {source_key}: {exc}", err=True)
+            sys.exit(2)
+        schema_paths.append(Path(rules_map[source_key]))
+
+        rows = read_rows(file_path)
+        transformed_rows, mutations = apply_transformations(rows, rules)
+
+        source_name = file_path.stem
+        source_crosswalk = crosswalk.get("sources", {}).get(source_name, {})
+        harmonized_rows = apply_crosswalk(transformed_rows, source_crosswalk)
+        all_mutations.extend(mutations)
+
+        if execute:
+            if harmonized_rows:
+                fieldnames = list(harmonized_rows[0].keys())
+            else:
+                column_map = source_crosswalk.get("column_map", {})
+                fieldnames = [column_map.get(col, col) for col in _read_header(file_path)]
+
+            out_path = output_dir_path / f"{source_name}.harmonized.csv"
+            buffer = io.StringIO()
+            writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(harmonized_rows)
+            atomic_write(out_path, buffer.getvalue())
+        else:
+            click.echo(
+                f"DRY RUN — {source_name}: {len(mutations)} rule-driven mutations, "
+                f"{len(harmonized_rows)} rows would be remapped to shared schema"
+            )
+
+    # Every rules file involved (one per source) plus the crosswalk file
+    # itself must be hashed into the manifest -- this is the audit trail
+    # for how each source's columns/values were mapped onto the shared
+    # target schema.
+    schema_paths.append(Path(crosswalk_path))
+
+    if execute:
+        manifest = build_manifest([Path(f) for f in files], schema_paths)
+        manifest["mutations"] = all_mutations
+        atomic_write(output_dir_path / "crosswalk.manifest.json", json.dumps(manifest, indent=2))
+        click.echo(
+            f"crosswalk harmonize complete: {len(files)} sources written to "
+            f"{output_dir_path}, never merged"
+        )
     sys.exit(0)
 
 

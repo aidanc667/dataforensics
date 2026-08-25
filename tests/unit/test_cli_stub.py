@@ -10,9 +10,12 @@ def test_help_lists_subcommands():
     assert "report" in result.output
 
 
-def test_harmonize_stub_exits_3(tmp_path):
+def test_harmonize_with_insufficient_args_exits_2(tmp_path):
+    # Neither the single-file path (needs --rules) nor the multi-file
+    # crosswalk path (needs --rules-map/--crosswalk/--output-dir) is
+    # satisfied, so this is a usage error, not an unimplemented feature.
     f = tmp_path / "somefile.csv"
     f.write_text("a,b\n1,2\n")
     result = CliRunner().invoke(main, ["harmonize", str(f)])
-    assert result.exit_code == 3
-    assert "not implemented" in result.output.lower()
+    assert result.exit_code == 2
+    assert "invalid arguments" in result.output.lower()

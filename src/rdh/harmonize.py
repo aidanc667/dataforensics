@@ -78,3 +78,27 @@ def apply_transformations(rows: list[dict], rules: dict) -> tuple[list[dict], li
         transformed.append(new_row)
 
     return transformed, mutations
+
+
+def apply_crosswalk(rows: list[dict], source_crosswalk: dict) -> list[dict]:
+    """Remap a single source's rows onto a shared target schema.
+
+    Renames columns per ``column_map`` and, where a renamed column also has
+    an entry in ``value_map``, translates matching values (e.g. numeric PUMS
+    sex codes -> "M"/"F"). Operates on one source's rows at a time and never
+    combines rows across sources -- the caller is responsible for writing
+    each source's remapped rows to its own output file.
+    """
+    column_map = source_crosswalk.get("column_map", {})
+    value_map = source_crosswalk.get("value_map", {})
+
+    remapped = []
+    for row in rows:
+        new_row = {}
+        for old_col, value in row.items():
+            new_col = column_map.get(old_col, old_col)
+            if new_col in value_map and value in value_map[new_col]:
+                value = value_map[new_col][value]
+            new_row[new_col] = value
+        remapped.append(new_row)
+    return remapped
