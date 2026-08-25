@@ -7,6 +7,7 @@ import click
 from rdh import __version__
 from rdh.config_schema import RulesConfigError, load_rules
 from rdh.dictionary import build_data_dictionary, read_rows
+from rdh.harmonize import plan_transformations
 from rdh.report import render_markdown
 from rdh.validation import validate
 
@@ -61,15 +62,52 @@ def scan(file, rules_path, out_dir):
 
 @main.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True), required=True)
-@click.option("--rules", type=click.Path(exists=True), default=None)
+@click.option("--rules", "rules_path", type=click.Path(exists=True), default=None)
 @click.option("--output", type=click.Path(), default=None)
 @click.option("--rules-map", default=None)
 @click.option("--crosswalk", type=click.Path(exists=True), default=None)
 @click.option("--output-dir", type=click.Path(), default=None)
 @click.option("--execute", is_flag=True, default=False)
-def harmonize(files, rules, output, rules_map, crosswalk, output_dir, execute):
+def harmonize(files, rules_path, output, rules_map, crosswalk, output_dir, execute):
     """Rules-driven, dry-run-by-default transform. Single file or cross-dataset crosswalk."""
-    click.echo("harmonize: not implemented")
+    if len(files) == 1 and rules_path is not None:
+        _harmonize_single_file(files[0], rules_path, output, execute)
+        return
+
+    click.echo("harmonize: multi-file crosswalk not implemented yet", err=True)
+    sys.exit(3)
+
+
+def _harmonize_single_file(file, rules_path, output, execute):
+    file_path = Path(file)
+
+    if output is None:
+        click.echo("--output is required", err=True)
+        sys.exit(2)
+    output_path = Path(output)
+
+    if output_path.resolve() == file_path.resolve():
+        click.echo("--output must not be the same path as the input file", err=True)
+        sys.exit(2)
+
+    try:
+        rules = load_rules(Path(rules_path))
+    except RulesConfigError as exc:
+        click.echo(f"Invalid rules file: {exc}", err=True)
+        sys.exit(2)
+
+    rows = read_rows(file_path)
+    plan = plan_transformations(rows, rules)
+
+    if not execute:
+        click.echo(f"DRY RUN — no files written. Proposed transformations for {file_path.name}:")
+        for item in plan:
+            click.echo(f"  {item['rule']} -> {item['column']}: {item['rows_affected']} rows affected")
+        if not plan:
+            click.echo("  (no transformations would be applied)")
+        sys.exit(0)
+
+    click.echo("--execute not implemented yet", err=True)
     sys.exit(3)
 
 
