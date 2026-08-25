@@ -114,6 +114,12 @@ def detect_outliers(values: list[float]) -> dict:
     return {"method": "IQR", "outlier_count": len(indices), "outlier_indices": indices}
 
 
+def read_rows(path: Path) -> list[dict]:
+    data_lines, delimiter = _read_cleaned_lines(path)
+    header = data_lines[0].split(delimiter)
+    return [dict(zip(header, line.split(delimiter))) for line in data_lines[1:]]
+
+
 def detect_top_code_spike(values: list[float]) -> dict | None:
     if not values:
         return None

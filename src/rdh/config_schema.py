@@ -15,6 +15,8 @@ def load_rules(path: Path) -> dict:
         raw = yaml.safe_load(path.read_text())
     except yaml.YAMLError as exc:
         raise RulesConfigError(f"Malformed YAML in {path}: {exc}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RulesConfigError(f"Could not read rules file {path}: {exc}") from exc
 
     if not isinstance(raw, dict):
         raise RulesConfigError(f"Rules file {path} must be a YAML mapping at the top level")
