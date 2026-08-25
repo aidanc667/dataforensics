@@ -13,7 +13,18 @@ uploaded = st.file_uploader("Upload a .json report", type="json")
 if uploaded is None:
     st.info("No file uploaded yet.")
 else:
-    data = json.load(uploaded)
+    try:
+        data = json.load(uploaded)
+    except json.JSONDecodeError as exc:
+        st.error(f"Not valid JSON: {exc}")
+        st.stop()
+
+    if not isinstance(data, dict):
+        st.error(
+            f"Not an rdh report — expected a JSON object at the top level, got {type(data).__name__}."
+        )
+        st.stop()
+
     kind = classify_report(data)
 
     if kind == "validation_report":
