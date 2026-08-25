@@ -1,6 +1,9 @@
 import re
 
-_ID_LIKE_PATTERN = re.compile(r"(^|_)(id|fips|geoid|zip)(_|$)", re.IGNORECASE)
+_ID_LIKE_PATTERN = re.compile(
+    r"(^|_)(id|zip|puma)(_|$)|(^|_)?(fips|geoid|fp)(\d|_|$)",
+    re.IGNORECASE
+)
 
 
 def is_id_like_column(name: str) -> bool:

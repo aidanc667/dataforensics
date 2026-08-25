@@ -31,3 +31,22 @@ def test_classify_sentinel_returns_label():
 def test_classify_sentinel_none_for_ordinary_value():
     sentinel_map = {"99": "Refused"}
     assert classify_sentinel("42", sentinel_map) is None
+
+
+def test_id_like_column_rejects_substring_traps():
+    """Verify that partial matches of keywords don't trigger false positives."""
+    assert is_id_like_column("residence") is False
+    assert is_id_like_column("solid") is False
+    assert is_id_like_column("valid") is False
+    assert is_id_like_column("avoid") is False
+    assert is_id_like_column("unzip") is False
+    assert is_id_like_column("rapid") is False
+
+
+def test_id_like_column_matches_census_geo_columns():
+    """Verify recognition of Census FIPS/GEOID columns without underscore boundaries."""
+    assert is_id_like_column("COUNTYFP") is True
+    assert is_id_like_column("STATEFP") is True
+    assert is_id_like_column("GEOID10") is True
+    assert is_id_like_column("GEOID20") is True
+    assert is_id_like_column("PUMA") is True
