@@ -206,3 +206,99 @@ def test_crosswalk_missing_source_entry_exits_2(tmp_path):
     )
     assert result.exit_code == 2
     assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_crosswalk_empty_file_exits_2_not_crash(tmp_path):
+    # An empty crosswalk file parses via yaml.safe_load to None, not {} --
+    # crosswalk.get("sources", {}) then crashes uncaught with
+    # `AttributeError: 'NoneType' object has no attribute 'get'`.
+    wonder, wonder_rules, pums, pums_rules, _crosswalk = _setup(tmp_path)
+    empty_crosswalk = tmp_path / "empty_crosswalk.yaml"
+    empty_crosswalk.write_text("")
+    output_dir = tmp_path / "harmonized"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "harmonize",
+            str(wonder),
+            str(pums),
+            "--rules-map",
+            f"{wonder}={wonder_rules},{pums}={pums_rules}",
+            "--crosswalk",
+            str(empty_crosswalk),
+            "--output-dir",
+            str(output_dir),
+            "--execute",
+        ],
+    )
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "crosswalk" in result.output.lower()
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_crosswalk_non_mapping_source_entry_exits_2_not_crash(tmp_path):
+    # A per-source entry under `sources:` that isn't itself a mapping (e.g.
+    # `sources: {wonder: 5}`) used to reach apply_crosswalk's
+    # `source_crosswalk.get("column_map", {})` and crash uncaught with
+    # `AttributeError: 'int' object has no attribute 'get'`.
+    wonder, wonder_rules, pums, pums_rules, _crosswalk = _setup(tmp_path)
+    bad_crosswalk = tmp_path / "bad_crosswalk.yaml"
+    bad_crosswalk.write_text(
+        "version: 1\n"
+        "sources:\n"
+        "  wonder: 5\n"
+        "  pums:\n"
+        "    column_map:\n"
+        "      PUMA: geography_fips\n"
+    )
+    output_dir = tmp_path / "harmonized"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "harmonize",
+            str(wonder),
+            str(pums),
+            "--rules-map",
+            f"{wonder}={wonder_rules},{pums}={pums_rules}",
+            "--crosswalk",
+            str(bad_crosswalk),
+            "--output-dir",
+            str(output_dir),
+            "--execute",
+        ],
+    )
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "wonder" in result.output
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_rules_map_entry_missing_equals_exits_2_not_crash(tmp_path):
+    # A --rules-map entry with no `=` separator used to crash uncaught with
+    # `ValueError: not enough values to unpack (expected 2, got 1)` inside
+    # _parse_rules_map's `pair.split("=", 1)`.
+    wonder, wonder_rules, pums, pums_rules, crosswalk = _setup(tmp_path)
+    output_dir = tmp_path / "harmonized"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "harmonize",
+            str(wonder),
+            str(pums),
+            "--rules-map",
+            f"{wonder},{pums}={pums_rules}",  # missing "=wonder_rules.yaml"
+            "--crosswalk",
+            str(crosswalk),
+            "--output-dir",
+            str(output_dir),
+            "--execute",
+        ],
+    )
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "--rules-map" in result.output
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
