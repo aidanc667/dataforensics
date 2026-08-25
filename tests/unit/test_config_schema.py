@@ -210,6 +210,70 @@ def test_load_rules_rejects_chained_missing_values(tmp_path):
         load_rules(f)
 
 
+def test_load_rules_rejects_empty_category_mappings_key(tmp_path):
+    # "category_mappings:" present with nothing indented beneath it parses
+    # to `None`, not `{}` -- setdefault does not replace an already-present
+    # key, so this must be caught explicitly rather than crashing later
+    # with an uncaught TypeError (e.g. `None.items()` / `set(None)`).
+    f = tmp_path / "rules.yaml"
+    f.write_text("version: 1\nprimary_key: [id]\ncolumns: {}\ncategory_mappings:\n")
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_empty_missing_values_key(tmp_path):
+    f = tmp_path / "rules.yaml"
+    f.write_text("version: 1\nprimary_key: [id]\ncolumns: {}\nmissing_values:\n")
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_scalar_missing_values(tmp_path):
+    # "missing_values: 5" -- a bare scalar instead of a mapping.
+    f = tmp_path / "rules.yaml"
+    f.write_text("version: 1\nprimary_key: [id]\ncolumns: {}\nmissing_values: 5\n")
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_scalar_category_mappings(tmp_path):
+    f = tmp_path / "rules.yaml"
+    f.write_text("version: 1\nprimary_key: [id]\ncolumns: {}\ncategory_mappings: 5\n")
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_list_as_a_single_column_mapping(tmp_path):
+    # "category_mappings:\n  sex: [M, F]" -- a list instead of a dict for
+    # one column's mapping. The old code silently `continue`d past this
+    # (leaving the list in place), which then crashed later in
+    # apply_transformations with an uncaught TypeError (list indices must
+    # be integers, not str) instead of failing cleanly here.
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "category_mappings:\n"
+        "  sex: [M, F]\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
+def test_load_rules_rejects_list_as_a_single_missing_values_mapping(tmp_path):
+    f = tmp_path / "rules.yaml"
+    f.write_text(
+        "version: 1\n"
+        "primary_key: [id]\n"
+        "columns: {}\n"
+        "missing_values:\n"
+        "  status: [a, b]\n"
+    )
+    with pytest.raises(RulesConfigError):
+        load_rules(f)
+
+
 def test_load_rules_accepts_non_chained_missing_values(tmp_path):
     # Sanity check the missing_values chain check doesn't over-fire on an
     # ordinary sentinel mapping, matching schemas/cdc_wonder_rules.yaml's

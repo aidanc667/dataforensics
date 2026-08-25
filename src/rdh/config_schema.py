@@ -32,6 +32,23 @@ def load_rules(path: Path) -> dict:
     raw.setdefault("category_mappings", {})
     raw.setdefault("weights_strata", {"columns": []})
 
+    # A key present in the YAML with no entries under it (e.g.
+    # "category_mappings:" with nothing indented beneath) parses to `None`,
+    # not `{}` -- setdefault above does NOT replace it, since the key
+    # already exists. Likewise a bare scalar (e.g. "missing_values: 5") is
+    # valid YAML but not a mapping. Both would otherwise crash later with an
+    # uncaught TypeError (e.g. `set(None)`, `None.items()`) instead of a
+    # clean, actionable RulesConfigError -- catch it here, immediately after
+    # the defaults are applied and before anything downstream assumes a
+    # dict.
+    for rule_name in ("missing_values", "category_mappings"):
+        if not isinstance(raw[rule_name], dict):
+            raise RulesConfigError(
+                f"Rules file {path}: '{rule_name}' must be a YAML mapping of column name -> "
+                f"rule (got {raw[rule_name]!r}) — if you don't need any {rule_name} rules, "
+                "omit the key entirely rather than leaving it empty"
+            )
+
     overlap = sorted(set(raw["missing_values"]) & set(raw["category_mappings"]))
     if overlap:
         cols = ", ".join(f"'{col}'" for col in overlap)
@@ -58,7 +75,17 @@ def load_rules(path: Path) -> dict:
     for rule_name in ("category_mappings", "missing_values"):
         for column, mapping in raw[rule_name].items():
             if not isinstance(mapping, dict):
-                continue
+                # e.g. "category_mappings:\n  sex: [M, F]" -- a list (or any
+                # other non-mapping) instead of a column -> mapping dict.
+                # Silently skipping this (the old `continue` behavior) left
+                # the malformed value in place, so it would go on to crash
+                # later in apply_transformations/plan_transformations with
+                # an uncaught TypeError (e.g. list indices must be
+                # integers, not str) instead of failing cleanly here.
+                raise RulesConfigError(
+                    f"Rules file {path}: {rule_name} for column '{column}' must be a YAML "
+                    f"mapping (key -> value), got {mapping!r}"
+                )
 
             for key, value in mapping.items():
                 try:
