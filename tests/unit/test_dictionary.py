@@ -77,3 +77,9 @@ def test_read_rows_ragged_row_fills_missing_trailing_field(tmp_path):
     f.write_text("participant_id,age,site\n1,40,A\n2,41\n")  # row 2 is missing the 'site' field
     rows = read_rows(f)
     assert rows[1] == {"participant_id": "2", "age": "41", "site": ""}
+
+
+def test_read_rows_empty_file_returns_empty_list(tmp_path):
+    f = tmp_path / "empty.csv"
+    f.write_text("")
+    assert read_rows(f) == []

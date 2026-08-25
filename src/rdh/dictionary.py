@@ -118,6 +118,8 @@ def detect_outliers(values: list[float]) -> dict:
 
 def read_rows(path: Path) -> list[dict]:
     data_lines, delimiter = _read_cleaned_lines(path)
+    if not data_lines:
+        return []
     header = data_lines[0].split(delimiter)
     return [dict(zip_longest(header, line.split(delimiter), fillvalue="")) for line in data_lines[1:]]
 
