@@ -26,8 +26,10 @@ rdh harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output /t
 
 The first command profiles the bundled fixture (writes `sample.data_dictionary.{json,md}` and
 `sample.validation_report.{json,md}` into the current directory) and reports its planted issues:
-a duplicate participant ID, a below-minimum (negative) age, and several IQR-outlier suggestions —
-exit code `1` because errors were found. The second command previews — without writing anything —
+a duplicate participant ID, a below-minimum (negative) age, an ambiguous `visit_date` value
+(`03/04/2024` — MM/DD or DD/MM? — flagged rather than silently guessed), and several IQR-outlier
+suggestions — exit code `1` because errors were found. The second command previews — without
+writing anything —
 what the same rules file would change (a `missing_values` sentinel remap on `smoking_status`). Add
 `--execute` to actually write `/tmp/out.csv` plus `/tmp/out.csv.manifest.json`.
 

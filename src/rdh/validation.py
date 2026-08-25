@@ -1,4 +1,16 @@
+import re
+from datetime import datetime
+
 from rdh import dictionary
+
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
+
+
+def is_ambiguous_date(value: str) -> bool:
+    if _ISO_DATE_PATTERN.match(value):
+        return False
+    return bool(_SLASH_DATE_PATTERN.match(value))
 
 
 def _row_key(row: dict, primary_key: list[str]) -> dict:
@@ -69,6 +81,33 @@ def validate(rows: list[dict], rules: dict) -> dict:
                             "rule": "maximum",
                             "message": f"{column}={raw_value} is above configured maximum {col_rules['maximum']} — may still be valid",
                             "severity": "warning",
+                        }
+                    )
+
+            if col_rules.get("type") == "date":
+                checks_evaluated += 1
+                declared_format = col_rules.get("format")
+                if declared_format:
+                    try:
+                        datetime.strptime(raw_value, declared_format)
+                    except ValueError:
+                        errors.append(
+                            {
+                                "column": column,
+                                "row_key": row_key,
+                                "rule": "date_format_mismatch",
+                                "message": f"{column}={raw_value} does not match declared format {declared_format}",
+                                "severity": "error",
+                            }
+                        )
+                elif is_ambiguous_date(raw_value):
+                    errors.append(
+                        {
+                            "column": column,
+                            "row_key": row_key,
+                            "rule": "ambiguous_date_format",
+                            "message": f"{column}={raw_value} is ambiguous (MM/DD vs DD/MM) with no declared format — not parsed",
+                            "severity": "error",
                         }
                     )
 
