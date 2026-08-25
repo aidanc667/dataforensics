@@ -1,5 +1,5 @@
-from rdh.dictionary import build_data_dictionary
-from rdh.typing_guards import is_pii_like_column
+from datadiligence.dictionary import build_data_dictionary
+from datadiligence.typing_guards import is_pii_like_column
 
 
 # --- is_pii_like_column: true positives -------------------------------------

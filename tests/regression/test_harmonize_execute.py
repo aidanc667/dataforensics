@@ -3,8 +3,8 @@ import json
 
 from click.testing import CliRunner
 
-from rdh.cli import main
-from rdh.hashing import sha256_file
+from datadiligence.cli import main
+from datadiligence.hashing import sha256_file
 
 
 def _write_input_and_rules(tmp_path):
@@ -82,7 +82,7 @@ def test_execute_is_idempotent(tmp_path):
 
 
 def test_apply_transformations_masks_pii_column_values_in_mutation_log():
-    from rdh.harmonize import apply_transformations
+    from datadiligence.harmonize import apply_transformations
 
     rules = {
         "primary_key": ["participant_id"],
@@ -105,7 +105,7 @@ def test_execute_refuses_to_write_if_a_row_is_silently_dropped(tmp_path, monkeyp
     # bug would. The row/column-count safety net in cli.py must catch this
     # and refuse to write output (exit 3), rather than writing a
     # short-by-one-row file and reporting success.
-    import rdh.cli as cli_module
+    import datadiligence.cli as cli_module
 
     src, rules_path = _write_input_and_rules(tmp_path)
     output_path = tmp_path / "out.csv"
@@ -128,7 +128,7 @@ def test_execute_refuses_to_write_if_a_row_is_silently_dropped(tmp_path, monkeyp
 
 
 def test_execute_refuses_to_write_if_a_column_is_silently_dropped(tmp_path, monkeypatch):
-    import rdh.cli as cli_module
+    import datadiligence.cli as cli_module
 
     src, rules_path = _write_input_and_rules(tmp_path)
     output_path = tmp_path / "out.csv"
@@ -167,11 +167,11 @@ def test_safety_net_catches_regression_even_if_ingest_duplicate_header_guard_is_
     # refuse to write.
     #
     # check_header_has_no_duplicates is imported directly into both
-    # rdh.dictionary (used by read_rows) and rdh.cli (used by
+    # datadiligence.dictionary (used by read_rows) and datadiligence.cli (used by
     # _read_header_and_row_count), so both local bindings must be patched to
     # truly disable the guard everywhere, the way a real regression would.
-    import rdh.cli as cli_module
-    import rdh.dictionary as dictionary_module
+    import datadiligence.cli as cli_module
+    import datadiligence.dictionary as dictionary_module
 
     monkeypatch.setattr(dictionary_module, "check_header_has_no_duplicates", lambda header: None)
     monkeypatch.setattr(cli_module, "check_header_has_no_duplicates", lambda header: None)
@@ -216,15 +216,15 @@ def test_execute_refuses_when_parse_stage_silently_drops_a_real_data_row(tmp_pat
     # composition-confined drop went completely undetected (4 real rows
     # became 3 in the output, exit 0, "harmonize complete").
     #
-    # dictionary.py imports strip_footer directly (`from rdh.ingest import
+    # dictionary.py imports strip_footer directly (`from datadiligence.ingest import
     # ... strip_footer`), so patching only that module's local binding
     # simulates a regression confined to read_rows's parse path.
     # cli.py's `_read_header_and_row_count` is a deliberately separate
     # re-implementation with its own independent `strip_footer` binding
     # (unaffected by this patch) -- it is that anchor which must catch the
     # drop.
-    import rdh.dictionary as dictionary_module
-    from rdh.ingest import strip_footer as real_strip_footer
+    import datadiligence.dictionary as dictionary_module
+    from datadiligence.ingest import strip_footer as real_strip_footer
 
     def _row_dropping_strip_footer(lines, delimiter):
         data_lines, stripped = real_strip_footer(lines, delimiter)
@@ -325,7 +325,7 @@ def test_execute_on_header_only_csv_preserves_columns(tmp_path):
 
 
 def test_apply_transformations_records_custom_reason():
-    from rdh.harmonize import apply_transformations
+    from datadiligence.harmonize import apply_transformations
 
     rules = {
         "primary_key": ["id"],
@@ -338,7 +338,7 @@ def test_apply_transformations_records_custom_reason():
 
 
 def test_apply_transformations_default_reason():
-    from rdh.harmonize import apply_transformations
+    from datadiligence.harmonize import apply_transformations
 
     rules = {
         "primary_key": ["id"],

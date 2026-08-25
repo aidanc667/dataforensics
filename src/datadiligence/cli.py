@@ -7,21 +7,21 @@ from pathlib import Path
 import click
 import yaml
 
-from rdh import __version__
-from rdh.config_schema import RulesConfigError, load_rules
-from rdh.dictionary import build_data_dictionary, read_rows
-from rdh.harmonize import (
+from datadiligence import __version__
+from datadiligence.config_schema import RulesConfigError, load_rules
+from datadiligence.dictionary import build_data_dictionary, read_rows
+from datadiligence.harmonize import (
     HarmonizeSafetyError,
     apply_crosswalk,
     apply_transformations,
     assert_row_and_column_integrity,
     plan_transformations,
 )
-from rdh.ingest import DuplicateHeaderError, check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
-from rdh.manifest import atomic_write, build_manifest
-from rdh.report import render_markdown
-from rdh.validation import validate
-from rdh.viewer import classify_report
+from datadiligence.ingest import DuplicateHeaderError, check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
+from datadiligence.manifest import atomic_write, build_manifest
+from datadiligence.report import render_markdown
+from datadiligence.validation import validate
+from datadiligence.viewer import classify_report
 
 _REPORT_TITLES = {
     "data_dictionary": "Data Dictionary",
@@ -120,7 +120,7 @@ def _warn_if_footer_stripped(file_path: Path, stripped_count: int, row_count: in
 @click.group()
 @click.version_option(__version__)
 def main():
-    """rdh — auditable research-data profiling, validation, and harmonization."""
+    """datadiligence — auditable research-data profiling, validation, and harmonization."""
 
 
 @main.command()
@@ -312,7 +312,7 @@ def _harmonize_single_file(file, rules_path, output, execute):
     # NOT be caught by this check.
     #
     # This read (and the footer-stripped warning it feeds) happens BEFORE
-    # the dry-run branch below, not after it, so that a plain `rdh harmonize`
+    # the dry-run branch below, not after it, so that a plain `datadiligence harmonize`
     # invocation (dry-run, the mode the README calls the "safe preview
     # before committing") surfaces the warning too -- not just `--execute`.
     # A dry run that silently hid rows being dropped by strip_footer would

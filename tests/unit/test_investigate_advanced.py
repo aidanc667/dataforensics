@@ -1,4 +1,4 @@
-from rdh.investigate import (
+from datadiligence.investigate import (
     check_referential_integrity,
     compare_fingerprints,
     compute_dataset_fingerprint,

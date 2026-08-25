@@ -2,7 +2,7 @@ import json
 
 from click.testing import CliRunner
 
-from rdh.cli import main
+from datadiligence.cli import main
 
 
 def test_report_renders_validation_report_to_stdout(tmp_path):

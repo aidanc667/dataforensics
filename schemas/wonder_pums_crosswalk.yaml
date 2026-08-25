@@ -9,7 +9,7 @@
 #   4. The harmonization targets (geography_fips, age_band, sex) should remain consistent
 #      across both sources so they can be joined or compared
 #
-# The crosswalk is used by: rdh harmonize --crosswalk schemas/wonder_pums_crosswalk.yaml
+# The crosswalk is used by: datadiligence harmonize --crosswalk schemas/wonder_pums_crosswalk.yaml
 # See: Task 17 Step 7 for the full harmonize command.
 # This file must parse cleanly and match the structure validated in tests/integration/test_crosswalk.py
 

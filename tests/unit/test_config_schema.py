@@ -1,6 +1,6 @@
 import pytest
 
-from rdh.config_schema import RulesConfigError, load_rules
+from datadiligence.config_schema import RulesConfigError, load_rules
 
 
 def test_load_valid_rules(tmp_path):

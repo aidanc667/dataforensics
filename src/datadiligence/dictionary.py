@@ -1,8 +1,8 @@
 from itertools import zip_longest
 from pathlib import Path
 
-from rdh.ingest import check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
-from rdh.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
+from datadiligence.ingest import check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
+from datadiligence.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
 
 # Never claim "PII-safe" or "HIPAA-compliant" here — the honest phrasing is
 # "potential identifier pattern detected," which is a naming-convention

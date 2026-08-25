@@ -1,7 +1,7 @@
 import hashlib
 from pathlib import Path
 
-from rdh.hashing import sha256_file
+from datadiligence.hashing import sha256_file
 
 
 def test_sha256_file_matches_stdlib(tmp_path):

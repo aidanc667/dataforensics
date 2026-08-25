@@ -1,4 +1,4 @@
-from rdh.investigate import (
+from datadiligence.investigate import (
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
     detect_duplicate_rows,

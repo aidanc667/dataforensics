@@ -1,4 +1,4 @@
-from rdh.dictionary import detect_outliers, detect_top_code_spike
+from datadiligence.dictionary import detect_outliers, detect_top_code_spike
 
 
 def test_iqr_outlier_detection_flags_extreme_value():

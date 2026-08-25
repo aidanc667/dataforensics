@@ -3,8 +3,8 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from rdh.cli import main
-from rdh.hashing import sha256_file
+from datadiligence.cli import main
+from datadiligence.hashing import sha256_file
 
 
 def test_scan_writes_dictionary_and_never_modifies_input(tmp_path):

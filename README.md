@@ -1,14 +1,14 @@
-# research-data-harmonizer (`rdh`)
+# DataDiligence (`datadiligence`)
 
-Most research-data cleanup tools profile a file and hope for the best. `rdh` is built around
-one rule instead: **when it's uncertain, it preserves the data and reports the uncertainty —
-it never guesses.** No transformation happens without an explicit rule you wrote down; every
-one that does happen is logged to an audit trail with enough detail to answer "exactly what
-happened to this dataset, and why."
+Most research-data cleanup tools profile a file and hope for the best. **DataDiligence** is built
+around one rule instead: **when it's uncertain, it preserves the data and reports the uncertainty —
+it never guesses.** No transformation happens without an explicit rule you wrote down (or
+explicitly approved in the app); every one that does happen is logged to an audit trail with
+enough detail to answer "exactly what happened to this dataset, and why."
 
 ## Why not ydata-profiling / great_expectations / pointblank?
 
-Those are excellent generic profilers. `rdh` is narrower and more opinionated, tuned specifically
+Those are excellent generic profilers. DataDiligence is narrower and more opinionated, tuned specifically
 to research-export quirks those tools don't target: REDCap-style missing-value sentinels (`-99`,
 `"Refused"`) kept distinct from true nulls, FIPS/ZIP/ID columns protected from integer-cast
 leading-zero truncation, IQR-based outlier and top-code-spike detection reported as suggestions
@@ -20,8 +20,8 @@ you for less.
 
 ```bash
 pip install -e ".[dev]"
-rdh scan fixtures/sample.csv --rules fixtures/sample_rules.yaml
-rdh harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output /tmp/out.csv
+datadiligence scan fixtures/sample.csv --rules fixtures/sample_rules.yaml
+datadiligence harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output /tmp/out.csv
 ```
 
 The first command profiles the bundled fixture (writes `sample.data_dictionary.{json,md}` and
@@ -33,31 +33,42 @@ writing anything —
 what the same rules file would change (a `missing_values` sentinel remap on `smoking_status`). Add
 `--execute` to actually write `/tmp/out.csv` plus `/tmp/out.csv.manifest.json`.
 
-## Viewer (optional)
+## Interactive app (optional)
 
-A thin, read-only Streamlit viewer renders the JSON reports `scan`/`harmonize --execute` already
-produce — no write path, no way to trigger a CLI command from the UI, no new business logic.
+What started as a read-only JSON viewer grew into a full interactive front end over the same
+engine the CLI uses — same functions, same tested safety guarantees, no parallel logic.
 
 ```bash
 pip install -e ".[dev,viewer]"
-rdh scan fixtures/sample.csv --rules fixtures/sample_rules.yaml --out-dir /tmp/rdh_demo
 streamlit run app.py
 ```
 
-Upload `/tmp/rdh_demo/sample.validation_report.json` to see error/warning/suggestion counts and
-expandable detail, or `/tmp/rdh_demo/sample.data_dictionary.json` to see the per-column profile
-table. A `*.manifest.json` from `harmonize --execute` renders the run metadata and mutation log.
+Three tabs:
+
+- **Analyze & Clean** — upload a CSV (or click "Use bundled example"), and it runs the full
+  Upload → Investigate → Review & Approve → Cleaned Dataset workflow: data dictionary, a
+  findings-severity dashboard, suggested variable roles, dataset fingerprinting (download today's
+  fingerprint, upload a prior one next time to see exactly what changed), duplicate-row/sentinel/
+  ambiguous-date/near-duplicate-category findings you approve individually, and — once you apply —
+  a full deliverable bundle: cleaned CSV, `provenance.json`, `validation_results.json`,
+  `data_dictionary.html`, `quality_report.html`, `audit_report.md`.
+- **Multi-File Relationships** — upload 2+ files from the same study; it suggests shared key
+  columns by name *and* real value overlap, and checks referential integrity across a pair you
+  pick. Discovery only — nothing is ever joined or merged.
+- **Report Viewer** — the original read-only mode: paste in a `data_dictionary`/
+  `validation_report`/manifest JSON artifact `scan`/`harmonize --execute` already produced
+  elsewhere, and see it rendered.
 
 ## CLI reference (as actually implemented today)
 
 ```
-rdh scan <file> [--rules schema.yaml] [--out-dir DIR]
+datadiligence scan <file> [--rules schema.yaml] [--out-dir DIR]
     Read-only. Always writes <stem>.data_dictionary.{json,md}. If --rules is given, also
     writes <stem>.validation_report.{json,md}. Never writes to the input path.
     Exit 0 (clean or no --rules), 1 (validation errors found), 2 (malformed rules file),
     3 (malformed input file, e.g. a duplicate header column).
 
-rdh harmonize <file> --rules schema.yaml --output <path> [--execute]
+datadiligence harmonize <file> --rules schema.yaml --output <path> [--execute]
     Single-file mode. Without --execute: dry run, writes nothing, just lists proposed
     transformations (footer-stripping warnings, if any, are printed on the dry run too, not
     just --execute). With --execute: applies the rules, writes <path> and
@@ -65,7 +76,7 @@ rdh harmonize <file> --rules schema.yaml --output <path> [--execute]
     or if the rules file is malformed; exits 3 on a malformed input file or if a post-transform
     safety check fails (refuses to write rather than risk silent data loss).
 
-rdh harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2.yaml \
+datadiligence harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2.yaml \
     --crosswalk crosswalk.yaml --output-dir <dir> [--execute]
     Cross-dataset mode (2+ files). Each source is validated/standardized against its OWN
     rules file first, then the crosswalk file remaps each source's columns onto a shared
@@ -79,7 +90,7 @@ rdh harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,file2=schema2
     a failed safety check for any source (nothing is written for ANY source in that case —
     see the two-pass validate-then-write design below).
 
-rdh report <artifact.json> [--out <path>]
+datadiligence report <artifact.json> [--out <path>]
     Renders a data_dictionary/validation_report/manifest JSON artifact (the same JSON
     `scan`/`harmonize --execute` already write to disk) to Markdown. The artifact type is
     auto-detected from its shape (manifest: has `mutations` + `run_id`; validation_report:
@@ -103,9 +114,9 @@ dictionary. No ML anomaly detection. No claims about statistical or scientific v
 violations of configured rules detected." No row-level merging of cross-dataset sources: the
 crosswalk harmonize path aligns column schemas across sources, it never joins them into one table.
 
-The design spec's non-goals list permits exactly one exception: a thin, read-only Streamlit viewer
-over JSON the CLI already produces (no write path, no new engine logic). That viewer is now built
-— see "Viewer (optional)" above.
+The design spec's non-goals list permits exactly one exception: a Streamlit app that calls the
+same engine functions the CLI does (no parallel/duplicated logic) — see "Interactive app
+(optional)" above.
 
 ## Known limitations
 

@@ -7,11 +7,11 @@ from pathlib import Path
 
 import streamlit as st
 
-from rdh.config_schema import RulesConfigError, load_rules
-from rdh.dictionary import build_data_dictionary, read_rows
-from rdh.harmonize import apply_transformations, column_union
-from rdh.ingest import DuplicateHeaderError, check_header_has_no_duplicates, deduplicate_header
-from rdh.investigate import (
+from datadiligence.config_schema import RulesConfigError, load_rules
+from datadiligence.dictionary import build_data_dictionary, read_rows
+from datadiligence.harmonize import apply_transformations, column_union
+from datadiligence.ingest import DuplicateHeaderError, check_header_has_no_duplicates, deduplicate_header
+from datadiligence.investigate import (
     check_referential_integrity,
     compare_fingerprints,
     compute_dataset_fingerprint,
@@ -22,12 +22,12 @@ from rdh.investigate import (
     discover_shared_key_columns,
     infer_semantic_role,
 )
-from rdh.manifest import build_manifest
-from rdh.report import render_html, render_markdown
-from rdh.validation import validate
-from rdh.viewer import classify_report, validation_summary
+from datadiligence.manifest import build_manifest
+from datadiligence.report import render_html, render_markdown
+from datadiligence.validation import validate
+from datadiligence.viewer import classify_report, validation_summary
 
-st.set_page_config(page_title="rdh — research data harmonizer", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="DataDiligence", layout="wide", page_icon="🧬")
 
 st.markdown(
     """
@@ -39,51 +39,51 @@ st.markdown(
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
     }
 
-    .rdh-hero { display: flex; align-items: center; gap: 0.9rem; margin-bottom: 0.15rem; }
-    .rdh-hero-badge {
+    .datadiligence-hero { display: flex; align-items: center; gap: 0.9rem; margin-bottom: 0.15rem; }
+    .datadiligence-hero-badge {
         display: inline-flex; align-items: center; justify-content: center;
         width: 46px; height: 46px; border-radius: 12px;
         background: linear-gradient(135deg, #4F46E5, #7C3AED);
         font-size: 1.4rem;
     }
-    .rdh-hero h1 { font-size: 1.65rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
-    .rdh-tagline { color: #64748B; font-size: 0.95rem; margin: 0.35rem 0 1.6rem 0; max-width: 720px; }
+    .datadiligence-hero h1 { font-size: 1.65rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    .datadiligence-tagline { color: #64748B; font-size: 0.95rem; margin: 0.35rem 0 1.6rem 0; max-width: 720px; }
 
-    .rdh-steps { display: flex; gap: 0.5rem; margin-bottom: 1.8rem; }
-    .rdh-step {
+    .datadiligence-steps { display: flex; gap: 0.5rem; margin-bottom: 1.8rem; }
+    .datadiligence-step {
         flex: 1; padding: 0.55rem 0.9rem; border-radius: 10px;
         background: #F1F5F9; border: 1px solid #E2E8F0;
         font-size: 0.82rem; font-weight: 600; color: #94A3B8;
         display: flex; align-items: center; gap: 0.5rem;
     }
-    .rdh-step.active { background: #EEF2FF; border-color: #C7D2FE; color: #4338CA; }
-    .rdh-step.done { background: #F0FDF4; border-color: #BBF7D0; color: #15803D; }
-    .rdh-step-num {
+    .datadiligence-step.active { background: #EEF2FF; border-color: #C7D2FE; color: #4338CA; }
+    .datadiligence-step.done { background: #F0FDF4; border-color: #BBF7D0; color: #15803D; }
+    .datadiligence-step-num {
         display: inline-flex; align-items: center; justify-content: center;
         width: 20px; height: 20px; border-radius: 50%; background: currentColor;
         font-size: 0.7rem; flex-shrink: 0;
     }
-    .rdh-step-num span { color: white; }
+    .datadiligence-step-num span { color: white; }
 
-    .rdh-card {
+    .datadiligence-card {
         border: 1px solid #E2E8F0; border-radius: 12px; padding: 1rem 1.2rem;
         margin-bottom: 0.6rem; background: white;
     }
-    .rdh-card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.15rem; }
-    .rdh-card-evidence { color: #64748B; font-size: 0.85rem; font-family: ui-monospace, monospace; }
+    .datadiligence-card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.15rem; }
+    .datadiligence-card-evidence { color: #64748B; font-size: 0.85rem; font-family: ui-monospace, monospace; }
 
-    .rdh-badge {
+    .datadiligence-badge {
         display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px;
         font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase;
         margin-right: 0.4rem;
     }
-    .rdh-badge-error { background: #FEE2E2; color: #B91C1C; }
-    .rdh-badge-warning { background: #FEF3C7; color: #B45309; }
-    .rdh-badge-suggestion { background: #DBEAFE; color: #1D4ED8; }
-    .rdh-badge-high { background: #DCFCE7; color: #166534; }
-    .rdh-badge-medium { background: #FEF9C3; color: #854D0E; }
+    .datadiligence-badge-error { background: #FEE2E2; color: #B91C1C; }
+    .datadiligence-badge-warning { background: #FEF3C7; color: #B45309; }
+    .datadiligence-badge-suggestion { background: #DBEAFE; color: #1D4ED8; }
+    .datadiligence-badge-high { background: #DCFCE7; color: #166534; }
+    .datadiligence-badge-medium { background: #FEF9C3; color: #854D0E; }
 
-    .rdh-bucket-header { font-size: 1.05rem; font-weight: 700; margin: 1.6rem 0 0.5rem 0; display: flex; align-items: center; gap: 0.4rem; }
+    .datadiligence-bucket-header { font-size: 1.05rem; font-weight: 700; margin: 1.6rem 0 0.5rem 0; display: flex; align-items: center; gap: 0.4rem; }
 
     div[data-testid="stMetric"] { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 0.75rem 0.9rem; }
     </style>
@@ -93,12 +93,12 @@ st.markdown(
 
 st.markdown(
     """
-    <div class="rdh-hero">
-        <div class="rdh-hero-badge">🧬</div>
-        <h1>research-data-harmonizer</h1>
+    <div class="datadiligence-hero">
+        <div class="datadiligence-hero-badge">🧬</div>
+        <h1>DataDiligence</h1>
     </div>
-    <p class="rdh-tagline">
-        Upload a messy research export. rdh investigates it first — profiling every column,
+    <p class="datadiligence-tagline">
+        Upload a messy research export. DataDiligence investigates it first — profiling every column,
         surfacing duplicates, inconsistent categories, ambiguous dates, and outliers with evidence,
         not blind fixes. You review and approve what to change. Nothing is altered until you say so,
         and every change is logged.
@@ -113,14 +113,14 @@ _EXAMPLES_DIR = Path(__file__).parent / "examples"
 
 def _step_bar(current: int) -> None:
     labels = ["Upload", "Investigate", "Review & Approve", "Cleaned Dataset"]
-    html = ['<div class="rdh-steps">']
+    parts = ['<div class="datadiligence-steps">']
     for i, label in enumerate(labels, start=1):
         cls = "done" if i < current else ("active" if i == current else "")
-        html.append(
-            f'<div class="rdh-step {cls}"><span class="rdh-step-num"><span>{i}</span></span>{label}</div>'
+        parts.append(
+            f'<div class="datadiligence-step {cls}"><span class="datadiligence-step-num"><span>{i}</span></span>{label}</div>'
         )
-    html.append("</div>")
-    st.markdown("".join(html), unsafe_allow_html=True)
+    parts.append("</div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
 
 
 def _esc(value) -> str:
@@ -152,14 +152,14 @@ def _visualize_whitespace(value: str) -> str:
 
 
 def _write_temp(name: str, content: bytes) -> Path:
-    tmp_dir = Path(tempfile.mkdtemp(prefix="rdh_app_"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="datadiligence_app_"))
     path = tmp_dir / name
     path.write_bytes(content)
     return path
 
 
 def _sniff_header(path: Path) -> list[str]:
-    from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
+    from datadiligence.ingest import detect_delimiter, detect_encoding, strip_footer
 
     encoding = detect_encoding(path)
     raw_lines = path.read_text(encoding=encoding).splitlines()
@@ -169,7 +169,7 @@ def _sniff_header(path: Path) -> list[str]:
 
 
 def _rewrite_with_deduplicated_header(path: Path) -> Path:
-    from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
+    from datadiligence.ingest import detect_delimiter, detect_encoding, strip_footer
 
     encoding = detect_encoding(path)
     raw_lines = path.read_text(encoding=encoding).splitlines()
@@ -197,21 +197,21 @@ with tab_analyze:
         st.write("")
         st.write("")
         if st.button("Use bundled example", use_container_width=True):
-            st.session_state["rdh_data_bytes"] = (_FIXTURES_DIR / "sample.csv").read_bytes()
-            st.session_state["rdh_data_name"] = "sample.csv"
-            st.session_state.pop("rdh_dedup_choice_made", None)
+            st.session_state["datadiligence_data_bytes"] = (_FIXTURES_DIR / "sample.csv").read_bytes()
+            st.session_state["datadiligence_data_name"] = "sample.csv"
+            st.session_state.pop("datadiligence_dedup_choice_made", None)
 
-    if data_file is not None and data_file.name != st.session_state.get("rdh_data_name"):
-        st.session_state["rdh_data_bytes"] = data_file.getvalue()
-        st.session_state["rdh_data_name"] = data_file.name
-        st.session_state.pop("rdh_dedup_choice_made", None)
+    if data_file is not None and data_file.name != st.session_state.get("datadiligence_data_name"):
+        st.session_state["datadiligence_data_bytes"] = data_file.getvalue()
+        st.session_state["datadiligence_data_name"] = data_file.name
+        st.session_state.pop("datadiligence_dedup_choice_made", None)
 
-    if not st.session_state.get("rdh_data_bytes"):
+    if not st.session_state.get("datadiligence_data_bytes"):
         _step_bar(1)
         st.info("Upload a file above, or click \"Use bundled example\" to try it immediately.")
         st.stop()
 
-    raw_path = _write_temp(st.session_state["rdh_data_name"], st.session_state["rdh_data_bytes"])
+    raw_path = _write_temp(st.session_state["datadiligence_data_name"], st.session_state["datadiligence_data_bytes"])
 
     # --- Duplicate-header recovery: a real path forward, not a dead end ---
     try:
@@ -220,9 +220,9 @@ with tab_analyze:
     except DuplicateHeaderError as exc:
         _step_bar(1)
         st.markdown(
-            f'<div class="rdh-card"><span class="rdh-badge rdh-badge-error">Blocking</span>'
-            f'<div class="rdh-card-title">Duplicate column names found</div>'
-            f'<div class="rdh-card-evidence">{_esc(exc)}</div></div>',
+            f'<div class="datadiligence-card"><span class="datadiligence-badge datadiligence-badge-error">Blocking</span>'
+            f'<div class="datadiligence-card-title">Duplicate column names found</div>'
+            f'<div class="datadiligence-card-evidence">{_esc(exc)}</div></div>',
             unsafe_allow_html=True,
         )
         st.write(
@@ -232,11 +232,11 @@ with tab_analyze:
         c1, c2 = st.columns(2)
         if c1.button("Auto-rename duplicates and continue (e.g. name → name, name_2)", type="primary"):
             data_path = _rewrite_with_deduplicated_header(raw_path)
-            st.session_state["rdh_dedup_choice_made"] = str(data_path)
+            st.session_state["datadiligence_dedup_choice_made"] = str(data_path)
             st.rerun()
         c2.write("...or fix the file yourself and re-upload it above.")
-        if st.session_state.get("rdh_dedup_choice_made"):
-            data_path = Path(st.session_state["rdh_dedup_choice_made"])
+        if st.session_state.get("datadiligence_dedup_choice_made"):
+            data_path = Path(st.session_state["datadiligence_dedup_choice_made"])
         else:
             st.stop()
 
@@ -289,21 +289,21 @@ with tab_analyze:
     st.markdown(
         f"""
         <div style="display:flex; gap:0.6rem; margin: 0.6rem 0 1.2rem 0;">
-          <div class="rdh-card" style="flex:1; border-left:4px solid #DC2626;">
+          <div class="datadiligence-card" style="flex:1; border-left:4px solid #DC2626;">
             <div style="font-size:1.4rem; font-weight:700;">{n_structural}</div>
-            <div class="rdh-card-evidence">🔴 structural issue(s)</div>
+            <div class="datadiligence-card-evidence">🔴 structural issue(s)</div>
           </div>
-          <div class="rdh-card" style="flex:1; border-left:4px solid #D97706;">
+          <div class="datadiligence-card" style="flex:1; border-left:4px solid #D97706;">
             <div style="font-size:1.4rem; font-weight:700;">{n_quality}</div>
-            <div class="rdh-card-evidence">🟠 quality issue(s)</div>
+            <div class="datadiligence-card-evidence">🟠 quality issue(s)</div>
           </div>
-          <div class="rdh-card" style="flex:1; border-left:4px solid #CA8A04;">
+          <div class="datadiligence-card" style="flex:1; border-left:4px solid #CA8A04;">
             <div style="font-size:1.4rem; font-weight:700;">{n_metadata}</div>
-            <div class="rdh-card-evidence">🟡 metadata inconsistency/ies</div>
+            <div class="datadiligence-card-evidence">🟡 metadata inconsistency/ies</div>
           </div>
-          <div class="rdh-card" style="flex:1; border-left:4px solid #2563EB;">
+          <div class="datadiligence-card" style="flex:1; border-left:4px solid #2563EB;">
             <div style="font-size:1.4rem; font-weight:700;">{n_harmonization}</div>
-            <div class="rdh-card-evidence">🔵 harmonization opportunity/ies</div>
+            <div class="datadiligence-card-evidence">🔵 harmonization opportunity/ies</div>
           </div>
         </div>
         """,
@@ -332,14 +332,14 @@ with tab_analyze:
     fingerprint_bundle = {"fingerprint": fingerprint, "dictionary": dictionary}
     with st.expander("🔗 Dataset fingerprint — compare against a previous version of this file"):
         st.caption(
-            "Fully stateless: rdh keeps no history on its own. Download this fingerprint now; "
+            "Fully stateless: datadiligence keeps no history on its own. Download this fingerprint now; "
             "next time you analyze a newer version of this dataset, upload today's fingerprint "
             "here to see exactly what changed."
         )
         st.download_button(
             "⬇ Download this fingerprint (.json)",
             data=json.dumps(fingerprint_bundle, indent=2),
-            file_name=f"fingerprint_{st.session_state['rdh_data_name']}.json",
+            file_name=f"fingerprint_{st.session_state['datadiligence_data_name']}.json",
             mime="application/json",
         )
         prev_fp_file = st.file_uploader("Upload a previous fingerprint.json to compare", type="json", key="fp_upload")
@@ -349,7 +349,7 @@ with tab_analyze:
                 prev_fp = prev_bundle["fingerprint"]
                 prev_dict = prev_bundle["dictionary"]
             except (json.JSONDecodeError, KeyError, TypeError) as exc:
-                st.error(f"Not a valid rdh fingerprint file: {exc}")
+                st.error(f"Not a valid datadiligence fingerprint file: {exc}")
                 prev_fp = None
             if prev_fp is not None:
                 if prev_fp.get("schema_fingerprint") == fingerprint["schema_fingerprint"] and prev_fp.get("value_fingerprint") == fingerprint["value_fingerprint"]:
@@ -388,15 +388,15 @@ with tab_analyze:
     approved_date_formats: dict[str, str] = {}
 
     if sentinels:
-        st.markdown('<div class="rdh-bucket-header">🔎 Candidate missing-value codes</div>', unsafe_allow_html=True)
+        st.markdown('<div class="datadiligence-bucket-header">🔎 Candidate missing-value codes</div>', unsafe_allow_html=True)
         for col, values in sentinels.items():
             for val in values:
                 key = f"sentinel__{col}__{val}"
                 c1, c2, c3 = st.columns([0.5, 2.5, 2])
                 checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
                 c2.markdown(
-                    f'<div class="rdh-card-title">{_esc(col)} = "{_visualize_whitespace(val)}"</div>'
-                    f'<div class="rdh-card-evidence">looks like a common missing-value convention</div>',
+                    f'<div class="datadiligence-card-title">{_esc(col)} = "{_visualize_whitespace(val)}"</div>'
+                    f'<div class="datadiligence-card-evidence">looks like a common missing-value convention</div>',
                     unsafe_allow_html=True,
                 )
                 label = c3.text_input("Map to", value="Missing", key=f"{key}_label", label_visibility="collapsed")
@@ -404,14 +404,14 @@ with tab_analyze:
                     approved_sentinels.setdefault(col, {})[val] = label
 
     if ambiguous_dates:
-        st.markdown('<div class="rdh-bucket-header">📅 Ambiguous dates</div>', unsafe_allow_html=True)
+        st.markdown('<div class="datadiligence-bucket-header">📅 Ambiguous dates</div>', unsafe_allow_html=True)
         for col, count in ambiguous_dates.items():
             key = f"date__{col}"
             c1, c2, c3 = st.columns([0.5, 2.5, 2])
             checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
             c2.markdown(
-                f'<div class="rdh-card-title">{_esc(col)}</div>'
-                f'<div class="rdh-card-evidence">{count} value(s) shaped like MM/DD or DD/MM with no way to '
+                f'<div class="datadiligence-card-title">{_esc(col)}</div>'
+                f'<div class="datadiligence-card-evidence">{count} value(s) shaped like MM/DD or DD/MM with no way to '
                 f"tell which — never parsed automatically</div>",
                 unsafe_allow_html=True,
             )
@@ -422,18 +422,18 @@ with tab_analyze:
                 approved_date_formats[col] = "%m/%d/%Y" if fmt_label == "MM/DD/YYYY" else "%d/%m/%Y"
 
     if category_clusters:
-        st.markdown('<div class="rdh-bucket-header">🏷️ Inconsistent categories</div>', unsafe_allow_html=True)
+        st.markdown('<div class="datadiligence-bucket-header">🏷️ Inconsistent categories</div>', unsafe_allow_html=True)
         for col, clusters in category_clusters.items():
             for i, cluster in enumerate(clusters):
                 key = f"cat__{col}__{i}"
-                badge_cls = "rdh-badge-high" if cluster["confidence"] == "high" else "rdh-badge-medium"
+                badge_cls = "datadiligence-badge-high" if cluster["confidence"] == "high" else "datadiligence-badge-medium"
                 c1, c2 = st.columns([0.5, 4])
                 checked = c1.checkbox("approve", key=f"{key}_on", value=(cluster["confidence"] == "high"), label_visibility="collapsed")
                 values_str = " / ".join(f'"{_visualize_whitespace(v)}"' for v in cluster["values"])
                 c2.markdown(
-                    f'<span class="rdh-badge {badge_cls}">{_esc(cluster["confidence"])} confidence</span>'
-                    f'<div class="rdh-card-title">{_esc(col)}: {values_str}</div>'
-                    f'<div class="rdh-card-evidence">would merge onto "{_visualize_whitespace(cluster["suggested_canonical"])}"</div>',
+                    f'<span class="datadiligence-badge {badge_cls}">{_esc(cluster["confidence"])} confidence</span>'
+                    f'<div class="datadiligence-card-title">{_esc(col)}: {values_str}</div>'
+                    f'<div class="datadiligence-card-evidence">would merge onto "{_visualize_whitespace(cluster["suggested_canonical"])}"</div>',
                     unsafe_allow_html=True,
                 )
                 if checked:
@@ -445,27 +445,27 @@ with tab_analyze:
     outlier_cols = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
     top_code_cols = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
     if outlier_cols or top_code_cols or dup_rows:
-        st.markdown('<div class="rdh-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
+        st.markdown('<div class="datadiligence-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
         st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
         for c, f in outlier_cols.items():
             st.markdown(
-                f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Suggestion</span>'
-                f'<div class="rdh-card-title">{_esc(c)}: {f["outliers"]["outlier_count"]} statistical outlier(s)</div>'
-                f'<div class="rdh-card-evidence">IQR method — statistically unusual, not necessarily wrong</div></div>',
+                f'<div class="datadiligence-card"><span class="datadiligence-badge datadiligence-badge-suggestion">Suggestion</span>'
+                f'<div class="datadiligence-card-title">{_esc(c)}: {f["outliers"]["outlier_count"]} statistical outlier(s)</div>'
+                f'<div class="datadiligence-card-evidence">IQR method — statistically unusual, not necessarily wrong</div></div>',
                 unsafe_allow_html=True,
             )
         for c, f in top_code_cols.items():
             st.markdown(
-                f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Suggestion</span>'
-                f'<div class="rdh-card-title">{_esc(c)}: possible top-coding at {_esc(f["top_code_spike"]["value"])}</div>'
-                f'<div class="rdh-card-evidence">{f["top_code_spike"]["fraction"]:.1%} of values sit at the observed max</div></div>',
+                f'<div class="datadiligence-card"><span class="datadiligence-badge datadiligence-badge-suggestion">Suggestion</span>'
+                f'<div class="datadiligence-card-title">{_esc(c)}: possible top-coding at {_esc(f["top_code_spike"]["value"])}</div>'
+                f'<div class="datadiligence-card-evidence">{f["top_code_spike"]["fraction"]:.1%} of values sit at the observed max</div></div>',
                 unsafe_allow_html=True,
             )
         if dup_rows:
             st.markdown(
-                f'<div class="rdh-card"><span class="rdh-badge rdh-badge-warning">Warning</span>'
-                f'<div class="rdh-card-title">{len(dup_rows)} exact duplicate row(s)</div>'
-                f'<div class="rdh-card-evidence">rdh never auto-deletes rows — could be a data-entry duplicate '
+                f'<div class="datadiligence-card"><span class="datadiligence-badge datadiligence-badge-warning">Warning</span>'
+                f'<div class="datadiligence-card-title">{len(dup_rows)} exact duplicate row(s)</div>'
+                f'<div class="datadiligence-card-evidence">DataDiligence never auto-deletes rows — could be a data-entry duplicate '
                 f"or a legitimate repeated record (e.g. a second visit)</div></div>",
                 unsafe_allow_html=True,
             )
@@ -485,7 +485,7 @@ with tab_analyze:
         st.warning(
             f"You approved both a missing-value mapping and a category mapping for the same "
             f"column(s) ({', '.join(sorted(overlap_columns))}) — which one applies first is "
-            "ambiguous, so rdh refuses this combination rather than guess. Un-check one of the "
+            "ambiguous, so datadiligence refuses this combination rather than guess. Un-check one of the "
             "two for each column listed before applying."
         )
         apply_clicked = False
@@ -536,7 +536,7 @@ with tab_analyze:
         dl1, dl2, dl3 = st.columns(3)
         dl1.download_button(
             "⬇ Cleaned CSV (analysis-ready)", data=buffer.getvalue(),
-            file_name=f"cleaned_{st.session_state['rdh_data_name']}", mime="text/csv", use_container_width=True,
+            file_name=f"cleaned_{st.session_state['datadiligence_data_name']}", mime="text/csv", use_container_width=True,
         )
         dl2.download_button(
             "⬇ provenance.json", data=json.dumps(manifest, indent=2),
@@ -560,13 +560,13 @@ with tab_analyze:
             file_name="audit_report.md", mime="text/markdown", use_container_width=True,
         )
 
-        st.markdown('<div class="rdh-bucket-header">✅ Detected & changed</div>', unsafe_allow_html=True)
+        st.markdown('<div class="datadiligence-bucket-header">✅ Detected & changed</div>', unsafe_allow_html=True)
         if mutations:
             st.dataframe(mutations, use_container_width=True)
         else:
             st.caption("Nothing was approved for change.")
 
-        st.markdown('<div class="rdh-bucket-header">👁️ Detected, left untouched</div>', unsafe_allow_html=True)
+        st.markdown('<div class="datadiligence-bucket-header">👁️ Detected, left untouched</div>', unsafe_allow_html=True)
         unapproved_sentinels = sum(len(v) for v in sentinels.values()) - sum(len(v) for v in approved_sentinels.values())
         st.caption(
             f"{len(dup_rows)} duplicate row(s) · {len(outlier_cols)} column(s) with outliers · "
@@ -574,13 +574,13 @@ with tab_analyze:
             "none of these were altered."
         )
 
-        st.markdown('<div class="rdh-bucket-header">🚩 Still needs human review</div>', unsafe_allow_html=True)
+        st.markdown('<div class="datadiligence-bucket-header">🚩 Still needs human review</div>', unsafe_allow_html=True)
         if report["errors"]:
             for finding in report["errors"]:
                 st.markdown(
-                    f'<div class="rdh-card"><span class="rdh-badge rdh-badge-error">Error</span>'
-                    f'<span class="rdh-card-title">{_esc(finding["rule"])}</span> — {_esc(finding["message"])}<br>'
-                    f'<span class="rdh-card-evidence">row_key: {_esc(finding["row_key"])}</span></div>',
+                    f'<div class="datadiligence-card"><span class="datadiligence-badge datadiligence-badge-error">Error</span>'
+                    f'<span class="datadiligence-card-title">{_esc(finding["rule"])}</span> — {_esc(finding["message"])}<br>'
+                    f'<span class="datadiligence-card-evidence">row_key: {_esc(finding["row_key"])}</span></div>',
                     unsafe_allow_html=True,
                 )
         else:
@@ -589,7 +589,7 @@ with tab_analyze:
 with tab_multifile:
     st.caption(
         "Upload 2+ files from the same study (e.g. participants.csv, visits.csv, labs.csv). "
-        "rdh suggests which columns look like shared keys — by name AND by real value overlap, "
+        "datadiligence suggests which columns look like shared keys — by name AND by real value overlap, "
         "not name alone — and checks referential integrity across a pair you pick. "
         "Nothing here is ever joined or merged; this is discovery only."
     )
@@ -622,9 +622,9 @@ with tab_multifile:
             else:
                 for i, cand in enumerate(candidates):
                     st.markdown(
-                        f'<div class="rdh-card"><span class="rdh-badge rdh-badge-suggestion">Candidate key</span>'
-                        f'<div class="rdh-card-title">{_esc(cand["file_a"])}.{_esc(cand["column_a"])} ↔ {_esc(cand["file_b"])}.{_esc(cand["column_b"])}</div>'
-                        f'<div class="rdh-card-evidence">{cand["overlap_fraction"]:.0%} of the smaller file\'s distinct values '
+                        f'<div class="datadiligence-card"><span class="datadiligence-badge datadiligence-badge-suggestion">Candidate key</span>'
+                        f'<div class="datadiligence-card-title">{_esc(cand["file_a"])}.{_esc(cand["column_a"])} ↔ {_esc(cand["file_b"])}.{_esc(cand["column_b"])}</div>'
+                        f'<div class="datadiligence-card-evidence">{cand["overlap_fraction"]:.0%} of the smaller file\'s distinct values '
                         f"appear in the other — a plausible join key, not a confirmed one</div></div>",
                         unsafe_allow_html=True,
                     )
@@ -643,7 +643,7 @@ with tab_multifile:
                     st.warning(
                         f"⚠ {integrity['orphan_count']} record(s) in {cand['file_b']} reference a "
                         f"{cand['column_b']} value absent from {cand['file_a']}. This may be expected "
-                        "by the study design, or may indicate a data issue — rdh doesn't assume either."
+                        "by the study design, or may indicate a data issue — datadiligence doesn't assume either."
                     )
                     st.write("Examples:", integrity["orphan_examples"])
                 else:
@@ -654,27 +654,27 @@ with tab_multifile:
         st.info("Upload 2 or more files to get started.")
 
 with tab_viewer:
-    st.caption("Read-only. View a data_dictionary / validation_report / manifest JSON file rdh produced elsewhere.")
+    st.caption("Read-only. View a data_dictionary / validation_report / manifest JSON file datadiligence produced elsewhere.")
     report_examples = {
         "Validation report — errors, warnings, suggestions": "validation_report.json",
         "Data dictionary — per-column profile": "data_dictionary.json",
         "Manifest — single-file harmonize audit trail": "manifest.json",
         "Manifest — cross-dataset crosswalk (2 sources, never merged)": "crosswalk_manifest.json",
-        "Unrecognized shape — not an rdh report at all": "unrecognized_shape.json",
+        "Unrecognized shape — not an datadiligence report at all": "unrecognized_shape.json",
     }
     st.markdown("**Try an example**")
     example_cols = st.columns(len(report_examples))
     for col, (label, filename) in zip(example_cols, report_examples.items()):
         if col.button(label, use_container_width=True, key=f"ex_{filename}"):
-            st.session_state["rdh_selected_example"] = filename
-            st.session_state["rdh_uploaded_bytes"] = None
+            st.session_state["datadiligence_selected_example"] = filename
+            st.session_state["datadiligence_uploaded_bytes"] = None
 
     st.divider()
     uploaded_report = st.file_uploader("...or upload your own .json report", type="json", key="report_uploader")
     if uploaded_report is not None:
-        st.session_state["rdh_uploaded_bytes"] = uploaded_report.getvalue()
-        st.session_state["rdh_uploaded_name"] = uploaded_report.name
-        st.session_state["rdh_selected_example"] = None
+        st.session_state["datadiligence_uploaded_bytes"] = uploaded_report.getvalue()
+        st.session_state["datadiligence_uploaded_name"] = uploaded_report.name
+        st.session_state["datadiligence_selected_example"] = None
 
     def _render_report(data: dict, source_label: str) -> None:
         st.caption(f"Showing: {source_label}")
@@ -706,20 +706,20 @@ with tab_viewer:
             st.subheader(f"Mutations ({len(data.get('mutations', []))})")
             st.dataframe(data.get("mutations", []), use_container_width=True)
         else:
-            st.error("Unrecognized report shape — this doesn't look like rdh output.")
+            st.error("Unrecognized report shape — this doesn't look like datadiligence output.")
 
-    if st.session_state.get("rdh_uploaded_bytes"):
+    if st.session_state.get("datadiligence_uploaded_bytes"):
         try:
-            report_data = json.loads(st.session_state["rdh_uploaded_bytes"])
+            report_data = json.loads(st.session_state["datadiligence_uploaded_bytes"])
         except json.JSONDecodeError as exc:
             st.error(f"Not valid JSON: {exc}")
             st.stop()
         if not isinstance(report_data, dict):
-            st.error(f"Not an rdh report — expected a JSON object, got {type(report_data).__name__}.")
+            st.error(f"Not an datadiligence report — expected a JSON object, got {type(report_data).__name__}.")
             st.stop()
-        _render_report(report_data, st.session_state["rdh_uploaded_name"])
-    elif st.session_state.get("rdh_selected_example"):
-        filename = st.session_state["rdh_selected_example"]
+        _render_report(report_data, st.session_state["datadiligence_uploaded_name"])
+    elif st.session_state.get("datadiligence_selected_example"):
+        filename = st.session_state["datadiligence_selected_example"]
         report_data = json.loads((_EXAMPLES_DIR / filename).read_text())
         _render_report(report_data, filename)
     else:

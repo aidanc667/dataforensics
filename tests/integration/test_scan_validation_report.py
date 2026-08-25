@@ -2,7 +2,7 @@ import json
 
 from click.testing import CliRunner
 
-from rdh.cli import main
+from datadiligence.cli import main
 
 
 def _write_rules(tmp_path):

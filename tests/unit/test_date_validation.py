@@ -1,4 +1,4 @@
-from rdh.validation import is_ambiguous_date, validate
+from datadiligence.validation import is_ambiguous_date, validate
 
 _DATE_RULES = {
     "version": 1,

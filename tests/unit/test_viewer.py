@@ -1,4 +1,4 @@
-from rdh.viewer import classify_report, validation_summary
+from datadiligence.viewer import classify_report, validation_summary
 
 
 def test_classify_data_dictionary():

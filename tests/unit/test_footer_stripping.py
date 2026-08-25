@@ -1,4 +1,4 @@
-from rdh.ingest import strip_footer
+from datadiligence.ingest import strip_footer
 
 
 def test_strips_wonder_style_footer():

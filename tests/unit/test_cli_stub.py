@@ -1,5 +1,5 @@
 from click.testing import CliRunner
-from rdh.cli import main
+from datadiligence.cli import main
 
 
 def test_help_lists_subcommands():

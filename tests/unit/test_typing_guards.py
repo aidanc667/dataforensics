@@ -1,4 +1,4 @@
-from rdh.typing_guards import (
+from datadiligence.typing_guards import (
     classify_sentinel,
     is_id_like_column,
     is_pii_like_column,
