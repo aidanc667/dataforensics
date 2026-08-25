@@ -86,7 +86,8 @@ rdh report <artifact.json> [--out <path>]
     has `errors`/`warnings`/`suggestions`; data_dictionary: a mapping of column name ->
     per-column profile dict) and titled accordingly. Without --out, the Markdown is printed
     to stdout; with --out, it's written to that path instead. Exits 3 on malformed/unreadable
-    JSON, 0 otherwise.
+    JSON or on syntactically-valid JSON whose top level isn't an object (e.g. a bare list or
+    `null`), 0 otherwise.
 ```
 
 Exit codes: `0` success/no hard errors, `1` validation errors found, `2` invalid rules/config/

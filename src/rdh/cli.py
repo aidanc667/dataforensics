@@ -87,7 +87,7 @@ def _read_header_and_row_count(path: Path) -> tuple[list[str], int, int]:
     return header, len(data_lines) - 1, len(stripped)
 
 
-def _warn_if_footer_stripped(file_path: Path, stripped_count: int, row_count: int = 0) -> None:
+def _warn_if_footer_stripped(file_path: Path, stripped_count: int, row_count: int) -> None:
     """Print a stderr warning (never an error -- footer-stripping is often
     correct, e.g. a genuine CDC WONDER disclaimer block, and must not block
     a run) whenever strip_footer actually discarded one or more lines from
@@ -185,9 +185,64 @@ def scan(file, rules_path, out_dir):
     sys.exit(1 if report_data["errors"] else 0)
 
 
+class RulesMapError(Exception):
+    """Raised by _parse_rules_map when a --rules-map entry is malformed."""
+
+
+class CrosswalkConfigError(Exception):
+    """Raised by _validate_crosswalk when the loaded crosswalk YAML isn't
+    shaped the way the rest of _harmonize_crosswalk / apply_crosswalk
+    assumes it is."""
+
+
+def _validate_crosswalk(crosswalk, path: Path) -> None:
+    """Validate the shape of a YAML-loaded crosswalk file, mirroring
+    config_schema.py's load_rules style: catch every shape that would
+    otherwise reach downstream code (crosswalk.get(...), source_crosswalk.get(...))
+    and crash with an uncaught AttributeError/TypeError, and raise a clear,
+    actionable CrosswalkConfigError instead.
+
+    Handles (all reproduced as real crashes without this check):
+      - An empty crosswalk file, which yaml.safe_load parses to None, not {}.
+      - A crosswalk file that's a YAML list (or other non-mapping) at the
+        top level.
+      - A `sources:` key present but with nothing indented beneath it,
+        which parses to None, not {}.
+      - A per-source entry under `sources:` that isn't itself a mapping
+        (e.g. `sources: {wonder: 5}`) -- apply_crosswalk's
+        `source_crosswalk.get("column_map", {})` would otherwise crash.
+    """
+    if not isinstance(crosswalk, dict):
+        raise CrosswalkConfigError(
+            f"Crosswalk file {path} must be a YAML mapping at the top level (got {crosswalk!r})"
+        )
+
+    if "sources" not in crosswalk:
+        return
+
+    sources = crosswalk["sources"]
+    if not isinstance(sources, dict):
+        raise CrosswalkConfigError(
+            f"Crosswalk file {path}: 'sources' must be a YAML mapping of source name -> "
+            f"crosswalk entry (got {sources!r}) -- use `sources: {{}}` if you have none, since "
+            "the key can't be present with nothing indented beneath it"
+        )
+
+    for source_name, source_crosswalk in sources.items():
+        if not isinstance(source_crosswalk, dict):
+            raise CrosswalkConfigError(
+                f"Crosswalk file {path}: sources['{source_name}'] must be a YAML mapping "
+                f"(column_map/value_map), got {source_crosswalk!r}"
+            )
+
+
 def _parse_rules_map(rules_map_str: str) -> dict:
     result = {}
     for pair in rules_map_str.split(","):
+        if "=" not in pair:
+            raise RulesMapError(
+                f"Invalid --rules-map entry '{pair}' — expected format file.csv=rules.yaml"
+            )
         file_str, rules_str = pair.split("=", 1)
         result[file_str] = rules_str
     return result
@@ -320,7 +375,11 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
     keeping each source as its own table on a common column schema avoids
     that while still letting the schemas be compared/analyzed together.
     """
-    rules_map = _parse_rules_map(rules_map_str)
+    try:
+        rules_map = _parse_rules_map(rules_map_str)
+    except RulesMapError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(2)
     output_dir_path = Path(output_dir)
 
     for f in files:
@@ -357,6 +416,12 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
     try:
         crosswalk = yaml.safe_load(Path(crosswalk_path).read_text())
     except yaml.YAMLError as exc:
+        click.echo(f"Invalid crosswalk file: {exc}", err=True)
+        sys.exit(2)
+
+    try:
+        _validate_crosswalk(crosswalk, Path(crosswalk_path))
+    except CrosswalkConfigError as exc:
         click.echo(f"Invalid crosswalk file: {exc}", err=True)
         sys.exit(2)
 
@@ -526,6 +591,21 @@ def report(artifact, out):
         sys.exit(3)
     except OSError as exc:
         click.echo(f"Could not read artifact {artifact_path}: {exc}", err=True)
+        sys.exit(3)
+
+    # Syntactically-valid JSON whose top level isn't an object (a bare list,
+    # null, a number, or a string) parses fine above but is not shaped like
+    # any of the artifact types classify_report/render_markdown assume --
+    # every real data_dictionary/validation_report/manifest artifact this
+    # tool writes is a JSON object at the top level. Reject it here with the
+    # same exit code as the malformed-JSON case above, before it reaches
+    # classify_report and crashes uncaught (e.g. `data.keys()` on a list).
+    if not isinstance(data, dict):
+        click.echo(
+            f"Invalid/malformed JSON artifact {artifact_path}: top-level JSON value must be an "
+            f"object (got {type(data).__name__})",
+            err=True,
+        )
         sys.exit(3)
 
     title = _REPORT_TITLES[classify_report(data)]
