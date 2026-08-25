@@ -2,9 +2,15 @@ import re
 from datetime import datetime
 
 from rdh import dictionary
+from rdh.typing_guards import is_pii_like_column
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
+
+# Same honest phrasing as dictionary.py's _PII_MASK_MESSAGE: this is a
+# naming-convention heuristic, not a guarantee about the column's actual
+# contents, so we never claim "PII-safe" or "HIPAA-compliant" here either.
+_PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern]"
 
 
 def is_ambiguous_date(value: str) -> bool:
@@ -17,6 +23,18 @@ def _row_key(row: dict, primary_key: list[str]) -> dict:
     return {k: row.get(k) for k in primary_key}
 
 
+def _display_value(column: str, raw_value) -> str:
+    """Return raw_value as-is, unless `column` matches a PII-like naming
+    pattern — in which case return a masked placeholder instead. Finding
+    messages must never embed a raw cell value from a PII-like column,
+    since those messages get written verbatim into generated Markdown/JSON
+    reports (the same safety requirement dictionary.py already enforces for
+    levels/sample values)."""
+    if is_pii_like_column(column):
+        return _PII_MASK_PLACEHOLDER
+    return raw_value
+
+
 def validate(rows: list[dict], rules: dict) -> dict:
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -26,17 +44,23 @@ def validate(rows: list[dict], rules: dict) -> dict:
     primary_key = rules["primary_key"]
     columns_rules = rules.get("columns", {})
 
+    # If any primary-key component column looks PII-like, the key value
+    # itself (a tuple of raw cell values) must not be embedded raw in the
+    # finding message either.
+    pk_is_pii = any(is_pii_like_column(k) for k in primary_key)
+
     seen_keys: dict[tuple, dict] = {}
     for row in rows:
         key = tuple(row.get(k) for k in primary_key)
         checks_evaluated += 1
         if key in seen_keys:
+            key_display = _PII_MASK_PLACEHOLDER if pk_is_pii else key
             errors.append(
                 {
                     "column": ",".join(primary_key),
                     "row_key": _row_key(row, primary_key),
                     "rule": "duplicate_primary_key",
-                    "message": f"Duplicate primary key value: {key}",
+                    "message": f"Duplicate primary key value: {key_display}",
                     "severity": "error",
                 }
             )
@@ -62,7 +86,7 @@ def validate(rows: list[dict], rules: dict) -> dict:
                             "column": column,
                             "row_key": row_key,
                             "rule": "minimum",
-                            "message": f"{column}={raw_value} is below configured minimum {col_rules['minimum']}",
+                            "message": f"{column}={_display_value(column, raw_value)} is below configured minimum {col_rules['minimum']}",
                             "severity": "error",
                         }
                     )
@@ -79,7 +103,7 @@ def validate(rows: list[dict], rules: dict) -> dict:
                             "column": column,
                             "row_key": row_key,
                             "rule": "maximum",
-                            "message": f"{column}={raw_value} is above configured maximum {col_rules['maximum']} — may still be valid",
+                            "message": f"{column}={_display_value(column, raw_value)} is above configured maximum {col_rules['maximum']} — may still be valid",
                             "severity": "warning",
                         }
                     )
@@ -96,7 +120,7 @@ def validate(rows: list[dict], rules: dict) -> dict:
                                 "column": column,
                                 "row_key": row_key,
                                 "rule": "date_format_mismatch",
-                                "message": f"{column}={raw_value} does not match declared format {declared_format}",
+                                "message": f"{column}={_display_value(column, raw_value)} does not match declared format {declared_format}",
                                 "severity": "error",
                             }
                         )
@@ -106,7 +130,7 @@ def validate(rows: list[dict], rules: dict) -> dict:
                             "column": column,
                             "row_key": row_key,
                             "rule": "ambiguous_date_format",
-                            "message": f"{column}={raw_value} is ambiguous (MM/DD vs DD/MM) with no declared format — not parsed",
+                            "message": f"{column}={_display_value(column, raw_value)} is ambiguous (MM/DD vs DD/MM) with no declared format — not parsed",
                             "severity": "error",
                         }
                     )
@@ -155,7 +179,7 @@ def validate(rows: list[dict], rules: dict) -> dict:
                         "column": column,
                         "row_key": row_key,
                         "rule": "iqr_outlier",
-                        "message": f"{column}={raw_value} is a statistical outlier (IQR method) — not necessarily incorrect",
+                        "message": f"{column}={_display_value(column, raw_value)} is a statistical outlier (IQR method) — not necessarily incorrect",
                         "severity": "suggestion",
                     }
                 )
@@ -179,7 +203,7 @@ def validate(rows: list[dict], rules: dict) -> dict:
                             "column": column,
                             "row_key": row_key,
                             "rule": "rare_category",
-                            "message": f"{column}={raw_value} occurs only once in this dataset — may be valid, not necessarily an error",
+                            "message": f"{column}={_display_value(column, raw_value)} occurs only once in this dataset — may be valid, not necessarily an error",
                             "severity": "suggestion",
                         }
                     )

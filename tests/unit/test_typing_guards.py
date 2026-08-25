@@ -1,6 +1,7 @@
 from rdh.typing_guards import (
     classify_sentinel,
     is_id_like_column,
+    is_pii_like_column,
     preserves_leading_zero,
 )
 
@@ -58,3 +59,23 @@ def test_id_like_column_matches_puma_vintage_variants():
     assert is_id_like_column("MIGPUMA") is True
     assert is_id_like_column("MIGPUMA00") is True
     assert is_id_like_column("MIGPUMA10") is True
+
+
+def test_pii_like_column_matches_spelled_out_forms():
+    """Spelled-out equivalents of the abbreviated PII tokens must also match,
+    not just dob/ssn/phone."""
+    assert is_pii_like_column("date_of_birth") is True
+    assert is_pii_like_column("birthdate") is True
+    assert is_pii_like_column("birth_date") is True
+    assert is_pii_like_column("social_security_number") is True
+    assert is_pii_like_column("social_security") is True
+    assert is_pii_like_column("telephone_number") is True
+    assert is_pii_like_column("telephone") is True
+
+
+def test_pii_like_column_name_matching_unaffected_by_phone_dob_ssn_loosening():
+    """Loosening the phone/dob/ssn matching must not reopen the false-positive
+    traps that the "name" matching logic was specifically built to avoid."""
+    assert is_pii_like_column("county_name") is False
+    assert is_pii_like_column("site_name") is False
+    assert is_pii_like_column("test_name") is False

@@ -33,11 +33,21 @@ _PII_PERSON_QUALIFIERS = (
 _PII_COLUMN_PATTERN = re.compile(
     r"(^|_)(ssn|mrn|dob)(\d*)(_|$)"                                  # ssn, mrn, dob on a real boundary
     r"|(^|_)e?mail(_addr(ess)?)?(_|$)"                                # email / mail [+ optional _address]
-    r"|(^|_)phone(_?number)?(_|$)"                                    # phone [+ optional _number]
+    # "phone" is intentionally NOT boundary-anchored on its left side (unlike
+    # every other keyword here) so that "telephone"/"tele_phone" also match.
+    # This is a deliberately looser match than the rest of this pattern, but
+    # it's low-risk: unlike "name" (which collides constantly with generic
+    # research-data columns like county_name/site_name/test_name), no
+    # plausible research-data column name contains "phone" as an incidental
+    # substring (e.g. "headphone" doesn't show up in this domain).
+    r"|phone(_?number)?(_|$)"                                         # phone / telephone [+ optional _number]
     r"|(^|_)(surname|firstname|lastname|fullname|maidenname|nickname)(_|$)"  # concatenated name variants
     r"|^name$"                                                        # bare "name" column, nothing else
     r"|(^|_)(" + _PII_PERSON_QUALIFIERS + r")_name(_|$)"              # patient_name, first_name, ...
-    r"|(^|_)name_(" + _PII_PERSON_QUALIFIERS + r")(_|$)",             # name_first, name_patient, ...
+    r"|(^|_)name_(" + _PII_PERSON_QUALIFIERS + r")(_|$)"              # name_first, name_patient, ...
+    r"|(^|_)date_of_birth(_|$)"                                       # date_of_birth
+    r"|(^|_)birth_?date(_|$)"                                         # birthdate / birth_date
+    r"|(^|_)social_security(_number)?(_|$)",                          # social_security[_number]
     re.IGNORECASE,
 )
 
