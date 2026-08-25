@@ -86,6 +86,63 @@ def test_crosswalk_writes_two_separate_tables_never_merged(tmp_path):
     assert len(manifest["schema_sha256"]) == 3  # wonder rules + pums rules + crosswalk
 
 
+def test_crosswalk_colliding_source_stems_exit_2_before_any_write(tmp_path):
+    # Two input files from different directories sharing the same filename
+    # stem (e.g. raw/wonder/data.csv and raw/pums/data.csv) both resolve to
+    # "data.harmonized.csv" -- without a collision check, the second write
+    # silently overwrites the first while the manifest still records both
+    # sources as successfully harmonized. Must fail loudly (exit 2) naming
+    # the colliding stems, before any file is written.
+    wonder_dir = tmp_path / "raw" / "wonder"
+    pums_dir = tmp_path / "raw" / "pums"
+    wonder_dir.mkdir(parents=True)
+    pums_dir.mkdir(parents=True)
+
+    wonder = wonder_dir / "data.csv"
+    wonder.write_text("county_fips,deaths\n06081,12\n")
+    pums = pums_dir / "data.csv"
+    pums.write_text("PUMA,AGEP\n0601,29\n")
+
+    wonder_rules = tmp_path / "wonder_rules.yaml"
+    wonder_rules.write_text("version: 1\nprimary_key: [county_fips]\ncolumns: {}\n")
+    pums_rules = tmp_path / "pums_rules.yaml"
+    pums_rules.write_text("version: 1\nprimary_key: [PUMA]\ncolumns: {}\n")
+
+    crosswalk = tmp_path / "crosswalk.yaml"
+    crosswalk.write_text(
+        "version: 1\n"
+        "sources:\n"
+        "  data:\n"
+        "    column_map:\n"
+        "      county_fips: geography_fips\n"
+        "      PUMA: geography_fips\n"
+    )
+
+    output_dir = tmp_path / "harmonized"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "harmonize",
+            str(wonder),
+            str(pums),
+            "--rules-map",
+            f"{wonder}={wonder_rules},{pums}={pums_rules}",
+            "--crosswalk",
+            str(crosswalk),
+            "--output-dir",
+            str(output_dir),
+            "--execute",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "data" in result.output
+    # no output written at all -- the collision must be caught before the
+    # write loop begins, not mid-way through
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
 def test_crosswalk_missing_source_entry_exits_2(tmp_path):
     wonder, wonder_rules, pums, pums_rules, crosswalk = _setup(tmp_path)
     # crosswalk fixture from _setup only defines "wonder" and "pums" sources;

@@ -10,8 +10,14 @@ import yaml
 from rdh import __version__
 from rdh.config_schema import RulesConfigError, load_rules
 from rdh.dictionary import build_data_dictionary, read_rows
-from rdh.harmonize import apply_crosswalk, apply_transformations, plan_transformations
-from rdh.ingest import detect_delimiter, detect_encoding, strip_footer
+from rdh.harmonize import (
+    HarmonizeSafetyError,
+    apply_crosswalk,
+    apply_transformations,
+    assert_row_and_column_integrity,
+    plan_transformations,
+)
+from rdh.ingest import DuplicateHeaderError, check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
 from rdh.manifest import atomic_write, build_manifest
 from rdh.report import render_markdown
 from rdh.validation import validate
@@ -38,7 +44,11 @@ def _read_header(path: Path) -> list[str]:
     raw_lines = path.read_text(encoding=encoding).splitlines()
     delimiter = detect_delimiter(raw_lines[:10])
     data_lines, _stripped = strip_footer(raw_lines, delimiter)
-    return data_lines[0].split(delimiter) if data_lines else []
+    if not data_lines:
+        return []
+    header = data_lines[0].split(delimiter)
+    check_header_has_no_duplicates(header)
+    return header
 
 
 @click.group()
@@ -58,7 +68,11 @@ def scan(file, rules_path, out_dir):
     out_dir_path.mkdir(parents=True, exist_ok=True)
     stem = file_path.stem
 
-    dictionary = build_data_dictionary(file_path)
+    try:
+        dictionary = build_data_dictionary(file_path)
+    except DuplicateHeaderError as exc:
+        click.echo(f"Malformed input file {file_path}: {exc}", err=True)
+        sys.exit(3)
     (out_dir_path / f"{stem}.data_dictionary.json").write_text(json.dumps(dictionary, indent=2))
     (out_dir_path / f"{stem}.data_dictionary.md").write_text(
         render_markdown(f"Data Dictionary: {file_path.name}", dictionary)
@@ -74,7 +88,11 @@ def scan(file, rules_path, out_dir):
         click.echo(f"Invalid rules file: {exc}", err=True)
         sys.exit(2)
 
-    rows = read_rows(file_path)
+    try:
+        rows = read_rows(file_path)
+    except DuplicateHeaderError as exc:
+        click.echo(f"Malformed input file {file_path}: {exc}", err=True)
+        sys.exit(3)
     report_data = validate(rows, rules)
     (out_dir_path / f"{stem}.validation_report.json").write_text(json.dumps(report_data, indent=2))
     (out_dir_path / f"{stem}.validation_report.md").write_text(
@@ -141,7 +159,11 @@ def _harmonize_single_file(file, rules_path, output, execute):
         click.echo(f"Invalid rules file: {exc}", err=True)
         sys.exit(2)
 
-    rows = read_rows(file_path)
+    try:
+        rows = read_rows(file_path)
+    except DuplicateHeaderError as exc:
+        click.echo(f"Malformed input file {file_path}: {exc}", err=True)
+        sys.exit(3)
     plan = plan_transformations(rows, rules)
 
     if not execute:
@@ -153,6 +175,14 @@ def _harmonize_single_file(file, rules_path, output, execute):
         sys.exit(0)
 
     transformed_rows, mutations = apply_transformations(rows, rules)
+
+    try:
+        assert_row_and_column_integrity(
+            rows, transformed_rows, context=f"harmonize {file_path.name}", columns="exact"
+        )
+    except HarmonizeSafetyError as exc:
+        click.echo(f"Refusing to write output: {exc}", err=True)
+        sys.exit(3)
 
     if transformed_rows:
         fieldnames = list(transformed_rows[0].keys())
@@ -192,6 +222,32 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
             click.echo("--output-dir must not be one of the input paths", err=True)
             sys.exit(2)
 
+    # Each source's output filename is derived solely from its filename stem
+    # (<stem>.harmonized.csv). Two input files from different directories
+    # (e.g. raw/wonder/data.csv and raw/pums/data.csv) can share a stem —
+    # without this check, the second source's write would silently overwrite
+    # the first's output while the manifest still records both sources as
+    # successfully harmonized. Fail loudly before any file is written.
+    stems_seen: dict[str, str] = {}
+    colliding_stems: set[str] = set()
+    for f in files:
+        stem = Path(f).stem
+        if stem in stems_seen:
+            colliding_stems.add(stem)
+        else:
+            stems_seen[stem] = f
+    if colliding_stems:
+        details = "; ".join(
+            f"'{stem}' <- " + ", ".join(str(Path(f)) for f in files if Path(f).stem == stem)
+            for stem in sorted(colliding_stems)
+        )
+        click.echo(
+            "Crosswalk source filename collision: two or more input files share the same "
+            f"stem, which would cause one source's output to silently overwrite another's: {details}",
+            err=True,
+        )
+        sys.exit(2)
+
     try:
         crosswalk = yaml.safe_load(Path(crosswalk_path).read_text())
     except yaml.YAMLError as exc:
@@ -218,15 +274,36 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
             sys.exit(2)
         schema_paths.append(Path(rules_map[source_key]))
 
-        rows = read_rows(file_path)
+        try:
+            rows = read_rows(file_path)
+        except DuplicateHeaderError as exc:
+            click.echo(f"Malformed input file {file_path}: {exc}", err=True)
+            sys.exit(3)
         transformed_rows, mutations = apply_transformations(rows, rules)
-
         source_name = file_path.stem
+
+        try:
+            assert_row_and_column_integrity(
+                rows, transformed_rows, context=f"harmonize {file_path.name}", columns="exact"
+            )
+        except HarmonizeSafetyError as exc:
+            click.echo(f"Refusing to write output: {exc}", err=True)
+            sys.exit(3)
+
         if source_name not in crosswalk.get("sources", {}):
             click.echo(f"No crosswalk entry for source '{source_name}' under 'sources:' in {crosswalk_path}", err=True)
             sys.exit(2)
         source_crosswalk = crosswalk["sources"][source_name]
         harmonized_rows = apply_crosswalk(transformed_rows, source_crosswalk)
+
+        try:
+            assert_row_and_column_integrity(
+                transformed_rows, harmonized_rows, context=f"crosswalk {source_name}", columns="count"
+            )
+        except HarmonizeSafetyError as exc:
+            click.echo(f"Refusing to write output: {exc}", err=True)
+            sys.exit(3)
+
         all_mutations.extend(mutations)
 
         if execute:

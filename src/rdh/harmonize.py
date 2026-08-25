@@ -7,6 +7,74 @@ from rdh.typing_guards import classify_sentinel, is_pii_like_column
 _PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern detected]"
 
 
+class HarmonizeSafetyError(Exception):
+    """Raised by assert_row_and_column_integrity when the harmonize
+    pipeline's row-count / column-count safety net fails.
+
+    This is the explicit backstop for the spec invariant "rows are never
+    silently deleted and columns are never silently dropped ... asserted
+    after every run unless a rule explicitly removed something." No rule
+    type in this codebase currently declares a column removal, so the
+    column check is unconditional wherever it applies. It exists
+    independently of any single upstream fix (e.g. duplicate-header
+    detection in ingest.py) so that a future regression anywhere in the
+    transform pipeline is still caught here, before anything is written to
+    disk."""
+
+
+def assert_row_and_column_integrity(
+    input_rows: list[dict],
+    output_rows: list[dict],
+    *,
+    context: str,
+    columns: str = "exact",
+) -> None:
+    """Assert output_rows has exactly as many rows as input_rows, and
+    (depending on ``columns``) the same column structure.
+
+    ``columns``:
+      - "exact": output column *names* must exactly match input column names.
+        Correct for apply_transformations, which only substitutes values and
+        never renames/adds/removes columns.
+      - "count": only the output column *count* must match the input column
+        count -- names may legitimately change. Correct for apply_crosswalk,
+        whose column_map is the one rule type in this codebase that
+        deliberately renames columns; but two distinct source columns
+        silently colliding onto the same target name would still be a
+        silent column loss, so the count is still checked.
+      - "skip": no column check (e.g. when input_rows is empty and there is
+        nothing meaningful to compare).
+    """
+    if len(output_rows) != len(input_rows):
+        raise HarmonizeSafetyError(
+            f"{context}: {len(input_rows)} input row(s) became {len(output_rows)} output "
+            "row(s) -- rows must never be silently added or dropped"
+        )
+
+    if columns == "skip" or not input_rows:
+        return
+
+    input_columns = list(input_rows[0].keys())
+    output_columns = list(output_rows[0].keys()) if output_rows else []
+
+    if columns == "exact":
+        if set(input_columns) != set(output_columns):
+            raise HarmonizeSafetyError(
+                f"{context}: input columns {sorted(set(input_columns))} do not match "
+                f"output columns {sorted(set(output_columns))} -- columns must never be "
+                "silently dropped or added"
+            )
+    elif columns == "count":
+        if len(output_columns) != len(input_columns):
+            raise HarmonizeSafetyError(
+                f"{context}: {len(input_columns)} input column(s) became "
+                f"{len(output_columns)} output column(s) -- columns must never be "
+                "silently dropped or merged"
+            )
+    else:
+        raise ValueError(f"unknown columns mode: {columns!r}")
+
+
 def plan_transformations(rows: list[dict], rules: dict) -> list[dict]:
     plan = []
     missing_values = rules.get("missing_values", {})

@@ -98,6 +98,60 @@ def test_apply_transformations_masks_pii_column_values_in_mutation_log():
     assert mutations[0]["row_key"] == {"participant_id": "1"}
 
 
+def test_execute_refuses_to_write_if_a_row_is_silently_dropped(tmp_path, monkeypatch):
+    # Simulates a regression of the duplicate-header data-loss bug (or any
+    # future bug in the transform pipeline) by monkeypatching
+    # apply_transformations to drop a row, the way a silent dict-collapse
+    # bug would. The row/column-count safety net in cli.py must catch this
+    # and refuse to write output (exit 3), rather than writing a
+    # short-by-one-row file and reporting success.
+    import rdh.cli as cli_module
+
+    src, rules_path = _write_input_and_rules(tmp_path)
+    output_path = tmp_path / "out.csv"
+
+    real_apply_transformations = cli_module.apply_transformations
+
+    def _dropping_apply_transformations(rows, rules):
+        transformed, mutations = real_apply_transformations(rows, rules)
+        return transformed[:-1], mutations  # silently drop the last row
+
+    monkeypatch.setattr(cli_module, "apply_transformations", _dropping_apply_transformations)
+
+    result = CliRunner().invoke(
+        main,
+        ["harmonize", str(src), "--rules", str(rules_path), "--output", str(output_path), "--execute"],
+    )
+
+    assert result.exit_code == 3
+    assert not output_path.exists()
+
+
+def test_execute_refuses_to_write_if_a_column_is_silently_dropped(tmp_path, monkeypatch):
+    import rdh.cli as cli_module
+
+    src, rules_path = _write_input_and_rules(tmp_path)
+    output_path = tmp_path / "out.csv"
+
+    real_apply_transformations = cli_module.apply_transformations
+
+    def _column_dropping_apply_transformations(rows, rules):
+        transformed, mutations = real_apply_transformations(rows, rules)
+        for row in transformed:
+            row.pop("smoking_status", None)  # silently drop a column
+        return transformed, mutations
+
+    monkeypatch.setattr(cli_module, "apply_transformations", _column_dropping_apply_transformations)
+
+    result = CliRunner().invoke(
+        main,
+        ["harmonize", str(src), "--rules", str(rules_path), "--output", str(output_path), "--execute"],
+    )
+
+    assert result.exit_code == 3
+    assert not output_path.exists()
+
+
 def test_execute_on_header_only_csv_preserves_columns(tmp_path):
     src = tmp_path / "empty.csv"
     src.write_text("participant_id,smoking_status\n")

@@ -38,3 +38,35 @@ def test_harmonize_output_path_collision_exits_2(tmp_path):
         main, ["harmonize", str(src), "--rules", str(rules), "--output", str(src)]
     )
     assert result.exit_code == 2
+
+
+def test_scan_duplicate_header_exits_3_and_writes_no_reports(tmp_path):
+    # header "pid,sex,sex" would otherwise silently collapse to one "sex"
+    # column, losing data with exit 0. Must fail loudly with exit 3 instead,
+    # naming the duplicate column, and must not write any report files.
+    src = tmp_path / "dup.csv"
+    src.write_text("pid,sex,sex\n1,M,F\n")
+    out_dir = tmp_path / "out"
+
+    result = CliRunner().invoke(main, ["scan", str(src), "--out-dir", str(out_dir)])
+
+    assert result.exit_code == 3
+    assert "sex" in result.output
+    assert not out_dir.exists() or list(out_dir.iterdir()) == []
+
+
+def test_harmonize_single_file_duplicate_header_exits_3_and_writes_nothing(tmp_path):
+    src = tmp_path / "dup.csv"
+    src.write_text("pid,sex,sex\n1,M,F\n")
+    rules = tmp_path / "rules.yaml"
+    rules.write_text("version: 1\nprimary_key: [pid]\ncolumns: {}\n")
+    output_path = tmp_path / "out.csv"
+
+    result = CliRunner().invoke(
+        main,
+        ["harmonize", str(src), "--rules", str(rules), "--output", str(output_path), "--execute"],
+    )
+
+    assert result.exit_code == 3
+    assert "sex" in result.output
+    assert not output_path.exists()
