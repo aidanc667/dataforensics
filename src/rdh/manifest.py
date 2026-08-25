@@ -1,6 +1,5 @@
 import os
 import platform
-import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +44,7 @@ def atomic_write(path: Path, content: str) -> None:
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
+        os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, path)
     except BaseException:
         if os.path.exists(tmp_name):
