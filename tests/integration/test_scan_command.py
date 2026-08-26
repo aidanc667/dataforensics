@@ -67,3 +67,65 @@ def test_scan_prints_no_warning_when_nothing_stripped(tmp_path):
 
     assert result.exit_code == 0
     assert "Warning" not in result.output
+
+
+import openpyxl
+
+
+def test_scan_accepts_json_input(tmp_path):
+    src = tmp_path / "sample.json"
+    src.write_text(json.dumps([{"id": "001", "age": 34}, {"id": "002", "age": 29}]))
+
+    result = CliRunner().invoke(main, ["scan", str(src), "--out-dir", str(tmp_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads((tmp_path / "sample.data_dictionary.json").read_text())
+    assert "age" in payload
+
+
+def test_scan_malformed_json_exits_3(tmp_path):
+    src = tmp_path / "broken.json"
+    src.write_text("{not valid")
+
+    result = CliRunner().invoke(main, ["scan", str(src), "--out-dir", str(tmp_path)])
+
+    assert result.exit_code == 3
+    assert "Malformed input file" in result.output
+
+
+def test_scan_accepts_xlsx_input(tmp_path):
+    src = tmp_path / "sample.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["id", "age"])
+    ws.append(["001", 34])
+    ws.append(["002", 29])
+    wb.save(src)
+
+    result = CliRunner().invoke(main, ["scan", str(src), "--out-dir", str(tmp_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads((tmp_path / "sample.data_dictionary.json").read_text())
+    assert "age" in payload
+
+
+def test_scan_xlsx_multi_sheet_requires_sheet_option(tmp_path):
+    src = tmp_path / "multi.xlsx"
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "First"
+    ws1.append(["a"])
+    ws1.append(["1"])
+    ws2 = wb.create_sheet("Second")
+    ws2.append(["b"])
+    ws2.append(["2"])
+    wb.save(src)
+
+    result = CliRunner().invoke(main, ["scan", str(src), "--out-dir", str(tmp_path)])
+    assert result.exit_code == 3
+    assert "multiple sheets" in result.output
+
+    result = CliRunner().invoke(main, ["scan", str(src), "--out-dir", str(tmp_path), "--sheet", "Second"])
+    assert result.exit_code == 0
+    payload = json.loads((tmp_path / "multi.data_dictionary.json").read_text())
+    assert "b" in payload

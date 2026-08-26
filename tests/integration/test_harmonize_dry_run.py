@@ -73,3 +73,19 @@ def test_dry_run_shows_footer_stripped_warning_without_execute(tmp_path):
     assert not output_path.exists()
     assert "warning" in result.output.lower()
     assert "footer" in result.output.lower() or "non-data" in result.output.lower()
+
+
+def test_harmonize_dry_run_accepts_json_input(tmp_path):
+    src = tmp_path / "sample.json"
+    src.write_text('[{"participant_id": "1", "smoking_status": "99"}, {"participant_id": "2", "smoking_status": "10"}]')
+    rules_path = _write_rules(tmp_path)
+    output_path = tmp_path / "out.csv"
+
+    result = CliRunner().invoke(
+        main,
+        ["harmonize", str(src), "--rules", str(rules_path), "--output", str(output_path)],
+    )
+
+    assert result.exit_code == 0
+    assert not output_path.exists()
+    assert "smoking_status" in result.output

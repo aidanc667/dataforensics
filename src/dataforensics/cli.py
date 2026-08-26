@@ -17,7 +17,17 @@ from dataforensics.harmonize import (
     assert_row_and_column_integrity,
     plan_transformations,
 )
-from dataforensics.ingest import DuplicateHeaderError, check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
+from dataforensics.ingest import (
+    DuplicateHeaderError,
+    IngestFormatError,
+    check_header_has_no_duplicates,
+    detect_delimiter,
+    detect_encoding,
+    detect_file_format,
+    read_excel_rows,
+    read_json_rows,
+    strip_footer,
+)
 from dataforensics.manifest import atomic_write, build_manifest
 from dataforensics.report import render_markdown
 from dataforensics.validation import validate
@@ -31,7 +41,7 @@ _REPORT_TITLES = {
 }
 
 
-def _read_header_and_row_count(path: Path) -> tuple[list[str], int, int]:
+def _read_header_and_row_count(path: Path, sheet: str | None = None) -> tuple[list[str], int, int]:
     """Read the header row, the on-disk data-row count, and the number of
     lines ``strip_footer`` stripped, directly from the input file, via
     cli.py's own re-implementation of the parse (detect_encoding /
@@ -75,7 +85,19 @@ def _read_header_and_row_count(path: Path) -> tuple[list[str], int, int]:
     field-count heuristic misclassifying and dropping a genuine data line)
     corrupts this anchor and ``read_rows``'s output identically, and would
     NOT be caught by the safety net this anchor feeds.
+
+    For JSON/Excel input this same independence is preserved by calling
+    ingest.read_json_rows/read_excel_rows directly here too, rather than
+    going through dictionary.py's _load_table -- the same "two bindings of
+    one shared primitive, not two independent implementations" bound as
+    the delimited-text case above.
     """
+    fmt = detect_file_format(path)
+    if fmt != "delimited":
+        rows = read_json_rows(path) if fmt == "json" else read_excel_rows(path, sheet=sheet)
+        header = list(rows[0].keys()) if rows else []
+        return header, len(rows), 0
+
     encoding = detect_encoding(path)
     raw_lines = path.read_text(encoding=encoding).splitlines()
     delimiter = detect_delimiter(raw_lines[:10])
@@ -127,7 +149,8 @@ def main():
 @click.argument("file", type=click.Path(exists=True))
 @click.option("--rules", "rules_path", type=click.Path(exists=True), default=None)
 @click.option("--out-dir", type=click.Path(), default=".")
-def scan(file, rules_path, out_dir):
+@click.option("--sheet", "sheet", default=None, help="Sheet name for a multi-sheet Excel input (ignored for non-Excel input).")
+def scan(file, rules_path, out_dir, sheet):
     """Read-only: emit a data dictionary and, if --rules is given, a validation report."""
     file_path = Path(file)
     out_dir_path = Path(out_dir)
@@ -135,8 +158,8 @@ def scan(file, rules_path, out_dir):
     stem = file_path.stem
 
     try:
-        dictionary = build_data_dictionary(file_path)
-    except DuplicateHeaderError as exc:
+        dictionary = build_data_dictionary(file_path, sheet=sheet)
+    except (DuplicateHeaderError, IngestFormatError) as exc:
         click.echo(f"Malformed input file {file_path}: {exc}", err=True)
         sys.exit(3)
 
@@ -146,8 +169,8 @@ def scan(file, rules_path, out_dir):
     # header; a DuplicateHeaderError here would be unexpected but is handled
     # defensively rather than left to crash uncaught.
     try:
-        _stripped_header, stripped_row_count, stripped_count = _read_header_and_row_count(file_path)
-    except DuplicateHeaderError:
+        _stripped_header, stripped_row_count, stripped_count = _read_header_and_row_count(file_path, sheet=sheet)
+    except (DuplicateHeaderError, IngestFormatError):
         stripped_row_count, stripped_count = 0, 0
     _warn_if_footer_stripped(file_path, stripped_count, stripped_row_count)
 
@@ -167,8 +190,8 @@ def scan(file, rules_path, out_dir):
         sys.exit(2)
 
     try:
-        rows = read_rows(file_path)
-    except DuplicateHeaderError as exc:
+        rows = read_rows(file_path, sheet=sheet)
+    except (DuplicateHeaderError, IngestFormatError) as exc:
         click.echo(f"Malformed input file {file_path}: {exc}", err=True)
         sys.exit(3)
     report_data = validate(rows, rules)
@@ -256,10 +279,11 @@ def _parse_rules_map(rules_map_str: str) -> dict:
 @click.option("--crosswalk", "crosswalk_path", type=click.Path(exists=True), default=None)
 @click.option("--output-dir", type=click.Path(), default=None)
 @click.option("--execute", is_flag=True, default=False)
-def harmonize(files, rules_path, output, rules_map, crosswalk_path, output_dir, execute):
+@click.option("--sheet", "sheet", default=None, help="Sheet name for a multi-sheet Excel input (single-file mode only; ignored otherwise).")
+def harmonize(files, rules_path, output, rules_map, crosswalk_path, output_dir, execute, sheet):
     """Rules-driven, dry-run-by-default transform. Single file or cross-dataset crosswalk."""
     if len(files) == 1 and rules_path is not None:
-        _harmonize_single_file(files[0], rules_path, output, execute)
+        _harmonize_single_file(files[0], rules_path, output, execute, sheet)
         return
 
     if len(files) >= 2 and rules_map and crosswalk_path and output_dir:
@@ -274,7 +298,7 @@ def harmonize(files, rules_path, output, rules_map, crosswalk_path, output_dir, 
     sys.exit(2)
 
 
-def _harmonize_single_file(file, rules_path, output, execute):
+def _harmonize_single_file(file, rules_path, output, execute, sheet):
     file_path = Path(file)
 
     if output is None:
@@ -293,8 +317,8 @@ def _harmonize_single_file(file, rules_path, output, execute):
         sys.exit(2)
 
     try:
-        rows = read_rows(file_path)
-    except DuplicateHeaderError as exc:
+        rows = read_rows(file_path, sheet=sheet)
+    except (DuplicateHeaderError, IngestFormatError) as exc:
         click.echo(f"Malformed input file {file_path}: {exc}", err=True)
         sys.exit(3)
     plan = plan_transformations(rows, rules)
@@ -318,7 +342,7 @@ def _harmonize_single_file(file, rules_path, output, execute):
     # A dry run that silently hid rows being dropped by strip_footer would
     # contradict the README's own description of dry-run as safe-to-trust
     # preview.
-    anchor_header, anchor_row_count, anchor_stripped_count = _read_header_and_row_count(file_path)
+    anchor_header, anchor_row_count, anchor_stripped_count = _read_header_and_row_count(file_path, sheet=sheet)
     _warn_if_footer_stripped(file_path, anchor_stripped_count, anchor_row_count)
 
     if not execute:
@@ -475,7 +499,7 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
                 file_row_counts[str(file_path)],
                 file_stripped_counts[str(file_path)],
             ) = _read_header_and_row_count(file_path)
-        except DuplicateHeaderError as exc:
+        except (DuplicateHeaderError, IngestFormatError) as exc:
             click.echo(f"Malformed input file {file_path}: {exc}", err=True)
             sys.exit(3)
         _warn_if_footer_stripped(
@@ -497,7 +521,7 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
 
         try:
             rows = read_rows(file_path)
-        except DuplicateHeaderError as exc:
+        except (DuplicateHeaderError, IngestFormatError) as exc:
             # Defensive backstop only -- pass 1 already validated every
             # source's header via _read_header_and_row_count above.
             click.echo(f"Malformed input file {file_path}: {exc}", err=True)
