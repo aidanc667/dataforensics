@@ -45,7 +45,8 @@ streamlit run app.py
 
 Three tabs:
 
-- **Analyze & Clean** — upload a CSV (or click "Use bundled example"), and it runs the full
+- **Analyze & Clean** — upload a CSV/TSV/JSON/Excel file (or click "Use bundled example"), and
+  it runs the full
   Upload → Investigate → Review & Approve → Cleaned Dataset workflow: data dictionary, a
   findings-severity dashboard, suggested variable roles, dataset fingerprinting (download today's
   fingerprint, upload a prior one next time to see exactly what changed), duplicate-row/sentinel/
@@ -62,16 +63,21 @@ Three tabs:
 ## CLI reference (as actually implemented today)
 
 ```
-dataforensics scan <file> [--rules schema.yaml] [--out-dir DIR]
-    Read-only. Always writes <stem>.data_dictionary.{json,md}. If --rules is given, also
-    writes <stem>.validation_report.{json,md}. Never writes to the input path.
+dataforensics scan <file> [--rules schema.yaml] [--out-dir DIR] [--sheet NAME]
+    Read-only. Accepts CSV, TSV, JSON (a top-level array of flat objects), or Excel
+    (.xlsx/.xls). --sheet picks a sheet in a multi-sheet Excel workbook (required if the
+    workbook has more than one -- scan refuses rather than guessing which one you meant);
+    ignored for non-Excel input. Always writes <stem>.data_dictionary.{json,md}. If --rules
+    is given, also writes <stem>.validation_report.{json,md}. Never writes to the input path.
     Exit 0 (clean or no --rules), 1 (validation errors found), 2 (malformed rules file),
-    3 (malformed input file, e.g. a duplicate header column).
+    3 (malformed input file -- a duplicate header column, invalid JSON shape, or an
+    unresolved multi-sheet Excel workbook).
 
-dataforensics harmonize <file> --rules schema.yaml --output <path> [--execute]
-    Single-file mode. Without --execute: dry run, writes nothing, just lists proposed
-    transformations (footer-stripping warnings, if any, are printed on the dry run too, not
-    just --execute). With --execute: applies the rules, writes <path> and
+dataforensics harmonize <file> --rules schema.yaml --output <path> [--execute] [--sheet NAME]
+    Single-file mode. Accepts CSV, TSV, JSON, or Excel input the same way scan does; --sheet
+    picks a sheet in a multi-sheet Excel workbook. Without --execute: dry run, writes nothing,
+    just lists proposed transformations (footer-stripping warnings, if any, are printed on the
+    dry run too, not just --execute). With --execute: applies the rules, writes <path> and
     <path>.manifest.json atomically. Refuses (exit 2) if --output equals the input path
     or if the rules file is malformed; exits 3 on a malformed input file or if a post-transform
     safety check fails (refuses to write rather than risk silent data loss).
@@ -86,9 +92,11 @@ dataforensics harmonize <file1> <file2> [...] --rules-map file1=schema1.yaml,fil
     --crosswalk, and --output-dir; falls back to single-file mode only when exactly one
     file and --rules/--output are given. Exits 2 if --output-dir collides with an input
     path, a source has no --rules-map entry, or a source's filename stem has no matching
-    entry under the crosswalk file's `sources:` key; exits 3 on a malformed input file or
-    a failed safety check for any source (nothing is written for ANY source in that case —
-    see the two-pass validate-then-write design below).
+    entry under the crosswalk file's `sources:` key; exits 3 on a malformed input file
+    (including an unresolved multi-sheet Excel source -- --sheet is not available in
+    crosswalk mode, so a multi-sheet source must be split or converted to a single-sheet
+    file first) or a failed safety check for any source (nothing is written for ANY source
+    in that case — see the two-pass validate-then-write design below).
 
 dataforensics report <artifact.json> [--out <path>]
     Renders a data_dictionary/validation_report/manifest JSON artifact (the same JSON
@@ -143,6 +151,13 @@ CDC WONDER disclaimer/"Query Parameters:" block), which is the intended, correct
 heuristic. Either way, if you see this warning, it's worth a quick look — check the row count
 against what you expect, and if it's off, check the input file for a data row with a quoted
 delimiter near the line named in the warning.
+
+**Excel's own type coercion can destroy information before this tool ever sees the file.**
+A spreadsheet cell typed as `007` (e.g. a FIPS or ZIP code) is stored by Excel as the number
+`7` — the leading zero is gone before `openpyxl`/`xlrd` read it, and there is no way to
+recover it afterward. This is a limitation of the Excel file format itself, not something
+`dataforensics`'s `.xlsx`/`.xls` reader can detect or fix. If leading zeros matter, prefer a
+CSV/TSV/JSON export of the same data, where the value is preserved as literal text.
 
 ## Project status
 
