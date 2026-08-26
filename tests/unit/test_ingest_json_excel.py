@@ -293,3 +293,35 @@ def test_read_excel_rows_xls_happy_path(tmp_path):
         {"participant_id": "001", "age": "34"},
         {"participant_id": "002", "age": "29"},
     ]
+
+
+def test_read_excel_rows_xls_skips_blank_formatted_trailing_row(tmp_path):
+    # A real .xls file can carry a trailing row whose cells are XL_CELL_BLANK
+    # (formatting like a border applied to an otherwise-empty cell), not
+    # XL_CELL_EMPTY -- both must be treated as "no value" so the existing
+    # fully-blank-row skip in read_excel_rows fires instead of producing a
+    # row of empty strings.
+    f = tmp_path / "blank_row.xls"
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Sheet1")
+    ws.write(0, 0, "a")
+    ws.write(0, 1, "b")
+    ws.write(1, 0, "1")
+    ws.write(1, 1, "2")
+    blank_style = xlwt.easyxf("borders: top thin")
+    ws.write(2, 0, "", blank_style)
+    ws.write(2, 1, "", blank_style)
+    wb.save(str(f))
+
+    assert read_excel_rows(f) == [{"a": "1", "b": "2"}]
+
+
+def test_read_excel_rows_xls_date_only_cell_has_no_time_suffix(tmp_path):
+    f = tmp_path / "date_only.xls"
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Sheet1")
+    ws.write(0, 0, "visit_date")
+    ws.write(1, 0, dt.date(2024, 1, 15), xlwt.easyxf(num_format_str="YYYY-MM-DD"))
+    wb.save(str(f))
+
+    assert read_excel_rows(f) == [{"visit_date": "2024-01-15"}]

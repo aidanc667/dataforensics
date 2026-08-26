@@ -244,6 +244,16 @@ def read_json_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _format_is_date_only(fmt_str: str) -> bool:
+    """A cell's number-format string is the authoritative signal for "was
+    this cell formatted as a date, not a date+time" -- "h" (hour) or "s"
+    (second) in the format code means time-of-day is part of the display,
+    so only a format lacking both is treated as date-only. Shared by both
+    the .xlsx and .xls backends so the heuristic isn't duplicated."""
+    fmt = fmt_str.lower()
+    return "h" not in fmt and "s" not in fmt
+
+
 def _xlsx_backend(path: Path):
     import openpyxl
 
@@ -264,14 +274,8 @@ def _xlsx_backend(path: Path):
                 # render every Excel date cell as an ISO datetime string
                 # ("2024-01-15T00:00:00") instead of a plain date
                 # ("2024-01-15"), unlike the equivalent CSV/JSON value.
-                # number_format is the authoritative signal for "was this
-                # cell formatted as a date, not a date+time" -- "h" (hour)
-                # or "s" (second) in the format code means time-of-day is
-                # part of the display, so only a format lacking both is
-                # treated as date-only.
                 if isinstance(value, datetime.datetime) and cell.is_date:
-                    fmt = cell.number_format.lower()
-                    if "h" not in fmt and "s" not in fmt:
+                    if _format_is_date_only(cell.number_format):
                         value = value.date()
                 values.append(value)
             grid.append(tuple(values))
@@ -280,28 +284,50 @@ def _xlsx_backend(path: Path):
     return sheet_names, get_grid
 
 
-def _xls_cell_value(cell, datemode):
+def _xls_cell_value(cell, datemode, book):
     import xlrd
 
-    if cell.ctype == xlrd.XL_CELL_EMPTY:
+    if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+        # XL_CELL_EMPTY is a cell with no record at all; XL_CELL_BLANK is a
+        # cell that has formatting (e.g. a border or fill) but no content.
+        # Both mean "no value" -- without treating XL_CELL_BLANK the same
+        # as XL_CELL_EMPTY, read_excel_rows's fully-blank-row skip (which
+        # checks `all(v is None for v in raw_row)`) would never fire for a
+        # formatted-but-empty trailing row, turning it into a row of empty
+        # strings instead of being skipped.
         return None
     if cell.ctype == xlrd.XL_CELL_BOOLEAN:
         return bool(cell.value)
     if cell.ctype == xlrd.XL_CELL_DATE:
-        return xlrd.xldate_as_datetime(cell.value, datemode)
+        value = xlrd.xldate_as_datetime(cell.value, datemode)
+        # Mirrors the .xlsx date-only handling above: xlrd always hands back
+        # a full datetime for a date cell too, so a date-only cell would
+        # otherwise stringify with a spurious "T00:00:00" suffix. Unlike
+        # openpyxl, xlrd doesn't expose a per-cell number_format directly --
+        # it has to be looked up via the cell's XF (extended format) record,
+        # which requires the workbook to be opened with formatting_info=True.
+        xf = book.xf_list[cell.xf_index] if cell.xf_index is not None else None
+        if xf is not None:
+            fmt = book.format_map.get(xf.format_key)
+            if fmt is not None and _format_is_date_only(fmt.format_str):
+                value = value.date()
+        return value
     return cell.value
 
 
 def _xls_backend(path: Path):
     import xlrd
 
-    book = xlrd.open_workbook(str(path))
+    book = xlrd.open_workbook(str(path), formatting_info=True)
     sheet_names = book.sheet_names()
 
     def get_grid(sheet_name: str) -> list[list]:
         ws = book.sheet_by_name(sheet_name)
         return [
-            [_xls_cell_value(ws.cell(r, c), book.datemode) for c in range(ws.ncols)]
+            [
+                _xls_cell_value(ws.cell(r, c), book.datemode, book)
+                for c in range(ws.ncols)
+            ]
             for r in range(ws.nrows)
         ]
 
