@@ -1,5 +1,6 @@
 from pathlib import Path
 import datetime
+import json
 
 from charset_normalizer import from_path
 
@@ -191,3 +192,53 @@ def _stringify_cell(value) -> str:
     if isinstance(value, int):
         return str(value)
     return str(value)
+
+
+def read_json_rows(path: Path) -> list[dict[str, str]]:
+    """Reads a JSON file that must be a top-level array of flat objects
+    (e.g. [{"age": 34, "sex": "F"}, ...]) into the same list[dict[str, str]]
+    shape read_rows() produces for CSV/TSV. Never guesses at any other
+    shape (a bare object, NDJSON, a nested array-under-a-key) -- see
+    docs/superpowers/specs/2026-08-26-json-excel-ingest-design.md for why.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise IngestFormatError(f"{path.name} is not valid JSON: {exc}") from exc
+
+    if not isinstance(data, list):
+        raise IngestFormatError(
+            f"{path.name}: expected a JSON array of objects (e.g. [{{...}}, {{...}}]), "
+            f"got a top-level {type(data).__name__}"
+        )
+
+    if not data:
+        return []
+
+    header: list[str] = []
+    seen_keys: set[str] = set()
+    for i, element in enumerate(data):
+        if not isinstance(element, dict):
+            raise IngestFormatError(
+                f"{path.name}: element {i} is not a JSON object (got {type(element).__name__}) "
+                "-- every array element must be a flat object of column name -> value"
+            )
+        for key in element:
+            if key not in seen_keys:
+                seen_keys.add(key)
+                header.append(key)
+
+    rows: list[dict[str, str]] = []
+    for i, element in enumerate(data):
+        row: dict[str, str] = {}
+        for key in header:
+            value = element.get(key)
+            if isinstance(value, (dict, list)):
+                raise IngestFormatError(
+                    f"{path.name}: column '{key}' at element {i} is a "
+                    f"{type(value).__name__}, not a single value -- DataForensics "
+                    "doesn't guess how to flatten nested JSON"
+                )
+            row[key] = _stringify_cell(value)
+        rows.append(row)
+    return rows
