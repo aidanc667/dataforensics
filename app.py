@@ -36,13 +36,32 @@ from dataforensics.validation import validate
 st.set_page_config(page_title="DataForensics", layout="wide", page_icon="🧬")
 
 st.markdown(
+    '<link rel="preconnect" href="https://fonts.googleapis.com">'
+    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">',
+    unsafe_allow_html=True,
+)
+
+st.markdown(
     """
     <style>
     #MainMenu, footer { visibility: hidden; }
     .block-container { padding-top: 2rem; padding-bottom: 4rem; max-width: 1180px; }
 
-    html, body, [class*="css"] {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    html, body, [class*="css"],
+    h1, h2, h3, h4, h5, h6,
+    [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3 {
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    }
+
+    .stApp {
+        background-color: #FFFFFF;
+        background-image:
+            radial-gradient(ellipse 640px 320px at 18% -12%, rgba(79, 70, 229, 0.12), transparent 68%),
+            radial-gradient(rgba(15, 23, 42, 0.09) 1.1px, transparent 1.1px);
+        background-size: auto, 18px 18px;
     }
 
     .dataforensics-hero { display: flex; align-items: center; gap: 0.9rem; margin-bottom: 0.15rem; }
@@ -76,7 +95,7 @@ st.markdown(
         margin-bottom: 0.6rem; background: white;
     }
     .dataforensics-card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.15rem; }
-    .dataforensics-card-evidence { color: #64748B; font-size: 0.85rem; font-family: ui-monospace, monospace; }
+    .dataforensics-card-evidence { color: #64748B; font-size: 0.85rem; font-family: "IBM Plex Mono", ui-monospace, monospace; }
 
     .dataforensics-badge {
         display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px;
