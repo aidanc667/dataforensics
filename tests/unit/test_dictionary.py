@@ -103,3 +103,71 @@ def test_build_data_dictionary_duplicate_header_raises(tmp_path):
     f.write_text("pid,sex,sex\n1,M,F\n")
     with pytest.raises(DuplicateHeaderError, match="sex"):
         build_data_dictionary(f)
+
+
+import json
+
+
+def test_build_data_dictionary_from_json(tmp_path):
+    f = tmp_path / "sample.json"
+    f.write_text(json.dumps([
+        {"participant_id": "001", "sex": "M", "age": 34, "notes": "fine"},
+        {"participant_id": "002", "sex": "F", "age": 29, "notes": "fine"},
+        {"participant_id": "003", "sex": "M", "age": None, "notes": "fine"},
+        {"participant_id": "004", "sex": "F", "age": 41, "notes": "fine"},
+    ]))
+    d = build_data_dictionary(f)
+
+    assert d["participant_id"]["category"] == "id"
+    assert d["age"]["null_count"] == 1
+    assert d["age"]["non_null_pct"] == 75.0
+    assert d["sex"]["category"] == "categorical"
+    assert set(d["sex"]["levels"]) == {"M", "F"}
+
+
+def test_read_rows_from_json(tmp_path):
+    f = tmp_path / "sample.json"
+    f.write_text(json.dumps([{"a": "1", "b": "2"}, {"a": "3", "b": "4"}]))
+    assert read_rows(f) == [{"a": "1", "b": "2"}, {"a": "3", "b": "4"}]
+
+
+def test_build_data_dictionary_from_excel(tmp_path):
+    import openpyxl
+
+    f = tmp_path / "sample.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["participant_id", "sex", "age"])
+    ws.append(["001", "M", 34])
+    ws.append(["002", "F", 29])
+    ws.append(["003", "M", None])
+    ws.append(["004", "F", 41])
+    wb.save(f)
+
+    d = build_data_dictionary(f)
+    assert d["participant_id"]["category"] == "id"
+    assert d["age"]["null_count"] == 1
+    assert d["sex"]["category"] == "categorical"
+
+
+def test_read_rows_from_excel_with_explicit_sheet(tmp_path):
+    import openpyxl
+
+    f = tmp_path / "multi.xlsx"
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "First"
+    ws1.append(["a"])
+    ws1.append(["1"])
+    ws2 = wb.create_sheet("Second")
+    ws2.append(["b"])
+    ws2.append(["2"])
+    wb.save(f)
+
+    assert read_rows(f, sheet="Second") == [{"b": "2"}]
+
+
+def test_build_data_dictionary_empty_json_array_returns_empty_dict(tmp_path):
+    f = tmp_path / "empty.json"
+    f.write_text("[]")
+    assert build_data_dictionary(f) == {}

@@ -1,7 +1,15 @@
 from itertools import zip_longest
 from pathlib import Path
 
-from dataforensics.ingest import check_header_has_no_duplicates, detect_delimiter, detect_encoding, strip_footer
+from dataforensics.ingest import (
+    check_header_has_no_duplicates,
+    detect_delimiter,
+    detect_encoding,
+    detect_file_format,
+    read_excel_rows,
+    read_json_rows,
+    strip_footer,
+)
 from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
 
 # Never claim "PII-safe" or "HIPAA-compliant" here — the honest phrasing is
@@ -29,6 +37,34 @@ def _read_cleaned_lines(path: Path) -> tuple[list[str], str]:
     return data_lines, delimiter
 
 
+def _load_table(path: Path, sheet: str | None = None) -> tuple[list[str], list[list[str]]]:
+    """Returns (header, body_rows) for any supported input format. The
+    delimited-text branch is exactly what build_data_dictionary and
+    read_rows already did inline before this function existed -- moved
+    here unchanged so both functions share one implementation instead of
+    two copies that could drift apart. The json/excel branches convert
+    read_json_rows'/read_excel_rows' list[dict[str, str]] into the same
+    (header, body_rows) shape, since every row from those readers has
+    identical keys in the same order by construction.
+    """
+    fmt = detect_file_format(path)
+    if fmt == "delimited":
+        data_lines, delimiter = _read_cleaned_lines(path)
+        if not data_lines:
+            return [], []
+        header = data_lines[0].split(delimiter)
+        check_header_has_no_duplicates(header)
+        body_rows = [line.split(delimiter) for line in data_lines[1:]]
+        return header, body_rows
+
+    rows = read_json_rows(path) if fmt == "json" else read_excel_rows(path, sheet=sheet)
+    if not rows:
+        return [], []
+    header = list(rows[0].keys())
+    body_rows = [[row[name] for name in header] for row in rows]
+    return header, body_rows
+
+
 def _cardinality_cap(n_rows: int) -> int:
     if n_rows <= 0:
         return _CARDINALITY_FLOOR
@@ -36,13 +72,10 @@ def _cardinality_cap(n_rows: int) -> int:
     return min(_CARDINALITY_MAX, max(_CARDINALITY_FLOOR, ratio_cap))
 
 
-def build_data_dictionary(path: Path, include_raw_samples: bool = False) -> dict:
-    data_lines, delimiter = _read_cleaned_lines(path)
-    if not data_lines:
+def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: str | None = None) -> dict:
+    header, body_rows = _load_table(path, sheet=sheet)
+    if not header:
         return {}
-    header = data_lines[0].split(delimiter)
-    check_header_has_no_duplicates(header)
-    body_rows = [line.split(delimiter) for line in data_lines[1:]]
     n_rows = len(body_rows)
 
     # zip_longest (not zip) so a row with fewer fields than the header
@@ -134,13 +167,11 @@ def detect_outliers(values: list[float]) -> dict:
     return {"method": "IQR", "outlier_count": len(indices), "outlier_indices": indices}
 
 
-def read_rows(path: Path) -> list[dict]:
-    data_lines, delimiter = _read_cleaned_lines(path)
-    if not data_lines:
+def read_rows(path: Path, sheet: str | None = None) -> list[dict]:
+    header, body_rows = _load_table(path, sheet=sheet)
+    if not header:
         return []
-    header = data_lines[0].split(delimiter)
-    check_header_has_no_duplicates(header)
-    return [dict(zip_longest(header, line.split(delimiter), fillvalue="")) for line in data_lines[1:]]
+    return [dict(zip_longest(header, row, fillvalue="")) for row in body_rows]
 
 
 def detect_top_code_spike(values: list[float]) -> dict | None:
