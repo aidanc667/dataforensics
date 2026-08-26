@@ -257,7 +257,18 @@ def _format_is_date_only(fmt_str: str) -> bool:
 def _xlsx_backend(path: Path):
     import openpyxl
 
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    # openpyxl.load_workbook raises whatever exception the underlying zip/
+    # XML parsing hits (zipfile.BadZipFile for a misnamed or corrupted
+    # .xlsx, among others) -- none of those are IngestFormatError, so
+    # without this catch-and-reraise a malformed file would produce an
+    # unhandled traceback instead of the clean error every other
+    # malformed-input case in this module already surfaces. Catching bare
+    # Exception here is deliberate: this is a library boundary where the
+    # set of failure modes for a corrupted binary file isn't enumerable.
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    except Exception as exc:
+        raise IngestFormatError(f"{path.name} could not be read as an .xlsx file: {exc}") from exc
     sheet_names = wb.sheetnames
 
     def get_grid(sheet_name: str) -> list[tuple]:
@@ -318,7 +329,13 @@ def _xls_cell_value(cell, datemode, book):
 def _xls_backend(path: Path):
     import xlrd
 
-    book = xlrd.open_workbook(str(path), formatting_info=True)
+    # Mirrors the .xlsx backend's catch above: xlrd.open_workbook raises its
+    # own error types (xlrd.XLRDError, or occasionally something else) for a
+    # misnamed or corrupted .xls file, none of which is IngestFormatError.
+    try:
+        book = xlrd.open_workbook(str(path), formatting_info=True)
+    except Exception as exc:
+        raise IngestFormatError(f"{path.name} could not be read as a .xls file: {exc}") from exc
     sheet_names = book.sheet_names()
 
     def get_grid(sheet_name: str) -> list[list]:

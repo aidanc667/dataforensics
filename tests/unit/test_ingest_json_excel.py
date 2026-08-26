@@ -325,3 +325,29 @@ def test_read_excel_rows_xls_date_only_cell_has_no_time_suffix(tmp_path):
     wb.save(str(f))
 
     assert read_excel_rows(f) == [{"visit_date": "2024-01-15"}]
+
+
+def test_read_excel_rows_xlsx_not_a_zip_file_raises_ingest_format_error(tmp_path):
+    # A plain text file saved with a .xlsx extension isn't a zip archive at
+    # all, so openpyxl.load_workbook raises zipfile.BadZipFile -- that must
+    # be caught at the backend boundary and surfaced as IngestFormatError,
+    # the same way every other malformed-input case in this module is,
+    # rather than propagating an unhandled library exception up to callers
+    # like the Streamlit app.
+    f = tmp_path / "fake.xlsx"
+    f.write_text("this is not a real xlsx file", encoding="utf-8")
+
+    with pytest.raises(IngestFormatError):
+        read_excel_rows(f)
+
+
+def test_read_excel_rows_xls_corrupted_file_raises_ingest_format_error(tmp_path):
+    # Mirrors the .xlsx case above for the .xls backend: a plain text file
+    # named .xls makes xlrd.open_workbook raise its own error type
+    # (xlrd.XLRDError or similar), which must likewise be wrapped as
+    # IngestFormatError instead of propagating uncaught.
+    f = tmp_path / "fake.xls"
+    f.write_text("this is not a real xls file", encoding="utf-8")
+
+    with pytest.raises(IngestFormatError):
+        read_excel_rows(f)
