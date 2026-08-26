@@ -10,7 +10,14 @@ import streamlit as st
 from dataforensics.config_schema import RulesConfigError, load_rules
 from dataforensics.dictionary import build_data_dictionary, read_rows
 from dataforensics.harmonize import apply_transformations, column_union
-from dataforensics.ingest import DuplicateHeaderError, check_header_has_no_duplicates, deduplicate_header
+from dataforensics.ingest import (
+    DuplicateHeaderError,
+    IngestFormatError,
+    check_header_has_no_duplicates,
+    deduplicate_header,
+    detect_file_format,
+    list_excel_sheets,
+)
 from dataforensics.investigate import (
     check_referential_integrity,
     compare_fingerprints,
@@ -158,8 +165,16 @@ def _write_temp(name: str, content: bytes) -> Path:
     return path
 
 
-def _sniff_header(path: Path) -> list[str]:
-    from dataforensics.ingest import detect_delimiter, detect_encoding, strip_footer
+def _sniff_header(path: Path, sheet: str | None = None) -> list[str]:
+    from dataforensics.ingest import detect_delimiter, detect_encoding, read_excel_rows, read_json_rows, strip_footer
+
+    fmt = detect_file_format(path)
+    if fmt == "json":
+        rows = read_json_rows(path)
+        return list(rows[0].keys()) if rows else []
+    if fmt == "excel":
+        rows = read_excel_rows(path, sheet=sheet)
+        return list(rows[0].keys()) if rows else []
 
     encoding = detect_encoding(path)
     raw_lines = path.read_text(encoding=encoding).splitlines()
@@ -192,7 +207,9 @@ with tab_analyze:
     # ------------------------------------------------------------------ #
     upload_col, example_col = st.columns([2, 1])
     with upload_col:
-        data_file = st.file_uploader("Upload a CSV/TSV file", type=["csv", "tsv"], label_visibility="visible")
+        data_file = st.file_uploader(
+            "Upload a CSV/TSV/JSON/Excel file", type=["csv", "tsv", "json", "xlsx", "xls"], label_visibility="visible"
+        )
     with example_col:
         st.write("")
         st.write("")
@@ -212,10 +229,24 @@ with tab_analyze:
         st.stop()
 
     raw_path = _write_temp(st.session_state["dataforensics_data_name"], st.session_state["dataforensics_data_bytes"])
+    raw_format = detect_file_format(raw_path)
 
-    # --- Duplicate-header recovery: a real path forward, not a dead end ---
+    # --- Multi-sheet Excel: ask which sheet before doing anything else ---
+    sheet_choice = None
+    if raw_format == "excel":
+        sheet_names = list_excel_sheets(raw_path)
+        if len(sheet_names) > 1:
+            sheet_choice = st.selectbox(
+                "This workbook has multiple sheets — choose one to analyze",
+                sheet_names,
+                key="dataforensics_sheet_choice",
+            )
+        elif sheet_names:
+            sheet_choice = sheet_names[0]
+
+    # --- Duplicate-header / malformed-input recovery: a real path forward, not a dead end ---
     try:
-        check_header_has_no_duplicates(_sniff_header(raw_path))
+        check_header_has_no_duplicates(_sniff_header(raw_path, sheet=sheet_choice))
         data_path = raw_path
     except DuplicateHeaderError as exc:
         _step_bar(1)
@@ -225,31 +256,44 @@ with tab_analyze:
             f'<div class="dataforensics-card-evidence">{_esc(exc)}</div></div>',
             unsafe_allow_html=True,
         )
-        st.write(
-            "This file can't be profiled safely as-is — with two columns sharing a name, "
-            "one of them would silently lose its data. Choose how to proceed:"
-        )
-        c1, c2 = st.columns(2)
-        if c1.button("Auto-rename duplicates and continue (e.g. name → name, name_2)", type="primary"):
-            data_path = _rewrite_with_deduplicated_header(raw_path)
-            st.session_state["dataforensics_dedup_choice_made"] = str(data_path)
-            st.rerun()
-        c2.write("...or fix the file yourself and re-upload it above.")
-        if st.session_state.get("dataforensics_dedup_choice_made"):
-            data_path = Path(st.session_state["dataforensics_dedup_choice_made"])
+        if raw_format == "delimited":
+            st.write(
+                "This file can't be profiled safely as-is — with two columns sharing a name, "
+                "one of them would silently lose its data. Choose how to proceed:"
+            )
+            c1, c2 = st.columns(2)
+            if c1.button("Auto-rename duplicates and continue (e.g. name → name, name_2)", type="primary"):
+                data_path = _rewrite_with_deduplicated_header(raw_path)
+                st.session_state["dataforensics_dedup_choice_made"] = str(data_path)
+                st.rerun()
+            c2.write("...or fix the file yourself and re-upload it above.")
+            if st.session_state.get("dataforensics_dedup_choice_made"):
+                data_path = Path(st.session_state["dataforensics_dedup_choice_made"])
+            else:
+                st.stop()
         else:
+            st.write("Fix the duplicate column names in the source file and re-upload it above.")
             st.stop()
+    except IngestFormatError as exc:
+        _step_bar(1)
+        st.markdown(
+            f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-error">Blocking</span>'
+            f'<div class="dataforensics-card-title">Can\'t read this file</div>'
+            f'<div class="dataforensics-card-evidence">{_esc(exc)}</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.stop()
 
     # ------------------------------------------------------------------ #
     # Step 2: Investigate — always runs, never mutates anything
     # ------------------------------------------------------------------ #
     _step_bar(2)
-    dictionary = build_data_dictionary(data_path)
-    rows = read_rows(data_path)
+    dictionary = build_data_dictionary(data_path, sheet=sheet_choice)
+    rows = read_rows(data_path, sheet=sheet_choice)
     columns = list(dictionary.keys())
 
     ragged_row_count = sum(1 for r in rows if "" in r)
-    if ragged_row_count:
+    if ragged_row_count and raw_format == "delimited":
         st.warning(
             f"⚠ {ragged_row_count} row(s) have more fields than the header — usually an "
             "unescaped comma/delimiter inside a text value (this parser isn't CSV-quote-aware; "
@@ -594,7 +638,10 @@ with tab_multifile:
         "Nothing here is ever joined or merged; this is discovery only."
     )
     multi_files = st.file_uploader(
-        "Upload 2 or more CSV/TSV files", type=["csv", "tsv"], accept_multiple_files=True, key="multifile_uploader"
+        "Upload 2 or more CSV/TSV/JSON/Excel files",
+        type=["csv", "tsv", "json", "xlsx", "xls"],
+        accept_multiple_files=True,
+        key="multifile_uploader",
     )
 
     if multi_files and len(multi_files) >= 2:
@@ -605,13 +652,14 @@ with tab_multifile:
             try:
                 check_header_has_no_duplicates(_sniff_header(path))
                 file_rows[f.name] = read_rows(path)
-            except DuplicateHeaderError:
+            except (DuplicateHeaderError, IngestFormatError):
                 skipped.append(f.name)
 
         if skipped:
             st.warning(
-                f"Skipped {', '.join(skipped)} — duplicate column names. "
-                "Fix and re-upload, or use the Analyze & Clean tab's auto-rename option first."
+                f"Skipped {', '.join(skipped)} — duplicate column names, a multi-sheet Excel "
+                "file with no sheet chosen, or a malformed JSON/Excel shape. Fix and re-upload, "
+                "or use the Analyze & Clean tab's auto-rename option first (CSV/TSV only)."
             )
 
         if len(file_rows) >= 2:
