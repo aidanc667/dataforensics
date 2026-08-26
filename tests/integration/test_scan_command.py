@@ -26,15 +26,13 @@ def test_scan_writes_dictionary_and_never_modifies_input(tmp_path):
     assert "age" in payload
 
 
-def test_scan_warns_on_stderr_when_footer_stripping_drops_lines(tmp_path):
-    # strip_footer's field-count heuristic is not CSV-quote-aware (see
-    # ingest.strip_footer's docs): two consecutive genuine data rows
-    # containing a quoted delimiter (a comma inside quotes, in a
-    # comma-delimited file) raise the raw comma count above the header's,
-    # so strip_footer misclassifies both as a footer block and drops them.
-    # This is a known, documented limitation (see README's "Known
-    # limitations") -- the fix under test isn't preventing the
-    # misclassification, only making sure it's no longer silent.
+def test_scan_does_not_misclassify_quoted_delimiter_rows_as_footer(tmp_path):
+    # strip_footer's field counting is quote-aware (via
+    # ingest.split_delimited_line, backed by Python's csv module): a data
+    # row with a quoted comma no longer inflates its raw field count, so it
+    # must NOT be misclassified as a footer line or trigger any warning.
+    # This directly guards the real-world bug this fix addresses (a
+    # standard, valid CSV with quoted commas losing nearly all its rows).
     src = tmp_path / "clinics.csv"
     src.write_text(
         "name,age\n"
@@ -46,17 +44,13 @@ def test_scan_warns_on_stderr_when_footer_stripping_drops_lines(tmp_path):
     result = CliRunner().invoke(main, ["scan", str(src), "--out-dir", str(tmp_path)])
 
     assert result.exit_code == 0
-    assert "Warning" in result.output
-    assert "2" in result.output  # 2 lines stripped
-    assert "clinics.csv" in result.output
+    assert "Warning" not in result.output
+    assert "2 columns profiled" in result.output
 
-    # The misclassification itself is real: both genuine data rows are gone
-    # from the dictionary's row-derived stats, confirming this reproduces
-    # the documented limitation rather than testing a scenario that can't
-    # happen.
+    # All three genuine data rows survive with their quoted values intact.
     payload = json.loads((tmp_path / "clinics.data_dictionary.json").read_text())
     assert payload["name"]["null_count"] == 0
-    assert payload["age"]["unique_count"] == 1  # only "34" (Bob) survived
+    assert payload["age"]["unique_count"] == 3
 
 
 def test_scan_prints_no_warning_when_nothing_stripped(tmp_path):

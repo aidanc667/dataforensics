@@ -129,29 +129,20 @@ same engine functions the CLI does (no parallel/duplicated logic) — see "Inter
 
 ## Known limitations
 
-**Footer detection is not CSV-quote-aware, and a misclassification truncates the rest of the
-file — not just one row.** `strip_footer` (used by every parse path — `scan`, `harmonize`, and the
-crosswalk mode) decides whether a line is a footer by counting delimiter characters on the raw line
-(`line.count(delimiter)`), not by running a real CSV-quoting parser. A genuine data row containing a
-quoted delimiter — e.g. a comma-delimited file with a value like `"Delta Clinic, North"` — has a
-higher raw comma count than the header and can be misclassified as a footer line. This is a
-plausible trigger, not a rare edge case: two consecutive rows with a quoted delimiter in any
-free-text column (site names, addresses, free-text notes) is enough to set it off. And the impact is
-larger than a single row: once `strip_footer` detects a run of field-count mismatches, it treats
-EVERYTHING from that point to the end of the file as footer and drops it all — this is a
-truncation of the dataset, not a single-row exclusion. On a file where the mismatch starts early,
-the majority of the rows can be silently dropped. Properly fixing this would mean rewriting the
-parser to be CSV-quote-aware (e.g. using Python's `csv` module instead of hand-rolled
-`.split(delimiter)`), which is a larger change than this tool currently makes. As a mitigation,
-`scan` and `harmonize` both print a stderr warning naming how many lines were dropped and at which
-line the drop starts, whenever `strip_footer` actually discards anything, and `harmonize --execute`
-also records the count in `*.manifest.json`'s `stripped_footer_lines` field — so a truncation like
-this is never silent, even though it isn't automatically prevented. Note that this warning is not
-exclusively a failure signal: it also fires on legitimately-footered real exports (e.g. a genuine
-CDC WONDER disclaimer/"Query Parameters:" block), which is the intended, correct case for this
-heuristic. Either way, if you see this warning, it's worth a quick look — check the row count
-against what you expect, and if it's off, check the input file for a data row with a quoted
-delimiter near the line named in the warning.
+**Footer detection can still truncate a file if a genuine trailing disclaimer/metadata block
+looks enough like data.** `strip_footer` (used by every delimited-text parse path — `scan`,
+`harmonize`, and the crosswalk mode) decides whether a line is a footer by comparing each line's
+real, quote-aware field count (via `ingest.split_delimited_line`, backed by Python's `csv` module)
+against the header's. A data row with a quoted delimiter in it — e.g. `"Delta Clinic, North"` in a
+comma-delimited file — is correctly counted as one field and does **not** trigger this anymore.
+What still can: a genuine structural break at the end of a file, like a CDC WONDER-style "Query
+Parameters:" disclaimer block, where several trailing lines really do have a different field count
+than the data rows above them — which is the case this heuristic exists to catch. As with any
+heuristic, `scan` and `harmonize` both print a stderr warning naming how many lines were dropped
+and where, whenever `strip_footer` discards anything, and `harmonize --execute` also records the
+count in `*.manifest.json`'s `stripped_footer_lines` field, so a truncation is never silent even on
+the rare case it's wrong. If you see this warning on a file you don't expect to have a footer,
+check the row count against what you expect.
 
 **Excel's own type coercion can destroy information before this tool ever sees the file.**
 A spreadsheet cell typed as `007` (e.g. a FIPS or ZIP code) is stored by Excel as the number

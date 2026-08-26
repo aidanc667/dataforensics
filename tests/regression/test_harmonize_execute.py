@@ -255,14 +255,13 @@ def test_execute_refuses_when_parse_stage_silently_drops_a_real_data_row(tmp_pat
     assert "Refusing to write output" in result.output
 
 
-def test_execute_warns_on_stderr_and_records_manifest_when_footer_stripped(tmp_path):
-    # strip_footer's field-count heuristic is not CSV-quote-aware: two
-    # consecutive genuine data rows containing a quoted delimiter raise the
-    # raw comma count above the header's and get misclassified as a footer
-    # block. This is a known, documented limitation (see README's "Known
-    # limitations") -- this test isn't asserting the misclassification is
-    # prevented (it isn't), only that it's surfaced instead of silent: a
-    # stderr warning, and a stripped_footer_lines count in the manifest.
+def test_execute_does_not_misclassify_quoted_delimiter_rows_as_footer(tmp_path):
+    # strip_footer's field counting is quote-aware (via
+    # ingest.split_delimited_line, backed by Python's csv module): a data
+    # row with a quoted comma no longer inflates its raw field count, so it
+    # must NOT be misclassified as a footer line -- all three genuine data
+    # rows must survive into the harmonized output with no stderr warning
+    # and stripped_footer_lines == 0 in the manifest.
     src = tmp_path / "clinics.csv"
     src.write_text(
         "participant_id,site\n"
@@ -280,13 +279,16 @@ def test_execute_warns_on_stderr_and_records_manifest_when_footer_stripped(tmp_p
     )
 
     assert result.exit_code == 0
-    assert "Warning" in result.output
-    assert "2" in result.output  # 2 lines stripped
-    assert "clinics.csv" in result.output
+    assert "Warning" not in result.output
+    assert "clinics.csv" not in result.output
 
     manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
     manifest = json.loads(manifest_path.read_text())
-    assert manifest["stripped_footer_lines"] == 2
+    assert manifest["stripped_footer_lines"] == 0
+
+    output_lines = output_path.read_text().splitlines()
+    assert len(output_lines) == 4  # header + 3 genuine data rows
+    assert '"Delta Clinic, North"' in output_path.read_text() or "Delta Clinic, North" in output_path.read_text()
 
 
 def test_execute_no_warning_or_stripped_count_when_nothing_stripped(tmp_path):

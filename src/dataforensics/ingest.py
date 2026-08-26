@@ -1,5 +1,7 @@
 from pathlib import Path
+import csv
 import datetime
+import io
 import json
 
 from charset_normalizer import from_path
@@ -93,41 +95,52 @@ def detect_delimiter(sample_lines: list[str]) -> str:
     return best_delim
 
 
+def split_delimited_line(line: str, delimiter: str) -> list[str]:
+    """Splits one line of delimited text into fields the way a real CSV/TSV
+    dialect parser would -- via Python's ``csv`` module -- so a quoted field
+    containing the delimiter itself (e.g. ``"Delta Clinic, North"`` in a
+    comma-delimited file) counts and splits as ONE field, not two. This is
+    the single shared primitive every delimited-text field-count or
+    field-split in this codebase should go through, so quoting is handled
+    consistently everywhere rather than each call site hand-rolling its own
+    ``.split(delimiter)``/``.count(delimiter)``.
+
+    An empty line has no fields under csv.reader (it yields nothing at
+    all, unlike ``"".split(delimiter)`` which returns ``['']``) -- returning
+    ``[""]`` here instead preserves the old single-empty-field behavior a
+    blank line in the middle of a file previously had, rather than raising
+    StopIteration on input that used to be handled, just unusually.
+    """
+    if line == "":
+        return [""]
+    return next(csv.reader(io.StringIO(line), delimiter=delimiter))
+
+
+def join_delimited_line(fields: list[str], delimiter: str) -> str:
+    """The write-side counterpart to split_delimited_line: joins fields back
+    into one delimited line via csv.writer, so a field that itself contains
+    the delimiter (or a quote character) gets correctly re-quoted instead of
+    corrupting the line a naive ``delimiter.join(fields)`` would produce.
+    """
+    buffer = io.StringIO()
+    csv.writer(buffer, delimiter=delimiter, lineterminator="").writerow(fields)
+    return buffer.getvalue()
+
+
 def strip_footer(lines: list[str], delimiter: str) -> tuple[list[str], list[str]]:
     """Split ``lines`` into (data_lines, stripped_lines) by looking for a run
-    of consecutive lines whose delimiter-count disagrees with the header's
-    (e.g. a CDC WONDER-style "Query Parameters:" footer block).
-
-    Known limitation: this field-count heuristic uses ``line.count(delimiter)``
-    on the raw line, which is NOT CSV-quote-aware -- there is no real CSV
-    dialect parser here (e.g. Python's ``csv`` module), just a hand-rolled
-    split-by-delimiter count. A genuine data row containing a quoted
-    delimiter (e.g. a comma-delimited file with a value like
-    ``"Delta Clinic, North"``) has a higher raw delimiter count than the
-    header and can be misclassified as a footer line -- this is a plausible
-    trigger, not an exotic edge case: two consecutive rows with a quoted
-    delimiter in any free-text column (site names, addresses, notes) is
-    enough. Once triggered, this function does NOT drop only the
-    misclassified line(s): it treats EVERYTHING from the first detected
-    mismatch to end-of-file as footer and returns it all in
-    ``stripped_lines``. This is a truncation of the rest of the file, not a
-    single-row exclusion -- on a file where the mismatch starts near the
-    top, the majority of the dataset can end up in ``stripped_lines``.
-    Properly fixing this would mean rewriting the parser to be
-    CSV-quote-aware, which is a larger architectural change; callers should
-    instead surface ``stripped_lines`` to the user (see
-    ``cli._warn_if_footer_stripped``) rather than discarding it silently, so
-    a truncation like this is at least visible instead of silent.
+    of consecutive lines whose real (quote-aware) field count disagrees with
+    the header's (e.g. a CDC WONDER-style "Query Parameters:" footer block).
     """
     if not lines:
         return [], []
 
-    header_fields = lines[0].count(delimiter) + 1
+    header_fields = len(split_delimited_line(lines[0], delimiter))
     mismatch_start = None
     run_length = 0
 
     for i in range(1, len(lines)):
-        fields = lines[i].count(delimiter) + 1
+        fields = len(split_delimited_line(lines[i], delimiter))
         if fields != header_fields:
             run_length += 1
             if run_length >= _FOOTER_MISMATCH_RUN:

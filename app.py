@@ -166,7 +166,7 @@ def _write_temp(name: str, content: bytes) -> Path:
 
 
 def _sniff_header(path: Path, sheet: str | None = None) -> list[str]:
-    from dataforensics.ingest import detect_delimiter, detect_encoding, read_excel_rows, read_json_rows, strip_footer
+    from dataforensics.ingest import detect_delimiter, detect_encoding, read_excel_rows, read_json_rows, split_delimited_line, strip_footer
 
     fmt = detect_file_format(path)
     if fmt == "json":
@@ -180,11 +180,11 @@ def _sniff_header(path: Path, sheet: str | None = None) -> list[str]:
     raw_lines = path.read_text(encoding=encoding).splitlines()
     delimiter = detect_delimiter(raw_lines[:10])
     data_lines, _ = strip_footer(raw_lines, delimiter)
-    return data_lines[0].split(delimiter) if data_lines else []
+    return split_delimited_line(data_lines[0], delimiter) if data_lines else []
 
 
 def _rewrite_with_deduplicated_header(path: Path) -> Path:
-    from dataforensics.ingest import detect_delimiter, detect_encoding, strip_footer
+    from dataforensics.ingest import detect_delimiter, detect_encoding, join_delimited_line, split_delimited_line, strip_footer
 
     encoding = detect_encoding(path)
     raw_lines = path.read_text(encoding=encoding).splitlines()
@@ -192,8 +192,8 @@ def _rewrite_with_deduplicated_header(path: Path) -> Path:
     data_lines, footer = strip_footer(raw_lines, delimiter)
     if not data_lines:
         return path
-    fixed_header = deduplicate_header(data_lines[0].split(delimiter))
-    new_lines = [delimiter.join(fixed_header)] + data_lines[1:] + footer
+    fixed_header = deduplicate_header(split_delimited_line(data_lines[0], delimiter))
+    new_lines = [join_delimited_line(fixed_header, delimiter)] + data_lines[1:] + footer
     new_path = path.parent / f"deduped_{path.name}"
     new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     return new_path
@@ -305,11 +305,10 @@ with tab_analyze:
     ragged_row_count = sum(1 for r in rows if "" in r)
     if ragged_row_count and raw_format == "delimited":
         st.warning(
-            f"⚠ {ragged_row_count} row(s) have more fields than the header — usually an "
-            "unescaped comma/delimiter inside a text value (this parser isn't CSV-quote-aware; "
-            "see the README's Known Limitations). The overflow content is preserved under a "
-            "column named \"\" rather than dropped, but you may want to fix the source file's "
-            "quoting for a cleaner result."
+            f"⚠ {ragged_row_count} row(s) have more fields than the header — usually a data "
+            "row that genuinely has an extra field (e.g. a stray unquoted delimiter). The "
+            "overflow content is preserved under a column named \"\" rather than dropped, but "
+            "you may want to check the source file."
         )
 
     dup_rows = detect_duplicate_rows(rows)

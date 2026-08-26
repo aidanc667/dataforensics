@@ -26,6 +26,7 @@ from dataforensics.ingest import (
     detect_file_format,
     read_excel_table,
     read_json_rows,
+    split_delimited_line,
     strip_footer,
 )
 from dataforensics.manifest import atomic_write, build_manifest
@@ -49,13 +50,13 @@ def _read_header_and_row_count(path: Path, sheet: str | None = None) -> tuple[li
 
     Returns ``(header, row_count, stripped_line_count)``. ``stripped_line_count``
     lets callers surface footer-stripping to the user (stderr warning, and
-    optionally the manifest) instead of leaving it invisible -- strip_footer's
-    field-count heuristic is not CSV-quote-aware, and once it detects a
-    field-count mismatch it treats EVERYTHING from that point to
-    end-of-file as footer, not just the mismatching line. A genuine data row
-    containing a quoted delimiter is a plausible trigger for this (not an
-    exotic one), and the result is a truncation of the rest of the file, not
-    a single dropped row (see strip_footer's module-level docs in ingest.py).
+    optionally the manifest) instead of leaving it invisible -- once
+    strip_footer detects a field-count mismatch it treats EVERYTHING from
+    that point to end-of-file as footer, not just the mismatching line, so
+    the result is a truncation of the rest of the file, not a single dropped
+    row (see strip_footer's module-level docs in ingest.py). strip_footer's
+    field counting is quote-aware (via ``ingest.split_delimited_line``), so a
+    quoted delimiter inside a data value no longer triggers this.
 
     Used as the safety-net anchor for both
     ``harmonize.assert_row_and_column_integrity``'s ``input_columns`` and
@@ -116,7 +117,7 @@ def _read_header_and_row_count(path: Path, sheet: str | None = None) -> tuple[li
     data_lines, stripped = strip_footer(raw_lines, delimiter)
     if not data_lines:
         return [], 0, len(stripped)
-    header = data_lines[0].split(delimiter)
+    header = split_delimited_line(data_lines[0], delimiter)
     check_header_has_no_duplicates(header)
     return header, len(data_lines) - 1, len(stripped)
 
@@ -125,14 +126,12 @@ def _warn_if_footer_stripped(file_path: Path, stripped_count: int, row_count: in
     """Print a stderr warning (never an error -- footer-stripping is often
     correct, e.g. a genuine CDC WONDER disclaimer block, and must not block
     a run) whenever strip_footer actually discarded one or more lines from
-    ``file_path``. strip_footer's field-count heuristic is not
-    CSV-quote-aware (see its module-level docs in ingest.py): once it finds
-    a run of field-count mismatches, it treats EVERYTHING from that point to
-    end-of-file as footer, not just the mismatching line(s) -- so a genuine
-    data row containing a quoted delimiter can trigger a truncation of the
-    rest of the file, not a single dropped row. Surfacing the count (and
-    where it starts) lets a user notice and check, instead of the drop
-    staying silent.
+    ``file_path``. Once strip_footer finds a run of field-count mismatches,
+    it treats EVERYTHING from that point to end-of-file as footer, not just
+    the mismatching line(s) -- so a genuine trailing disclaimer/metadata
+    block can still trigger a truncation of the rest of the file. Surfacing
+    the count (and where it starts) lets a user notice and check, instead of
+    the drop staying silent.
 
     ``row_count`` is the kept data-row count from the same
     ``_read_header_and_row_count`` call that produced ``stripped_count`` --
@@ -145,8 +144,7 @@ def _warn_if_footer_stripped(file_path: Path, stripped_count: int, row_count: in
             f"Warning: {stripped_count} line(s) at and after line {start_line} in "
             f"{file_path.name} were treated as a footer/non-data block and excluded from "
             "parsing (this drops everything from the first detected mismatch to end-of-file, "
-            "not just one line) -- review the input if this is unexpected (see README's Known "
-            "Limitations: footer detection is not CSV-quote-aware)",
+            "not just one line) -- review the input if this is unexpected",
             err=True,
         )
 

@@ -8,6 +8,7 @@ from dataforensics.ingest import (
     detect_file_format,
     read_excel_table,
     read_json_rows,
+    split_delimited_line,
     strip_footer,
 )
 from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
@@ -57,9 +58,9 @@ def _load_table(path: Path, sheet: str | None = None) -> tuple[list[str], list[l
         data_lines, delimiter = _read_cleaned_lines(path)
         if not data_lines:
             return [], []
-        header = data_lines[0].split(delimiter)
+        header = split_delimited_line(data_lines[0], delimiter)
         check_header_has_no_duplicates(header)
-        body_rows = [line.split(delimiter) for line in data_lines[1:]]
+        body_rows = [split_delimited_line(line, delimiter) for line in data_lines[1:]]
         return header, body_rows
 
     if fmt == "excel":
