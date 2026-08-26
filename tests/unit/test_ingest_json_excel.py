@@ -167,3 +167,129 @@ def test_read_json_rows_nested_object_value_raises(tmp_path):
     f.write_text(json.dumps([{"a": "1", "detail": {"x": 1}}]))
     with pytest.raises(IngestFormatError, match="'detail'"):
         read_json_rows(f)
+
+
+import datetime as dt
+
+import openpyxl
+import xlwt
+
+from dataforensics.ingest import list_excel_sheets, read_excel_rows
+
+
+def _write_xlsx(path, rows, sheet_name="Sheet1"):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    for row in rows:
+        ws.append(row)
+    wb.save(path)
+
+
+def test_read_excel_rows_xlsx_happy_path(tmp_path):
+    f = tmp_path / "sample.xlsx"
+    _write_xlsx(f, [
+        ["participant_id", "age", "sex"],
+        ["001", 34, "M"],
+        ["002", 29, "F"],
+    ])
+    rows = read_excel_rows(f)
+    assert rows == [
+        {"participant_id": "001", "age": "34", "sex": "M"},
+        {"participant_id": "002", "age": "29", "sex": "F"},
+    ]
+
+
+def test_read_excel_rows_xlsx_stringifies_dates_and_booleans(tmp_path):
+    f = tmp_path / "types.xlsx"
+    _write_xlsx(f, [
+        ["id", "visit_date", "consented"],
+        [1, dt.date(2024, 1, 15), True],
+    ])
+    rows = read_excel_rows(f)
+    assert rows == [{"id": "1", "visit_date": "2024-01-15", "consented": "true"}]
+
+
+def test_read_excel_rows_xlsx_empty_sheet_returns_empty_list(tmp_path):
+    f = tmp_path / "empty.xlsx"
+    _write_xlsx(f, [])
+    assert read_excel_rows(f) == []
+
+
+def test_read_excel_rows_xlsx_skips_fully_blank_trailing_rows(tmp_path):
+    f = tmp_path / "blank_row.xlsx"
+    _write_xlsx(f, [
+        ["a", "b"],
+        ["1", "2"],
+        [None, None],
+    ])
+    assert read_excel_rows(f) == [{"a": "1", "b": "2"}]
+
+
+def test_read_excel_rows_xlsx_duplicate_header_raises_duplicate_header_error(tmp_path):
+    from dataforensics.ingest import DuplicateHeaderError
+
+    f = tmp_path / "dupe.xlsx"
+    _write_xlsx(f, [["a", "a"], ["1", "2"]])
+    with pytest.raises(DuplicateHeaderError):
+        read_excel_rows(f)
+
+
+def test_read_excel_rows_xlsx_multi_sheet_without_choice_raises(tmp_path):
+    f = tmp_path / "multi.xlsx"
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "First"
+    ws1.append(["a"])
+    ws1.append(["1"])
+    ws2 = wb.create_sheet("Second")
+    ws2.append(["b"])
+    ws2.append(["2"])
+    wb.save(f)
+
+    with pytest.raises(IngestFormatError, match="First.*Second|Second.*First"):
+        read_excel_rows(f)
+
+
+def test_read_excel_rows_xlsx_multi_sheet_with_explicit_choice_succeeds(tmp_path):
+    f = tmp_path / "multi2.xlsx"
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "First"
+    ws1.append(["a"])
+    ws1.append(["1"])
+    ws2 = wb.create_sheet("Second")
+    ws2.append(["b"])
+    ws2.append(["2"])
+    wb.save(f)
+
+    assert read_excel_rows(f, sheet="Second") == [{"b": "2"}]
+
+
+def test_read_excel_rows_xlsx_unknown_sheet_name_raises(tmp_path):
+    f = tmp_path / "single.xlsx"
+    _write_xlsx(f, [["a"], ["1"]])
+    with pytest.raises(IngestFormatError, match="no sheet named"):
+        read_excel_rows(f, sheet="DoesNotExist")
+
+
+def test_list_excel_sheets_single_sheet(tmp_path):
+    f = tmp_path / "single.xlsx"
+    _write_xlsx(f, [["a"], ["1"]], sheet_name="OnlySheet")
+    assert list_excel_sheets(f) == ["OnlySheet"]
+
+
+def test_read_excel_rows_xls_happy_path(tmp_path):
+    f = tmp_path / "sample.xls"
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Sheet1")
+    for r, row in enumerate([["participant_id", "age"], ["001", 34], ["002", 29]]):
+        for c, value in enumerate(row):
+            ws.write(r, c, value)
+    wb.save(str(f))
+
+    rows = read_excel_rows(f)
+    assert rows == [
+        {"participant_id": "001", "age": "34"},
+        {"participant_id": "002", "age": "29"},
+    ]

@@ -242,3 +242,126 @@ def read_json_rows(path: Path) -> list[dict[str, str]]:
             row[key] = _stringify_cell(value)
         rows.append(row)
     return rows
+
+
+def _xlsx_backend(path: Path):
+    import openpyxl
+
+    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    sheet_names = wb.sheetnames
+
+    def get_grid(sheet_name: str) -> list[tuple]:
+        grid = []
+        for row in wb[sheet_name].iter_rows():
+            values = []
+            for cell in row:
+                value = cell.value
+                # openpyxl always hands back datetime.datetime for a date-
+                # formatted cell, never datetime.date, even though the cell
+                # itself carries no time component -- it never round-trips
+                # a plain date as a date. Without this, _stringify_cell (which
+                # deliberately formats date and datetime differently) would
+                # render every Excel date cell as an ISO datetime string
+                # ("2024-01-15T00:00:00") instead of a plain date
+                # ("2024-01-15"), unlike the equivalent CSV/JSON value.
+                # number_format is the authoritative signal for "was this
+                # cell formatted as a date, not a date+time" -- "h" (hour)
+                # or "s" (second) in the format code means time-of-day is
+                # part of the display, so only a format lacking both is
+                # treated as date-only.
+                if isinstance(value, datetime.datetime) and cell.is_date:
+                    fmt = cell.number_format.lower()
+                    if "h" not in fmt and "s" not in fmt:
+                        value = value.date()
+                values.append(value)
+            grid.append(tuple(values))
+        return grid
+
+    return sheet_names, get_grid
+
+
+def _xls_cell_value(cell, datemode):
+    import xlrd
+
+    if cell.ctype == xlrd.XL_CELL_EMPTY:
+        return None
+    if cell.ctype == xlrd.XL_CELL_BOOLEAN:
+        return bool(cell.value)
+    if cell.ctype == xlrd.XL_CELL_DATE:
+        return xlrd.xldate_as_datetime(cell.value, datemode)
+    return cell.value
+
+
+def _xls_backend(path: Path):
+    import xlrd
+
+    book = xlrd.open_workbook(str(path))
+    sheet_names = book.sheet_names()
+
+    def get_grid(sheet_name: str) -> list[list]:
+        ws = book.sheet_by_name(sheet_name)
+        return [
+            [_xls_cell_value(ws.cell(r, c), book.datemode) for c in range(ws.ncols)]
+            for r in range(ws.nrows)
+        ]
+
+    return sheet_names, get_grid
+
+
+def _excel_backend(path: Path):
+    if path.suffix.lower() == ".xlsx":
+        return _xlsx_backend(path)
+    return _xls_backend(path)
+
+
+def list_excel_sheets(path: Path) -> list[str]:
+    """Lists the sheet names in an Excel workbook, in workbook order.
+    Exists mainly for an interactive caller (e.g. the Streamlit app) that
+    needs to show a sheet picker before calling read_excel_rows."""
+    sheet_names, _get_grid = _excel_backend(path)
+    return sheet_names
+
+
+def read_excel_rows(path: Path, sheet: str | None = None) -> list[dict[str, str]]:
+    """Reads one sheet of an .xlsx or .xls workbook into the same
+    list[dict[str, str]] shape read_rows() produces for CSV/TSV. If the
+    workbook has more than one sheet and `sheet` is not given, raises
+    IngestFormatError listing the sheet names -- never silently picks one.
+    A fully-blank row (every cell None) is skipped rather than becoming an
+    all-empty-string row, since Excel commonly reports trailing blank rows
+    that were never really part of the dataset.
+    """
+    sheet_names, get_grid = _excel_backend(path)
+
+    if sheet is None:
+        if len(sheet_names) > 1:
+            raise IngestFormatError(
+                f"{path.name} has multiple sheets ({', '.join(sheet_names)}) -- "
+                "pass --sheet to choose one"
+            )
+        chosen = sheet_names[0]
+    else:
+        if sheet not in sheet_names:
+            raise IngestFormatError(
+                f"{path.name} has no sheet named '{sheet}' -- available sheets: "
+                f"{', '.join(sheet_names)}"
+            )
+        chosen = sheet
+
+    grid = get_grid(chosen)
+    if not grid:
+        return []
+
+    header = [_stringify_cell(v) for v in grid[0]]
+    check_header_has_no_duplicates(header)
+
+    rows: list[dict[str, str]] = []
+    for raw_row in grid[1:]:
+        if all(v is None for v in raw_row):
+            continue
+        row = {
+            name: _stringify_cell(v)
+            for name, v in zip(header, list(raw_row) + [None] * (len(header) - len(raw_row)))
+        }
+        rows.append(row)
+    return rows
