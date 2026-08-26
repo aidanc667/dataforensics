@@ -234,7 +234,17 @@ with tab_analyze:
     # --- Multi-sheet Excel: ask which sheet before doing anything else ---
     sheet_choice = None
     if raw_format == "excel":
-        sheet_names = list_excel_sheets(raw_path)
+        try:
+            sheet_names = list_excel_sheets(raw_path)
+        except IngestFormatError as exc:
+            _step_bar(1)
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-error">Blocking</span>'
+                f'<div class="dataforensics-card-title">Can\'t read this file</div>'
+                f'<div class="dataforensics-card-evidence">{_esc(exc)}</div></div>',
+                unsafe_allow_html=True,
+            )
+            st.stop()
         if len(sheet_names) > 1:
             sheet_choice = st.selectbox(
                 "This workbook has multiple sheets — choose one to analyze",
