@@ -348,14 +348,15 @@ def list_excel_sheets(path: Path) -> list[str]:
     return sheet_names
 
 
-def read_excel_rows(path: Path, sheet: str | None = None) -> list[dict[str, str]]:
-    """Reads one sheet of an .xlsx or .xls workbook into the same
-    list[dict[str, str]] shape read_rows() produces for CSV/TSV. If the
-    workbook has more than one sheet and `sheet` is not given, raises
-    IngestFormatError listing the sheet names -- never silently picks one.
-    A fully-blank row (every cell None) is skipped rather than becoming an
-    all-empty-string row, since Excel commonly reports trailing blank rows
-    that were never really part of the dataset.
+def read_excel_table(path: Path, sheet: str | None = None) -> tuple[list[str], list[list[str]]]:
+    """Like read_excel_rows, but returns (header, body_rows) directly
+    instead of list[dict[str, str]] -- this lets a caller (dictionary.py's
+    _load_table) distinguish a header-only sheet (real header, zero data
+    rows) from a genuinely empty sheet (no header at all), a distinction
+    read_excel_rows's list[dict] return cannot represent: an empty list
+    means "nothing" in both cases. Same multi-sheet-ambiguity and
+    duplicate-header behavior as read_excel_rows -- this is the same
+    logic, split at an earlier point.
     """
     sheet_names, get_grid = _excel_backend(path)
 
@@ -376,18 +377,33 @@ def read_excel_rows(path: Path, sheet: str | None = None) -> list[dict[str, str]
 
     grid = get_grid(chosen)
     if not grid:
-        return []
+        return [], []
 
     header = [_stringify_cell(v) for v in grid[0]]
     check_header_has_no_duplicates(header)
 
-    rows: list[dict[str, str]] = []
+    body_rows: list[list[str]] = []
     for raw_row in grid[1:]:
         if all(v is None for v in raw_row):
             continue
-        row = {
-            name: _stringify_cell(v)
-            for name, v in zip(header, list(raw_row) + [None] * (len(header) - len(raw_row)))
-        }
-        rows.append(row)
-    return rows
+        stringified = [
+            _stringify_cell(v)
+            for v in list(raw_row) + [None] * (len(header) - len(raw_row))
+        ]
+        body_rows.append(stringified)
+    return header, body_rows
+
+
+def read_excel_rows(path: Path, sheet: str | None = None) -> list[dict[str, str]]:
+    """Reads one sheet of an .xlsx or .xls workbook into a
+    list[dict[str, str]], same shape read_rows() produces for CSV/TSV.
+    See read_excel_table for the (header, body_rows) form this is built
+    from, used directly by dictionary.py's _load_table to preserve a
+    header-only sheet's schema (something this list[dict] return cannot
+    represent -- an empty list means "no header" and "header but zero
+    rows" identically).
+    """
+    header, body_rows = read_excel_table(path, sheet=sheet)
+    if not header:
+        return []
+    return [dict(zip(header, row)) for row in body_rows]

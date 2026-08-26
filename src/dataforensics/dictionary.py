@@ -6,7 +6,7 @@ from dataforensics.ingest import (
     detect_delimiter,
     detect_encoding,
     detect_file_format,
-    read_excel_rows,
+    read_excel_table,
     read_json_rows,
     strip_footer,
 )
@@ -42,10 +42,15 @@ def _load_table(path: Path, sheet: str | None = None) -> tuple[list[str], list[l
     delimited-text branch is exactly what build_data_dictionary and
     read_rows already did inline before this function existed -- moved
     here unchanged so both functions share one implementation instead of
-    two copies that could drift apart. The json/excel branches convert
-    read_json_rows'/read_excel_rows' list[dict[str, str]] into the same
-    (header, body_rows) shape, since every row from those readers has
-    identical keys in the same order by construction.
+    two copies that could drift apart. The excel branch calls
+    read_excel_table directly, since it already returns exactly this
+    (header, body_rows) shape -- this also preserves a header-only sheet's
+    schema (a real header row with zero data rows), which a genuinely
+    empty sheet does not have. The json branch converts read_json_rows'
+    list[dict[str, str]] into the same shape; JSON has no equivalent
+    header-only case, since a JSON array's "header" is only ever the union
+    of keys actually present in its elements -- an empty array genuinely
+    has no header to preserve.
     """
     fmt = detect_file_format(path)
     if fmt == "delimited":
@@ -57,7 +62,10 @@ def _load_table(path: Path, sheet: str | None = None) -> tuple[list[str], list[l
         body_rows = [line.split(delimiter) for line in data_lines[1:]]
         return header, body_rows
 
-    rows = read_json_rows(path) if fmt == "json" else read_excel_rows(path, sheet=sheet)
+    if fmt == "excel":
+        return read_excel_table(path, sheet=sheet)
+
+    rows = read_json_rows(path)
     if not rows:
         return [], []
     header = list(rows[0].keys())

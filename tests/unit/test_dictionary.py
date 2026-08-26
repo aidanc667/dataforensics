@@ -167,6 +167,26 @@ def test_read_rows_from_excel_with_explicit_sheet(tmp_path):
     assert read_rows(f, sheet="Second") == [{"b": "2"}]
 
 
+def test_build_data_dictionary_from_header_only_excel_preserves_schema(tmp_path):
+    # A header-only Excel sheet (e.g. a blank data-collection template) has a
+    # real, physically-present header row with zero data rows below it --
+    # unlike a genuinely empty sheet, which has no header at all. The data
+    # dictionary should reflect that real schema with zero-row stats, not
+    # collapse to {} as if the file were totally empty.
+    import openpyxl
+
+    f = tmp_path / "header_only.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["a", "b", "c"])
+    wb.save(f)
+
+    d = build_data_dictionary(f)
+    assert set(d.keys()) == {"a", "b", "c"}
+    assert d["a"]["null_count"] == 0
+    assert d["a"]["non_null_pct"] == 0.0
+
+
 def test_build_data_dictionary_empty_json_array_returns_empty_dict(tmp_path):
     f = tmp_path / "empty.json"
     f.write_text("[]")
