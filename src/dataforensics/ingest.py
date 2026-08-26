@@ -202,8 +202,12 @@ def read_json_rows(path: Path) -> list[dict[str, str]]:
     docs/superpowers/specs/2026-08-26-json-excel-ingest-design.md for why.
     """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as exc:
+        raise IngestFormatError(f"{path.name} could not be read as UTF-8 JSON: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise IngestFormatError(f"{path.name} is not valid JSON: {exc}") from exc
 
     if not isinstance(data, list):
@@ -377,11 +381,21 @@ def read_excel_table(path: Path, sheet: str | None = None) -> tuple[list[str], l
     """
     sheet_names, get_grid = _excel_backend(path)
 
+    if not sheet_names:
+        # Defensive hardening for an untrusted-file-upload boundary: a
+        # workbook that opens successfully but reports zero sheets should
+        # never be possible from a real .xlsx/.xls file, but if one shows
+        # up here, indexing sheet_names[0] below would raise a bare
+        # IndexError instead of the clean IngestFormatError every other
+        # malformed-input case in this module surfaces.
+        raise IngestFormatError(f"{path.name} contains no sheets")
+
     if sheet is None:
         if len(sheet_names) > 1:
             raise IngestFormatError(
-                f"{path.name} has multiple sheets ({', '.join(sheet_names)}) -- "
-                "pass --sheet to choose one"
+                f"{path.name} has multiple sheets ({', '.join(sheet_names)}) -- choose one "
+                "(scan/harmonize --sheet NAME; crosswalk mode requires a single-sheet source, "
+                "since --sheet applies to only one file at a time)"
             )
         chosen = sheet_names[0]
     else:

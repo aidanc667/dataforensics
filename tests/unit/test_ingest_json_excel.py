@@ -148,6 +148,30 @@ def test_read_json_rows_non_array_top_level_raises(tmp_path):
         read_json_rows(f)
 
 
+def test_read_json_rows_non_utf8_file_raises_ingest_format_error(tmp_path):
+    # A non-UTF-8-encoded file makes path.read_text(encoding="utf-8") raise
+    # UnicodeDecodeError before json.loads ever runs -- that must be caught
+    # and wrapped as IngestFormatError like every other malformed-input
+    # case in this module, not propagate as an unhandled exception up
+    # through the CLI (which would exit 1 with a traceback instead of the
+    # intended exit 3) or the Streamlit app.
+    f = tmp_path / "latin1.json"
+    f.write_bytes('[{"name": "Jos\xe9"}]'.encode("latin-1"))
+    with pytest.raises(IngestFormatError):
+        read_json_rows(f)
+
+
+def test_read_json_rows_deeply_nested_json_raises_ingest_format_error(tmp_path):
+    # A pathologically deeply-nested JSON array makes json.loads raise
+    # RecursionError, not json.JSONDecodeError -- that must also be caught
+    # and wrapped as IngestFormatError instead of crashing uncaught.
+    f = tmp_path / "deep.json"
+    depth = 60000
+    f.write_text("[" * depth + "]" * depth)
+    with pytest.raises(IngestFormatError):
+        read_json_rows(f)
+
+
 def test_read_json_rows_non_object_element_raises(tmp_path):
     f = tmp_path / "scalars.json"
     f.write_text(json.dumps(["a", "b"]))

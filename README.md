@@ -111,8 +111,9 @@ dataforensics report <artifact.json> [--out <path>]
 
 Exit codes: `0` success/no hard errors, `1` validation errors found, `2` invalid rules/config/
 usage, `3` malformed/unreadable input (duplicate-header CSV, unparseable/unreadable JSON artifact
-for `report`) or a harmonize safety-check failure (refusing to write rather than risk silent data
-loss).
+for `report`, invalid-shape JSON input, an unresolved multi-sheet Excel workbook, or a corrupt/
+unreadable Excel workbook) or a harmonize safety-check failure (refusing to write rather than risk
+silent data loss).
 
 ## What this doesn't do (on purpose)
 

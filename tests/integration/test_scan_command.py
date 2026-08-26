@@ -129,3 +129,44 @@ def test_scan_xlsx_multi_sheet_requires_sheet_option(tmp_path):
     assert result.exit_code == 0
     payload = json.loads((tmp_path / "multi.data_dictionary.json").read_text())
     assert "b" in payload
+
+
+def test_harmonize_execute_on_header_only_xlsx_preserves_header(tmp_path):
+    # Regression test for the final-review finding: cli.py's
+    # _read_header_and_row_count used to call read_excel_rows for its
+    # excel branch, which returns list[dict[str, str]] -- a shape that
+    # can't distinguish "no header at all" from "header present, zero
+    # data rows" (both come back as []). On a header-only .xlsx (a real
+    # header row, zero data rows), that collapsed the anchor's header to
+    # [], which fed into _harmonize_single_file's `fieldnames =
+    # anchor_header` fallback used when transformed_rows is empty --
+    # writing an output file with no header line at all, silently, at
+    # exit 0. It must instead use read_excel_table (like
+    # dictionary.py's _load_table already does) so the header survives.
+    src = tmp_path / "header_only.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["participant_id", "smoking_status"])
+    wb.save(src)
+
+    rules_path = tmp_path / "rules.yaml"
+    rules_path.write_text("version: 1\nprimary_key: [participant_id]\ncolumns: {}\n")
+    output_path = tmp_path / "out.csv"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "harmonize",
+            str(src),
+            "--rules",
+            str(rules_path),
+            "--output",
+            str(output_path),
+            "--execute",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert output_path.exists()
+    first_line = output_path.read_text().splitlines()[0]
+    assert first_line == "participant_id,smoking_status"

@@ -24,7 +24,7 @@ from dataforensics.ingest import (
     detect_delimiter,
     detect_encoding,
     detect_file_format,
-    read_excel_rows,
+    read_excel_table,
     read_json_rows,
     strip_footer,
 )
@@ -87,14 +87,26 @@ def _read_header_and_row_count(path: Path, sheet: str | None = None) -> tuple[li
     NOT be caught by the safety net this anchor feeds.
 
     For JSON/Excel input this same independence is preserved by calling
-    ingest.read_json_rows/read_excel_rows directly here too, rather than
+    ingest.read_json_rows/read_excel_table directly here too, rather than
     going through dictionary.py's _load_table -- the same "two bindings of
     one shared primitive, not two independent implementations" bound as
     the delimited-text case above.
+
+    The excel branch calls read_excel_table (not read_excel_rows): a
+    read_excel_rows list[dict[str, str]] return can't distinguish "no
+    header at all" from "header present, zero data rows" -- both come back
+    as []. That was the exact bug dictionary.py's own _load_table had until
+    it was fixed to call read_excel_table directly; this anchor must use
+    the same fix, or a header-only Excel input would report an empty
+    header here while build_data_dictionary on the same file correctly
+    reports the real columns.
     """
     fmt = detect_file_format(path)
-    if fmt != "delimited":
-        rows = read_json_rows(path) if fmt == "json" else read_excel_rows(path, sheet=sheet)
+    if fmt == "excel":
+        header, body_rows = read_excel_table(path, sheet=sheet)
+        return header, len(body_rows), 0
+    if fmt == "json":
+        rows = read_json_rows(path)
         header = list(rows[0].keys()) if rows else []
         return header, len(rows), 0
 
