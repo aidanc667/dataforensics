@@ -1,4 +1,5 @@
 from pathlib import Path
+import datetime
 
 from charset_normalizer import from_path
 
@@ -137,3 +138,56 @@ def strip_footer(lines: list[str], delimiter: str) -> tuple[list[str], list[str]
     if mismatch_start is None:
         return lines, []
     return lines[:mismatch_start], lines[mismatch_start:]
+
+
+class IngestFormatError(Exception):
+    """Raised when a JSON or Excel input file doesn't match the shape
+    DataForensics requires to safely treat it as tabular data -- e.g. JSON
+    that isn't an array of flat objects, a JSON field whose value is itself
+    an object/array, or a multi-sheet Excel workbook with no sheet chosen.
+    Like DuplicateHeaderError, this signals a malformed-input-file
+    condition, not a config problem -- callers should map it to exit code 3,
+    not exit code 2."""
+
+
+def detect_file_format(path: Path) -> str:
+    """Returns "json", "excel", or "delimited" (the existing CSV/TSV path)
+    based on the file extension alone -- no content sniffing. Any
+    extension other than .json/.xlsx/.xls (including no extension, or an
+    unrecognized one like .txt) is treated as delimited text, preserving
+    today's behavior for every file this tool already accepts."""
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return "json"
+    if suffix in (".xlsx", ".xls"):
+        return "excel"
+    return "delimited"
+
+
+def _stringify_cell(value) -> str:
+    """Converts one JSON/Excel scalar value to the plain-text form the rest
+    of the engine expects, matching what the same value would look like if
+    it had come from a CSV cell instead. Used by both read_json_rows and
+    read_excel_rows so the two formats produce identical text for
+    equivalent values.
+
+    bool is checked before int/float because bool is a subclass of int in
+    Python -- without this order, True would stringify as "1" instead of
+    "true". datetime.datetime is checked before datetime.date for the same
+    subclass reason (datetime.datetime IS-A datetime.date).
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, datetime.datetime):
+        return value.isoformat()
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    return str(value)
