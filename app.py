@@ -32,7 +32,6 @@ from dataforensics.investigate import (
 from dataforensics.manifest import build_manifest
 from dataforensics.report import render_html, render_markdown
 from dataforensics.validation import validate
-from dataforensics.viewer import classify_report, validation_summary
 
 st.set_page_config(page_title="DataForensics", layout="wide", page_icon="🧬")
 
@@ -115,7 +114,6 @@ st.markdown(
 )
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
-_EXAMPLES_DIR = Path(__file__).parent / "examples"
 
 
 def _step_bar(current: int) -> None:
@@ -199,7 +197,7 @@ def _rewrite_with_deduplicated_header(path: Path) -> Path:
     return new_path
 
 
-tab_analyze, tab_multifile, tab_viewer = st.tabs(["Analyze & Clean", "Multi-File Relationships", "Report Viewer"])
+tab_analyze, tab_multifile = st.tabs(["Analyze & Clean", "Multi-File Relationships"])
 
 with tab_analyze:
     # ------------------------------------------------------------------ #
@@ -709,75 +707,3 @@ with tab_multifile:
         st.info("Upload at least 2 files to discover relationships between them.")
     else:
         st.info("Upload 2 or more files to get started.")
-
-with tab_viewer:
-    st.caption("Read-only. View a data_dictionary / validation_report / manifest JSON file DataForensics produced elsewhere.")
-    report_examples = {
-        "Validation report — errors, warnings, suggestions": "validation_report.json",
-        "Data dictionary — per-column profile": "data_dictionary.json",
-        "Manifest — single-file harmonize audit trail": "manifest.json",
-        "Manifest — cross-dataset crosswalk (2 sources, never merged)": "crosswalk_manifest.json",
-        "Unrecognized shape — not a DataForensics report at all": "unrecognized_shape.json",
-    }
-    st.markdown("**Try an example**")
-    example_cols = st.columns(len(report_examples))
-    for col, (label, filename) in zip(example_cols, report_examples.items()):
-        if col.button(label, use_container_width=True, key=f"ex_{filename}"):
-            st.session_state["dataforensics_selected_example"] = filename
-            st.session_state["dataforensics_uploaded_bytes"] = None
-
-    st.divider()
-    uploaded_report = st.file_uploader("...or upload your own .json report", type="json", key="report_uploader")
-    if uploaded_report is not None:
-        st.session_state["dataforensics_uploaded_bytes"] = uploaded_report.getvalue()
-        st.session_state["dataforensics_uploaded_name"] = uploaded_report.name
-        st.session_state["dataforensics_selected_example"] = None
-
-    def _render_report(data: dict, source_label: str) -> None:
-        st.caption(f"Showing: {source_label}")
-        kind = classify_report(data)
-
-        if kind == "validation_report":
-            summary = validation_summary(data)
-            cols = st.columns(5)
-            cols[0].metric("Errors", summary["errors"])
-            cols[1].metric("Warnings", summary["warnings"])
-            cols[2].metric("Suggestions", summary["suggestions"])
-            cols[3].metric("Checks evaluated", summary["checks_evaluated"])
-            cols[4].metric("Checks passed", summary["checks_passed"])
-            for severity in ("errors", "warnings", "suggestions"):
-                with st.expander(f"{severity.capitalize()} ({len(data[severity])})"):
-                    st.json(data[severity])
-        elif kind == "data_dictionary":
-            st.dataframe([{"column": c, **f} for c, f in data.items()], use_container_width=True)
-        elif kind == "manifest":
-            st.write(
-                {
-                    "tool_version": data.get("tool_version"),
-                    "run_id": data.get("run_id"),
-                    "timestamp_utc": data.get("timestamp_utc"),
-                    "input_sha256": data.get("input_sha256"),
-                    "schema_sha256": data.get("schema_sha256"),
-                }
-            )
-            st.subheader(f"Mutations ({len(data.get('mutations', []))})")
-            st.dataframe(data.get("mutations", []), use_container_width=True)
-        else:
-            st.error("Unrecognized report shape — this doesn't look like DataForensics output.")
-
-    if st.session_state.get("dataforensics_uploaded_bytes"):
-        try:
-            report_data = json.loads(st.session_state["dataforensics_uploaded_bytes"])
-        except json.JSONDecodeError as exc:
-            st.error(f"Not valid JSON: {exc}")
-            st.stop()
-        if not isinstance(report_data, dict):
-            st.error(f"Not a DataForensics report — expected a JSON object, got {type(report_data).__name__}.")
-            st.stop()
-        _render_report(report_data, st.session_state["dataforensics_uploaded_name"])
-    elif st.session_state.get("dataforensics_selected_example"):
-        filename = st.session_state["dataforensics_selected_example"]
-        report_data = json.loads((_EXAMPLES_DIR / filename).read_text())
-        _render_report(report_data, filename)
-    else:
-        st.info("Click an example above, or upload a .json report, to see it rendered.")

@@ -43,7 +43,7 @@ pip install -e ".[dev,viewer]"
 streamlit run app.py
 ```
 
-Three tabs:
+Two tabs:
 
 - **Analyze & Clean** — upload a CSV/TSV/JSON/Excel file (or click "Use bundled example"), and
   it runs the full
@@ -56,9 +56,10 @@ Three tabs:
 - **Multi-File Relationships** — upload 2+ files from the same study; it suggests shared key
   columns by name *and* real value overlap, and checks referential integrity across a pair you
   pick. Discovery only — nothing is ever joined or merged.
-- **Report Viewer** — the original read-only mode: paste in a `data_dictionary`/
-  `validation_report`/manifest JSON artifact `scan`/`harmonize --execute` already produced
-  elsewhere, and see it rendered.
+
+(A third tab, a read-only viewer for JSON artifacts the CLI produces separately, was removed —
+`dataforensics report <artifact.json>` on the command line still renders those artifacts to
+Markdown for that use case.)
 
 ## CLI reference (as actually implemented today)
 
