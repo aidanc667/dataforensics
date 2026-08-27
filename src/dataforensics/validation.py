@@ -6,6 +6,7 @@ from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, p
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
+_DASH_DATE_PATTERN = re.compile(r"^\d{1,2}-\d{1,2}-\d{4}$")
 
 # Same honest phrasing as dictionary.py's _PII_MASK_MESSAGE: this is a
 # naming-convention heuristic, not a guarantee about the column's actual
@@ -16,7 +17,7 @@ _PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern detected]"
 def is_ambiguous_date(value: str) -> bool:
     if _ISO_DATE_PATTERN.match(value):
         return False
-    return bool(_SLASH_DATE_PATTERN.match(value))
+    return bool(_SLASH_DATE_PATTERN.match(value) or _DASH_DATE_PATTERN.match(value))
 
 
 def _row_key(row: dict, primary_key: list[str]) -> dict:

@@ -1,9 +1,9 @@
 import re
 
 _ID_LIKE_PATTERN = re.compile(
-    r"(^|_)(id|zip)(\d*)(_|$)"      # id, zip [+ optional digits], on a real boundary
-    r"|(^|_)(fips|geoid)(\d*)(_|$)" # fips, geoid [+ optional digits], on a real boundary
-    r"|(fp|puma)(\d*)$",            # fp, puma [+ optional digits] as a SUFFIX at the very end
+    r"(^|[_\s])(id|zip)(\d*)([_\s]|$)"      # id, zip [+ optional digits], on a real boundary
+    r"|(^|[_\s])(fips|geoid)(\d*)([_\s]|$)" # fips, geoid [+ optional digits], on a real boundary
+    r"|(fp|puma)(\d*)$",                    # fp, puma [+ optional digits] as a SUFFIX at the very end
     re.IGNORECASE,
 )
 
@@ -31,8 +31,8 @@ _PII_PERSON_QUALIFIERS = (
 )
 
 _PII_COLUMN_PATTERN = re.compile(
-    r"(^|_)(ssn|mrn|dob)(\d*)(_|$)"                                  # ssn, mrn, dob on a real boundary
-    r"|(^|_)e?mail(_addr(ess)?)?(_|$)"                                # email / mail [+ optional _address]
+    r"(^|[_\s])(ssn|mrn|dob)(\d*)([_\s]|$)"                              # ssn, mrn, dob on a real boundary
+    r"|(^|[_\s])e?mail(_addr(ess)?)?([_\s]|$)"                            # email / mail [+ optional _address]
     # "phone" is intentionally NOT boundary-anchored on its left side (unlike
     # every other keyword here) so that "telephone"/"tele_phone" also match.
     # This is a deliberately looser match than the rest of this pattern, but
@@ -40,14 +40,20 @@ _PII_COLUMN_PATTERN = re.compile(
     # research-data columns like county_name/site_name/test_name), no
     # plausible research-data column name contains "phone" as an incidental
     # substring (e.g. "headphone" doesn't show up in this domain).
-    r"|phone(_?number)?(_|$)"                                         # phone / telephone [+ optional _number]
-    r"|(^|_)(surname|firstname|lastname|fullname|maidenname|nickname)(_|$)"  # concatenated name variants
-    r"|^name$"                                                        # bare "name" column, nothing else
-    r"|(^|_)(" + _PII_PERSON_QUALIFIERS + r")_name(_|$)"              # patient_name, first_name, ...
-    r"|(^|_)name_(" + _PII_PERSON_QUALIFIERS + r")(_|$)"              # name_first, name_patient, ...
-    r"|(^|_)date_of_birth(_|$)"                                       # date_of_birth
-    r"|(^|_)birth_?date(_|$)"                                         # birthdate / birth_date
-    r"|(^|_)social_security(_number)?(_|$)",                          # social_security[_number]
+    r"|phone(_?number)?([_\s]|$)"                                         # phone / telephone [+ optional _number]
+    r"|(^|[_\s])(surname|firstname|lastname|fullname|maidenname|nickname)([_\s]|$)"  # concatenated name variants
+    r"|^name$"                                                            # bare "name" column, nothing else
+    r"|(^|[_\s])(" + _PII_PERSON_QUALIFIERS + r")_name([_\s]|$)"          # patient_name, first_name, ...
+    r"|(^|[_\s])name_(" + _PII_PERSON_QUALIFIERS + r")([_\s]|$)"          # name_first, name_patient, ...
+    r"|(^|[_\s])date_of_birth([_\s]|$)"                                   # date_of_birth
+    r"|(^|[_\s])birth_?date([_\s]|$)"                                     # birthdate / birth_date
+    r"|(^|[_\s])social_security(_number)?([_\s]|$)"                       # social_security[_number]
+    # A street/mailing address is a standard identifier in its own right
+    # (explicitly one of HIPAA's 18 identifiers) -- unlike "name", a bare
+    # "address" column is overwhelmingly likely to actually be sensitive in
+    # a research-data context, so no person-qualifier is required for it to
+    # match, only an optional descriptive prefix.
+    r"|(^|[_\s])(street_?|mailing_?|home_?|residential_?|billing_?)?address(es)?([_\s]|$)",
     re.IGNORECASE,
 )
 

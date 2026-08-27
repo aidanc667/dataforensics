@@ -46,6 +46,12 @@ def test_detect_ambiguous_date_columns_no_flag_when_all_iso():
     assert detect_ambiguous_date_columns(rows, ["visit"]) == {}
 
 
+def test_detect_ambiguous_date_columns_flags_dash_dates():
+    rows = [{"visit": "03-04-2024"}, {"visit": "2024-01-01"}]
+    found = detect_ambiguous_date_columns(rows, ["visit"])
+    assert found == {"visit": 1}
+
+
 def test_detect_similar_categories_high_confidence_on_case_variants():
     clusters = detect_similar_categories(["Male", "male", "MALE", "Female"])
     assert len(clusters) == 1

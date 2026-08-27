@@ -25,6 +25,21 @@ def test_is_ambiguous_date_does_not_flag_iso8601():
     assert is_ambiguous_date("2024-03-04") is False
 
 
+def test_is_ambiguous_date_flags_dash_format():
+    # 03-04-2024 is exactly as ambiguous (MM-DD vs DD-MM) as the slash form --
+    # only the separator differs. Must not be confused with ISO's
+    # YYYY-MM-DD, which always has a 4-digit first component.
+    assert is_ambiguous_date("03-04-2024") is True
+
+
+def test_dash_date_with_no_declared_format_is_error():
+    rows = [{"participant_id": "1", "visit_date": "03-04-2024"}]
+    result = validate(rows, _DATE_RULES)
+    ambiguous = [e for e in result["errors"] if e["rule"] == "ambiguous_date_format"]
+    assert len(ambiguous) == 1
+    assert ambiguous[0]["column"] == "visit_date"
+
+
 def test_slash_date_with_no_declared_format_is_error():
     rows = [{"participant_id": "1", "visit_date": "03/04/2024"}]
     result = validate(rows, _DATE_RULES)
