@@ -1,0 +1,94 @@
+{
+  "tool_version": "0.1.0",
+  "python_version": "3.12.14",
+  "dependency_versions": {
+    "click": "8.4.2",
+    "pyyaml": "6.0.3",
+    "charset-normalizer": "3.5.1",
+    "rapidfuzz": "3.14.5",
+    "openpyxl": "3.1.5",
+    "xlrd": "2.0.2"
+  },
+  "input_sha256": [
+    "957419a799040d9305270f90fb21bf7495bf93ce304f1d9898ea303e55291035"
+  ],
+  "schema_sha256": [
+    "44d5ae2bb1d1eb307e3f4aaad7aad1bf442adde3f9a9f0cccb8e9cf60e819fb0"
+  ],
+  "run_id": "b7a05ee7-7569-4b07-918f-ff5f1698d016",
+  "timestamp_utc": "2026-08-27T17:01:31.998221+00:00",
+  "provenance": null,
+  "mutations": [
+    {
+      "row_key": {
+        "County Code": "08053"
+      },
+      "column": "Deaths",
+      "original_value": "Suppressed",
+      "new_value": "Suppressed (small-cell, per WONDER confidentiality policy: fewer than 10 deaths)",
+      "transformation_rule": "missing_value_sentinel:Deaths",
+      "reason": "Specified in the rules file"
+    },
+    {
+      "row_key": {
+        "County Code": "08053"
+      },
+      "column": "Crude Rate",
+      "original_value": "Suppressed",
+      "new_value": "Suppressed (small-cell, per WONDER confidentiality policy)",
+      "transformation_rule": "missing_value_sentinel:Crude Rate",
+      "reason": "Specified in the rules file"
+    },
+    {
+      "row_key": {
+        "County Code": "08057"
+      },
+      "column": "Crude Rate",
+      "original_value": "Unreliable",
+      "new_value": "Unreliable (rate calculated from a numerator of 20 or fewer deaths)",
+      "transformation_rule": "missing_value_sentinel:Crude Rate",
+      "reason": "Specified in the rules file"
+    },
+    {
+      "row_key": {
+        "County Code": "08079"
+      },
+      "column": "Deaths",
+      "original_value": "Suppressed",
+      "new_value": "Suppressed (small-cell, per WONDER confidentiality policy: fewer than 10 deaths)",
+      "transformation_rule": "missing_value_sentinel:Deaths",
+      "reason": "Specified in the rules file"
+    },
+    {
+      "row_key": {
+        "County Code": "08079"
+      },
+      "column": "Crude Rate",
+      "original_value": "Suppressed",
+      "new_value": "Suppressed (small-cell, per WONDER confidentiality policy)",
+      "transformation_rule": "missing_value_sentinel:Crude Rate",
+      "reason": "Specified in the rules file"
+    },
+    {
+      "row_key": {
+        "County Code": "08111"
+      },
+      "column": "Deaths",
+      "original_value": "Suppressed",
+      "new_value": "Suppressed (small-cell, per WONDER confidentiality policy: fewer than 10 deaths)",
+      "transformation_rule": "missing_value_sentinel:Deaths",
+      "reason": "Specified in the rules file"
+    },
+    {
+      "row_key": {
+        "County Code": "08111"
+      },
+      "column": "Crude Rate",
+      "original_value": "Suppressed",
+      "new_value": "Suppressed (small-cell, per WONDER confidentiality policy)",
+      "transformation_rule": "missing_value_sentinel:Crude Rate",
+      "reason": "Specified in the rules file"
+    }
+  ],
+  "stripped_footer_lines": 0
+}

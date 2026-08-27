@@ -1,28 +1,35 @@
-# CDC WONDER Export Rules Template
+# CDC WONDER Export Rules -- verified against a real export
 #
-# IMPORTANT: This is a DRAFT TEMPLATE for CDC WONDER mortality data.
-# The column names and structure below are PLACEHOLDERS based on typical WONDER exports.
-# Once you download a real CDC WONDER export in Step 1 of Task 17:
-#   1. Verify the actual grouping columns (county_fips is example; yours may use state, region, etc.)
-#   2. Update primary_key to match your export's actual grouping column(s)
-#   3. Add all actual data columns to the columns dict
-#   4. Adjust missing_values sentinel mappings to match what the actual export contains
-#   5. Update any bounds (minimum/maximum) based on domain knowledge of the real values
+# Real export: Underlying Cause of Death, 1999-2020, grouped by County,
+# Colorado, 2020 (data/raw/cdc_wonder_export.tsv), pulled 2026-08-27 from
+# https://wonder.cdc.gov/ucd-icd10.html. 65 rows (64 counties + a "Total"
+# summary row CDC WONDER appends by default).
 #
-# See: https://wonder.cdc.gov/ for export format details.
-# Task 17 Step 4 and Step 6 will exercise this against real data.
+# "County Code" is the real column name for the 5-digit county FIPS
+# (e.g. "08001") and is used as primary_key instead of the template's
+# placeholder county_fips -- it's genuinely unique per county, and empty
+# for the "Total" row (which has no single county), so it also doubles as
+# a natural flag for that row via non-numeric/blank detection.
+#
+# "Deaths" and "Population" are thousands-comma-formatted in the raw
+# export (e.g. "3,703"), so this tool's own numeric detection correctly
+# does NOT treat them as numeric as-is (a comma inside the value fails
+# float() parsing) -- see WRITEUP.md for what this means in practice.
 
 version: 1
-primary_key: [county_fips]  # Example: adjust to match the actual export's grouping columns
+primary_key: [County Code]
 columns:
-  deaths:
+  Deaths:
     type: integer
     minimum: 0
-    # Maximum depends on county population and time period; CDC typically suppresses cells < 10
+    # No maximum: county population varies from ~800 (Hinsdale) to
+    # ~735,000 (Denver), so a single fixed ceiling isn't meaningful.
 missing_values:
-  deaths:
+  Deaths:
+    "Suppressed": "Suppressed (small-cell, per WONDER confidentiality policy: fewer than 10 deaths)"
+  Crude Rate:
     "Suppressed": "Suppressed (small-cell, per WONDER confidentiality policy)"
-    "Not Applicable": "Not Applicable"
+    "Unreliable": "Unreliable (rate calculated from a numerator of 20 or fewer deaths)"
 category_mappings: {}
 weights_strata:
   columns: []

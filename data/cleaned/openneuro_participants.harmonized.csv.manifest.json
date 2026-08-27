@@ -1,0 +1,54 @@
+{
+  "tool_version": "0.1.0",
+  "python_version": "3.12.14",
+  "dependency_versions": {
+    "click": "8.4.2",
+    "pyyaml": "6.0.3",
+    "charset-normalizer": "3.5.1",
+    "rapidfuzz": "3.14.5",
+    "openpyxl": "3.1.5",
+    "xlrd": "2.0.2"
+  },
+  "input_sha256": [
+    "f94c2010dba7e648473e476ae26b1259bbeb0b2e1e830236b78168a95832d659"
+  ],
+  "schema_sha256": [
+    "cc192d057621a18caaebbb7ac91cbe239284ad5c59fe52d923c77f2b874abc53"
+  ],
+  "run_id": "c616cd8e-9a8e-48da-b900-e250d96e29ae",
+  "timestamp_utc": "2026-08-27T17:02:10.225804+00:00",
+  "provenance": null,
+  "mutations": [
+    {
+      "row_key": {
+        "participant_id": "sub-emptyroom"
+      },
+      "column": "age",
+      "original_value": "n/a",
+      "new_value": "Not applicable (sub-emptyroom is a calibration recording, not a subject)",
+      "transformation_rule": "missing_value_sentinel:age",
+      "reason": "Specified in the rules file"
+    },
+    {
+      "row_key": {
+        "participant_id": "sub-emptyroom"
+      },
+      "column": "sex",
+      "original_value": "n/a",
+      "new_value": "Not applicable (sub-emptyroom is a calibration recording, not a subject)",
+      "transformation_rule": "missing_value_sentinel:sex",
+      "reason": "Specified in the rules file"
+    },
+    {
+      "row_key": {
+        "participant_id": "sub-emptyroom"
+      },
+      "column": "first_ses",
+      "original_value": "n/a",
+      "new_value": "Not applicable (sub-emptyroom is a calibration recording, not a subject)",
+      "transformation_rule": "missing_value_sentinel:first_ses",
+      "reason": "Specified in the rules file"
+    }
+  ],
+  "stripped_footer_lines": 0
+}

@@ -1,0 +1,28 @@
+# OpenNeuro participants.tsv rules -- verified against a real file
+#
+# Real file: participants.tsv from ds000117 "Multisubject, multimodal face
+# processing" (Wakeman & Henson), a public BIDS dataset on OpenNeuro
+# (data/raw/openneuro_participants.tsv), pulled 2026-08-27 from
+# https://github.com/OpenNeuroDatasets/ds000117. 17 rows: 16 real subjects
+# plus a "sub-emptyroom" calibration recording (not a person), whose age/
+# sex/first_ses are all the BIDS-standard "n/a" missingness convention.
+#
+# "n/a" is a literal string, not an empty cell, so this tool's own
+# non_null_pct treats it as a present value (a candidate-sentinel finding,
+# not a null) -- exactly the kind of gap between a domain's own missing-
+# value convention and structural nullness this tool exists to surface.
+# Mapping it here makes that gap explicit instead of silently invisible.
+
+version: 1
+primary_key: [participant_id]
+columns: {}
+missing_values:
+  age:
+    "n/a": "Not applicable (sub-emptyroom is a calibration recording, not a subject)"
+  sex:
+    "n/a": "Not applicable (sub-emptyroom is a calibration recording, not a subject)"
+  first_ses:
+    "n/a": "Not applicable (sub-emptyroom is a calibration recording, not a subject)"
+category_mappings: {}
+weights_strata:
+  columns: []

@@ -1,32 +1,43 @@
-# CDC WONDER / ACS PUMS Crosswalk Template
+# CDC WONDER / ACS PUMS Crosswalk -- verified against real extracts
 #
-# IMPORTANT: This is a DRAFT TEMPLATE showing the structure for harmonizing CDC WONDER and ACS PUMS.
-# The column names and value mappings below are PLACEHOLDERS derived from typical exports.
-# Once you download real data in Steps 1-2 of Task 17:
-#   1. Identify the exact column names in each export (step names differ between sources)
-#   2. Update column_map entries to map each source's actual columns to common target columns
-#   3. Update value_map entries to match the actual coded values in your exports
-#   4. The harmonization targets (geography_fips, age_band, sex) should remain consistent
-#      across both sources so they can be joined or compared
+# Real sources: data/raw/cdc_wonder_export.tsv (county-level mortality
+# aggregates, Colorado, 2020) and data/raw/acs_pums_extract.csv (person-level
+# microdata sample, Wyoming, 2022). See WRITEUP.md for the full picture.
 #
-# The crosswalk is used by: dataforensics harmonize --crosswalk schemas/wonder_pums_crosswalk.yaml
-# See: Task 17 Step 7 for the full harmonize command.
-# This file must parse cleanly and match the structure validated in tests/integration/test_crosswalk.py
+# IMPORTANT CAVEAT, discovered running this against real data (not
+# theoretical): CDC WONDER's "County Code" is a county FIPS code, but ACS
+# PUMS's "PUMA" (Public Use Microdata Area) is NOT the same geography --
+# a PUMA can span multiple counties, or one large county can contain
+# several PUMAs. There is no 1:1 mapping between them. This crosswalk
+# still aligns them under one target column name (geography_id) because
+# that's what the column_map mechanism does -- rename for side-by-side
+# display -- but doing so does NOT make the two geography systems
+# comparable, and calling the target "geography_fips" (as an earlier
+# draft of this file did) would have actively implied a comparability
+# that doesn't exist. Renamed the target to the more neutral
+# "geography_id" for exactly this reason. Anyone using harmonized output
+# from this crosswalk must still know PUMA != county FIPS before drawing
+# any geographic conclusion -- the tool aligns columns, it does not (and
+# structurally cannot) verify that an alignment is methodologically sound.
+#
+# The two real extracts also don't share an age/sex breakdown: this WONDER
+# pull is aggregate county totals only (no age_group/sex grouping was
+# requested), so there's nothing there to cross-walk against PUMS's
+# person-level AGEP/SEX. A real age/sex crosswalk would need a WONDER
+# query grouped by County + Ten-Year Age Groups + Sex instead -- left out
+# here rather than mapping columns that don't actually exist in the file.
 
 version: 1
 sources:
   cdc_wonder_export:
     column_map:
-      county_fips: geography_fips  # Maps WONDER's grouping column to harmonized target
-      age_group: age_band           # Maps WONDER's age grouping to harmonized target
-      sex: sex                      # Maps WONDER's sex column to harmonized target
-    value_map: {}                   # CDC WONDER usually has text labels; adjust if coded values appear
+      County Code: geography_id   # county FIPS -- see caveat above
+    value_map: {}
   acs_pums_extract:
     column_map:
-      PUMA: geography_fips          # Public Use Microdata Area -> harmonized geography identifier
-      AGEP: age_band                # PUMS age -> harmonized age band (may need bucketing logic outside this file)
-      SEX: sex                      # PUMS sex code -> harmonized sex
+      PUMA: geography_id           # Public Use Microdata Area -- NOT the same geography as county FIPS, see caveat above
+      SEX: sex_code
     value_map:
-      SEX:
+      sex_code:
         "1": M                       # ACS codes: 1=Male
         "2": F                       # ACS codes: 2=Female

@@ -2,11 +2,25 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+# data/raw and data/cleaned are ignored by default (this is where a user's
+# own, possibly large or sensitive, input files land), except the small
+# real-dataset benchmark committed for WRITEUP.md (see that file) -- all
+# three raw sources and their harmonized outputs are individually
+# allowlisted below rather than un-ignoring the whole directory.
 data/raw/*
 !data/raw/.gitkeep
+!data/raw/cdc_wonder_export.tsv
+!data/raw/acs_pums_extract.csv
+!data/raw/openneuro_participants.tsv
 data/standardized/*
 !data/standardized/.gitkeep
 data/cleaned/*
 !data/cleaned/.gitkeep
+!data/cleaned/cdc_wonder_export.harmonized.csv
+!data/cleaned/cdc_wonder_export.harmonized.csv.manifest.json
+!data/cleaned/openneuro_participants.harmonized.csv
+!data/cleaned/openneuro_participants.harmonized.csv.manifest.json
+!data/cleaned/wonder_pums_harmonized/
+!data/cleaned/wonder_pums_harmonized/*
 .venv/
 .streamlit/secrets.toml

@@ -170,11 +170,13 @@ The core engine — ingest, data dictionary, three-tier validation, single-file 
 cross-dataset crosswalk harmonize — is implemented and covered by unit, integration, regression,
 and end-to-end tests, all passing against the bundled synthetic fixture (`fixtures/sample.csv`).
 
-Running the real-dataset benchmark (CDC WONDER mortality data, ACS PUMS microdata, and an
-OpenNeuro participants file) is still outstanding: schema templates for all three sources exist
-under `schemas/`, and `WRITEUP.md` is a scaffold with the exact commands to run, but the raw files
-have not yet been downloaded and scanned. `WRITEUP.md` says so explicitly rather than presenting
-placeholder findings as real ones.
+The real-dataset benchmark is complete: CDC WONDER mortality data (Colorado counties, 2020),
+an ACS PUMS microdata extract (Wyoming, 2022, 5,962 real respondents), and an OpenNeuro
+participants file (ds000117) are all committed under `data/raw/`, scanned and harmonized against
+the schemas in `schemas/`, and crosswalked between WONDER and PUMS. See `WRITEUP.md` for the full
+findings — including a real bug this benchmark caught and fixed (a cardinality-threshold
+divergence between two heuristics, only visible at real-data scale) and an honest geographic
+incompatibility the crosswalk file documents rather than silently papering over.
 
 ## Full design spec
 
