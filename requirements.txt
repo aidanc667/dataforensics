@@ -1,0 +1,7 @@
+# Streamlit Community Cloud installs from this file, not pyproject.toml.
+# "-e ." installs this repo itself in editable mode, which is what makes
+# `from dataforensics.x import y` importable in app.py -- without it,
+# Streamlit Cloud would install streamlit but never install the
+# dataforensics package app.py actually depends on.
+-e .
+streamlit>=1.30
