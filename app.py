@@ -457,11 +457,19 @@ with tab_analyze:
     approved_categories: dict[str, dict[str, str]] = {}
     approved_date_formats: dict[str, str] = {}
 
+    # Namespace every approval widget's key by the current file + sheet, so
+    # switching to a different upload (or a different sheet of the same
+    # Excel workbook) starts with a clean slate instead of carrying over a
+    # checked box from a previous dataset whose column/value names happened
+    # to coincide (Streamlit session state is keyed by widget key, not by
+    # what's currently displayed under that key).
+    _source_key = f"{st.session_state.get('dataforensics_data_name', '')}::{sheet_choice or ''}"
+
     if sentinels:
         st.markdown('<div class="dataforensics-bucket-header">🔎 Candidate missing-value codes</div>', unsafe_allow_html=True)
         for col, values in sentinels.items():
             for val in values:
-                key = f"sentinel__{col}__{val}"
+                key = f"sentinel__{_source_key}__{col}__{val}"
                 c1, c2, c3 = st.columns([0.5, 2.5, 2])
                 checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
                 c2.markdown(
@@ -476,7 +484,7 @@ with tab_analyze:
     if ambiguous_dates:
         st.markdown('<div class="dataforensics-bucket-header">📅 Ambiguous dates</div>', unsafe_allow_html=True)
         for col, count in ambiguous_dates.items():
-            key = f"date__{col}"
+            key = f"date__{_source_key}__{col}"
             c1, c2, c3 = st.columns([0.5, 2.5, 2])
             checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
             c2.markdown(
@@ -495,7 +503,7 @@ with tab_analyze:
         st.markdown('<div class="dataforensics-bucket-header">🏷️ Inconsistent categories</div>', unsafe_allow_html=True)
         for col, clusters in category_clusters.items():
             for i, cluster in enumerate(clusters):
-                key = f"cat__{col}__{i}"
+                key = f"cat__{_source_key}__{col}__{i}"
                 badge_cls = "dataforensics-badge-high" if cluster["confidence"] == "high" else "dataforensics-badge-medium"
                 c1, c2 = st.columns([0.5, 4])
                 checked = c1.checkbox("approve", key=f"{key}_on", value=(cluster["confidence"] == "high"), label_visibility="collapsed")
