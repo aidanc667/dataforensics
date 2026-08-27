@@ -9,7 +9,7 @@ from pathlib import Path
 from dataforensics import __version__
 from dataforensics.hashing import sha256_file
 
-_DIRECT_DEPENDENCIES = ["polars", "click", "pyyaml", "charset-normalizer", "rapidfuzz"]
+_DIRECT_DEPENDENCIES = ["click", "pyyaml", "charset-normalizer", "rapidfuzz", "openpyxl", "xlrd"]
 
 
 def _dependency_versions() -> dict:
