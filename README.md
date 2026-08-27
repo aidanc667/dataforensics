@@ -1,5 +1,7 @@
 # DataForensics (`dataforensics`)
 
+[![CI](https://github.com/aidanc667/dataforensics/actions/workflows/ci.yml/badge.svg)](https://github.com/aidanc667/dataforensics/actions/workflows/ci.yml)
+
 Most research-data cleanup tools profile a file and hope for the best. **DataForensics** is built
 around one rule instead: **when it's uncertain, it preserves the data and reports the uncertainty —
 it never guesses.** No transformation happens without an explicit rule you wrote down (or
