@@ -8,8 +8,13 @@ from pathlib import Path
 import streamlit as st
 
 from dataforensics.config_schema import find_chained_keys
-from dataforensics.dictionary import build_data_dictionary, read_rows
-from dataforensics.harmonize import apply_transformations, column_union
+from dataforensics.dictionary import (
+    build_data_dictionary,
+    find_outlier_evidence,
+    find_top_code_evidence,
+    read_rows,
+)
+from dataforensics.harmonize import apply_transformations, column_union, compute_safety_report
 from dataforensics.ingest import (
     DuplicateHeaderError,
     IngestFormatError,
@@ -19,6 +24,7 @@ from dataforensics.ingest import (
     list_excel_sheets,
 )
 from dataforensics.investigate import (
+    COMMON_SENTINEL_STRINGS,
     check_referential_integrity,
     compare_fingerprints,
     compute_dataset_fingerprint,
@@ -27,10 +33,14 @@ from dataforensics.investigate import (
     detect_duplicate_rows,
     detect_similar_categories,
     discover_shared_key_columns,
+    find_ambiguous_date_evidence,
+    find_category_value_evidence,
+    find_sentinel_evidence,
     infer_semantic_role,
 )
 from dataforensics.manifest import build_manifest
 from dataforensics.report import render_html, render_markdown
+from dataforensics.typing_guards import is_pii_like_column
 from dataforensics.validation import validate
 
 st.set_page_config(page_title="DataForensics", layout="wide", page_icon="🧬")
@@ -173,6 +183,58 @@ def _visualize_whitespace(value: str) -> str:
     marker = '<span style="background:#FEE2E2; color:#B91C1C;">&middot;</span>'
     visible = (marker * leading_ws) + _esc(stripped) + (marker * trailing_ws)
     return f'{visible} <span style="color:#94A3B8; font-style:italic;">(hidden whitespace, {len(value)} chars total)</span>'
+
+
+_PII_EVIDENCE_MASK = "[masked: potential identifier pattern detected]"
+
+
+def _evidence_lines(column: str, evidence: list[tuple[int, str]]) -> list[str]:
+    """Format (row_index, raw_value) evidence pairs as "row N -> column =
+    value" lines, masking the value for a PII-like column the same way
+    every other value shown in this app is masked -- an evidence panel
+    that exists specifically to make findings trustworthy must not itself
+    become a place a PII-like value leaks unmasked."""
+    pii = is_pii_like_column(column)
+    lines = []
+    for row_index, value in evidence:
+        shown = _PII_EVIDENCE_MASK if pii else value
+        lines.append(f"row {row_index + 1:,} → {column} = {shown}")
+    return lines
+
+
+def _evidence_panel(
+    *,
+    rule: str,
+    lines: list[str],
+    interpretation: str,
+    recommended_action: str,
+    max_shown: int = 10,
+) -> None:
+    """Render a "Why was this flagged?" expander: the specific rule that
+    fired, real evidence rows (never just a count), a plain-language
+    interpretation, the recommended next step, and an explicit statement
+    that nothing was changed automatically. This is the "evidence, not
+    blind fixes" design principle applied at the UI level, not just the
+    underlying detection logic -- every finding already carries real
+    evidence internally (row indices, actual values); this makes that
+    evidence visible and traceable instead of collapsing it into a count.
+    "row N" is the Nth data row (1-indexed, not counting the header),
+    since no primary key has necessarily been chosen yet at this point in
+    the flow (that happens in Step 3, after every finding here is shown).
+    """
+    with st.expander("Why was this flagged?"):
+        st.markdown(f"**Rule:**  \n{_esc(rule)}")
+        st.markdown("**Evidence:**")
+        shown_lines = lines[:max_shown]
+        st.markdown(
+            f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in shown_lines)}</div>',
+            unsafe_allow_html=True,
+        )
+        if len(lines) > max_shown:
+            st.caption(f"...and {len(lines) - max_shown} more row(s) not shown.")
+        st.markdown(f"**Interpretation:**  \n{_esc(interpretation)}")
+        st.markdown(f"**Recommended action:**  \n{_esc(recommended_action)}")
+        st.markdown("**Automatic modification:**  \nNONE — only applied if you approve it above and click *Apply approved changes*.")
 
 
 def _write_temp(name: str, content: bytes) -> Path:
@@ -478,6 +540,15 @@ with tab_analyze:
                     unsafe_allow_html=True,
                 )
                 label = c3.text_input("Map to", value="Missing", key=f"{key}_label", label_visibility="collapsed")
+                _evidence_panel(
+                    rule=(
+                        f'"{val}" case-insensitively matches a common missing-value convention: '
+                        + ", ".join(f'"{s}"' for s in sorted(COMMON_SENTINEL_STRINGS))
+                    ),
+                    lines=_evidence_lines(col, [(i, val) for i in find_sentinel_evidence(rows, col, val)]),
+                    interpretation=f'"{val}" looks like a coded missing-value convention rather than a genuine {col} value.',
+                    recommended_action='Map to an explicit missing-value label above, or leave the checkbox unchecked if this is a real value.',
+                )
                 if checked:
                     approved_sentinels.setdefault(col, {})[val] = label
 
@@ -495,6 +566,16 @@ with tab_analyze:
             )
             fmt_label = c3.selectbox(
                 "Format", ["MM/DD/YYYY", "DD/MM/YYYY"], key=f"{key}_fmt", label_visibility="collapsed"
+            )
+            _evidence_panel(
+                rule=(
+                    "A date-shaped value matching MM/DD/YYYY or DD/MM/YYYY (1-2 digit month/day, "
+                    "4-digit year, slash- or dash-separated) with no declared format is ambiguous "
+                    "and is never parsed automatically."
+                ),
+                lines=_evidence_lines(col, find_ambiguous_date_evidence(rows, col)),
+                interpretation="Whether this is Month/Day or Day/Month cannot be determined from the value alone.",
+                recommended_action="Declare the correct format above, or leave the checkbox unchecked if you're not sure.",
             )
             if checked:
                 approved_date_formats[col] = "%m/%d/%Y" if fmt_label == "MM/DD/YYYY" else "%d/%m/%Y"
@@ -514,6 +595,20 @@ with tab_analyze:
                     f'<div class="dataforensics-card-evidence">would merge onto "{_visualize_whitespace(cluster["suggested_canonical"])}"</div>',
                     unsafe_allow_html=True,
                 )
+                confidence_basis = (
+                    "identical after trimming whitespace and lowercasing"
+                    if cluster["confidence"] == "high"
+                    else "85%+ similar by fuzzy string match (rapidfuzz ratio)"
+                )
+                cluster_evidence = sorted(
+                    (row_idx, v) for v in cluster["values"] for row_idx in find_category_value_evidence(rows, col, v)
+                )
+                _evidence_panel(
+                    rule=f"Values in this cluster are {confidence_basis}, suggesting the same real-world category written inconsistently.",
+                    lines=_evidence_lines(col, cluster_evidence),
+                    interpretation=f'These values likely all mean "{cluster["suggested_canonical"]}".',
+                    recommended_action="Approve the merge above to standardize onto the suggested canonical value, or leave unchecked if these are genuinely different categories.",
+                )
                 if checked:
                     approved_categories.setdefault(col, {})
                     for v in cluster["values"]:
@@ -532,12 +627,29 @@ with tab_analyze:
                 f'<div class="dataforensics-card-evidence">IQR method — statistically unusual, not necessarily wrong</div></div>',
                 unsafe_allow_html=True,
             )
+            _evidence_panel(
+                rule="IQR method: flagged if the value falls below Q1 − 1.5×(Q3−Q1) or above Q3 + 1.5×(Q3−Q1), computed over this column's own non-null values.",
+                lines=_evidence_lines(c, find_outlier_evidence(rows, c)),
+                interpretation="This value is statistically unusual relative to the rest of this column — not necessarily wrong.",
+                recommended_action="Review manually. DataForensics never auto-corrects, caps, or removes outliers.",
+            )
         for c, f in top_code_cols.items():
             st.markdown(
                 f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
                 f'<div class="dataforensics-card-title">{_esc(c)}: possible top-coding at {_esc(f["top_code_spike"]["value"])}</div>'
                 f'<div class="dataforensics-card-evidence">{f["top_code_spike"]["fraction"]:.1%} of values sit at the observed max</div></div>',
                 unsafe_allow_html=True,
+            )
+            top_value = f["top_code_spike"]["value"]
+            _evidence_panel(
+                rule=(
+                    f"{f['top_code_spike']['fraction']:.1%} of this column's non-null values sit exactly at its "
+                    f"observed maximum ({top_value}), suggesting a survey/export ceiling rather than a genuine "
+                    "natural maximum."
+                ),
+                lines=_evidence_lines(c, find_top_code_evidence(rows, c, top_value)),
+                interpretation="Values at this ceiling may represent \"this value or higher,\" not the literal number.",
+                recommended_action="Review manually. DataForensics never assumes or corrects a top-coding ceiling.",
             )
         if dup_rows:
             st.markdown(
@@ -547,6 +659,22 @@ with tab_analyze:
                 f"or a legitimate repeated record (e.g. a second visit)</div></div>",
                 unsafe_allow_html=True,
             )
+            with st.expander("Why was this flagged?"):
+                st.markdown("**Rule:**  \nEvery field in this row is identical to an earlier row (an exact full-row duplicate, not just a shared key).")
+                st.markdown("**Evidence:**")
+                dup_lines = [
+                    f"row {d['row_index'] + 1:,} is identical to row {d['duplicate_of_row_index'] + 1:,}"
+                    for d in dup_rows[:10]
+                ]
+                st.markdown(
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in dup_lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if len(dup_rows) > 10:
+                    st.caption(f"...and {len(dup_rows) - 10} more row(s) not shown.")
+                st.markdown("**Interpretation:**  \nCould be a genuine data-entry duplicate, or a legitimate repeated record (e.g. a second identical visit).")
+                st.markdown("**Recommended action:**  \nReview manually. DataForensics never auto-deletes rows.")
+                st.markdown("**Automatic modification:**  \nNONE.")
 
     rules = {
         "version": 1,
@@ -612,10 +740,48 @@ with tab_analyze:
             rows, rules, reason="Approved by user during interactive review"
         )
 
+        # The same row/column-preservation guarantee the CLI's harmonize
+        # commands already enforce (and refuse to write on failure) --
+        # computed and shown here explicitly rather than only ever
+        # existing as an internal assumption, since apply_transformations
+        # was previously called from this app with no safety net at all.
+        safety = compute_safety_report(rows, transformed_rows, primary_key or columns[:1])
+
+        st.markdown('<div class="dataforensics-bucket-header">🛡️ Safety checks</div>', unsafe_allow_html=True)
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("Rows", f"{safety['row_count']['before']:,} → {safety['row_count']['after']:,}")
+        sc2.metric("Columns", f"{safety['column_count']['before']} → {safety['column_count']['after']}")
+        sc3.metric(
+            "Unique primary keys",
+            f"{safety['primary_key_uniqueness']['before']:,} → {safety['primary_key_uniqueness']['after']:,}",
+        )
+        checks = [
+            ("Row count preserved", safety["row_count"]["passed"]),
+            ("Column set preserved", safety["column_count"]["passed"]),
+            ("No primary-key values collapsed together", safety["primary_key_uniqueness"]["passed"]),
+        ]
+        for label, passed in checks:
+            (st.success if passed else st.error)(f"{'✓' if passed else '✗'} {label}")
+        if safety["unmodified_columns"]:
+            st.caption(
+                f"Unmodified columns (byte/value equivalent, verified row-by-row): "
+                f"{', '.join(safety['unmodified_columns'])}"
+            )
+
+        if not safety["all_passed"]:
+            st.error(
+                "⛔ A safety check failed — refusing to offer the cleaned dataset for download, "
+                "the same way the CLI refuses to write output when this check fails. This should "
+                "never happen from approving findings through this UI; please report it as a bug "
+                "if you see this."
+            )
+            st.stop()
+
         manifest = build_manifest([data_path], [])
         manifest["mutations"] = mutations
         manifest["schema_sha256"] = []  # rules were assembled interactively, not from a file
         manifest["provenance"] = {"source": "interactive review", "approved_by": "user"}
+        manifest["safety_checks"] = safety
 
         buffer = io.StringIO()
         # column_union scans every row, not just row 0 -- a ragged input row

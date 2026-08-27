@@ -204,3 +204,53 @@ def detect_top_code_spike(values: list[float]) -> dict | None:
     if fraction >= _TOP_CODE_SPIKE_THRESHOLD and fraction > 1 / len(values):
         return {"value": max_val, "fraction": round(fraction, 4)}
     return None
+
+
+def find_outlier_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for the values in `column` that
+    detect_outliers would flag, for showing genuine evidence ("row 183 ->
+    age = 300") instead of just a count.
+
+    detect_outliers' own `outlier_indices` are positions within the
+    filtered non-null-and-numeric-parseable value list it was given, NOT
+    row indices into the original dataset -- a documented, deliberate
+    scope boundary of that function (it doesn't have the original rows to
+    map back to). This function re-derives the same non-null/numeric
+    filtering build_data_dictionary uses (so the same values end up
+    flagged) while keeping each value's real row index alongside it.
+
+    Returns [] if the column isn't uniformly numeric (any non-null value
+    fails float() parsing) -- the same "all or nothing" numeric detection
+    build_data_dictionary itself uses, so evidence is never shown for a
+    column the dictionary didn't actually treat as numeric.
+    """
+    non_null = [(i, row.get(column, "")) for i, row in enumerate(rows) if row.get(column, "") != ""]
+    try:
+        numeric_pairs = [(i, float(v)) for i, v in non_null]
+    except ValueError:
+        return []
+    if not numeric_pairs:
+        return []
+    values_only = [v for _, v in numeric_pairs]
+    result = detect_outliers(values_only)
+    return [non_null[pos] for pos in result["outlier_indices"]]
+
+
+def find_top_code_evidence(rows: list[dict], column: str, top_value: float) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for the rows sitting at
+    `top_value` (the value detect_top_code_spike flagged as a likely
+    top-coding ceiling), for the same "show the actual rows" reason as
+    find_outlier_evidence.
+    """
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = row.get(column, "")
+        if raw == "":
+            continue
+        try:
+            numeric = float(raw)
+        except ValueError:
+            continue
+        if numeric == top_value:
+            evidence.append((i, raw))
+    return evidence

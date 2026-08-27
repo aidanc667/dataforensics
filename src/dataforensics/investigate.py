@@ -24,7 +24,7 @@ from itertools import combinations
 
 from dataforensics.validation import is_ambiguous_date
 
-_COMMON_SENTINEL_STRINGS = {
+COMMON_SENTINEL_STRINGS = {
     "-99", "-9", "99", "999", "9999",
     "n/a", "na", "n.a.", "unknown", "unk",
     "refused", "dk", "don't know", "not applicable", ".",
@@ -63,7 +63,7 @@ def detect_candidate_sentinels(rows: list[dict], columns: list[str]) -> dict[str
     found: dict[str, list[str]] = {}
     for col in columns:
         values = {str(row.get(col, "")).strip() for row in rows if row.get(col) not in (None, "")}
-        hits = sorted(v for v in values if v.casefold() in _COMMON_SENTINEL_STRINGS)
+        hits = sorted(v for v in values if v.casefold() in COMMON_SENTINEL_STRINGS)
         if hits:
             found[col] = hits
     return found
@@ -83,6 +83,29 @@ def detect_ambiguous_date_columns(rows: list[dict], columns: list[str]) -> dict[
         if count:
             found[col] = count
     return found
+
+
+def find_sentinel_evidence(rows: list[dict], column: str, sentinel_value: str) -> list[int]:
+    """Real row indices where `column` equals `sentinel_value` (after the
+    same strip() detect_candidate_sentinels itself applies), for showing
+    genuine evidence rows instead of just "this value appears somewhere.\""""
+    return [i for i, row in enumerate(rows) if str(row.get(column, "")).strip() == sentinel_value]
+
+
+def find_ambiguous_date_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for the ambiguous-date-shaped
+    values detect_ambiguous_date_columns counted for `column`."""
+    return [
+        (i, str(row[column]).strip())
+        for i, row in enumerate(rows)
+        if row.get(column) and is_ambiguous_date(str(row[column]).strip())
+    ]
+
+
+def find_category_value_evidence(rows: list[dict], column: str, value: str) -> list[int]:
+    """Real row indices where `column` equals `value` -- for showing which
+    rows a detect_similar_categories cluster member actually came from."""
+    return [i for i, row in enumerate(rows) if row.get(column) == value]
 
 
 def detect_similar_categories(values: list[str], threshold: int = 85) -> list[dict]:

@@ -1,6 +1,6 @@
 import pytest
 
-from dataforensics.harmonize import HarmonizeSafetyError, assert_row_and_column_integrity
+from dataforensics.harmonize import HarmonizeSafetyError, assert_row_and_column_integrity, compute_safety_report
 
 
 def test_row_count_mismatch_raises():
@@ -146,3 +146,48 @@ def test_column_union_empty_rows():
     from dataforensics.harmonize import column_union
 
     assert column_union([]) == []
+
+
+def test_compute_safety_report_all_passed_when_only_values_change():
+    input_rows = [{"id": "1", "status": "99"}, {"id": "2", "status": "10"}]
+    output_rows = [{"id": "1", "status": "Refused"}, {"id": "2", "status": "10"}]
+    report = compute_safety_report(input_rows, output_rows, primary_key=["id"])
+    assert report["all_passed"] is True
+    assert report["row_count"] == {"before": 2, "after": 2, "passed": True}
+    assert report["column_count"] == {"before": 2, "after": 2, "passed": True}
+    assert report["primary_key_uniqueness"] == {"before": 2, "after": 2, "passed": True}
+    assert report["modified_columns"] == ["status"]
+    assert report["unmodified_columns"] == ["id"]
+
+
+def test_compute_safety_report_flags_row_count_mismatch():
+    input_rows = [{"id": "1"}, {"id": "2"}]
+    output_rows = [{"id": "1"}]
+    report = compute_safety_report(input_rows, output_rows, primary_key=["id"])
+    assert report["row_count"]["passed"] is False
+    assert report["all_passed"] is False
+
+
+def test_compute_safety_report_flags_column_count_mismatch():
+    input_rows = [{"id": "1", "age": "30"}]
+    output_rows = [{"id": "1"}]
+    report = compute_safety_report(input_rows, output_rows, primary_key=["id"])
+    assert report["column_count"]["passed"] is False
+    assert report["all_passed"] is False
+
+
+def test_compute_safety_report_flags_primary_key_collision():
+    # Two originally-distinct ids that would collapse onto the same value
+    # -- an approved mapping accidentally merging two real records.
+    input_rows = [{"id": "1"}, {"id": "2"}]
+    output_rows = [{"id": "1"}, {"id": "1"}]
+    report = compute_safety_report(input_rows, output_rows, primary_key=["id"])
+    assert report["primary_key_uniqueness"] == {"before": 2, "after": 1, "passed": False}
+    assert report["all_passed"] is False
+
+
+def test_compute_safety_report_no_columns_modified():
+    rows = [{"id": "1", "age": "30"}, {"id": "2", "age": "40"}]
+    report = compute_safety_report(rows, rows, primary_key=["id"])
+    assert report["modified_columns"] == []
+    assert set(report["unmodified_columns"]) == {"id", "age"}

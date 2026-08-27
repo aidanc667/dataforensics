@@ -191,3 +191,40 @@ def test_build_data_dictionary_empty_json_array_returns_empty_dict(tmp_path):
     f = tmp_path / "empty.json"
     f.write_text("[]")
     assert build_data_dictionary(f) == {}
+
+
+def test_find_outlier_evidence_returns_real_row_indices():
+    from dataforensics.dictionary import find_outlier_evidence
+
+    # A tight cluster around 30-34 plus one genuine outlier at row index 5.
+    rows = [
+        {"age": "30"}, {"age": "31"}, {"age": "32"}, {"age": "33"}, {"age": "34"},
+        {"age": "300"},
+    ]
+    evidence = find_outlier_evidence(rows, "age")
+    assert evidence == [(5, "300")]
+
+
+def test_find_outlier_evidence_empty_for_non_numeric_column():
+    from dataforensics.dictionary import find_outlier_evidence
+
+    rows = [{"name": "Bob"}, {"name": "not-a-number"}]
+    assert find_outlier_evidence(rows, "name") == []
+
+
+def test_find_outlier_evidence_skips_nulls():
+    from dataforensics.dictionary import find_outlier_evidence
+
+    rows = [{"age": "30"}, {"age": ""}, {"age": "31"}, {"age": "32"}, {"age": "300"}]
+    evidence = find_outlier_evidence(rows, "age")
+    # row index 4 (not 3) is the outlier, since the blank at index 1 is
+    # correctly skipped rather than shifting every later index down by one.
+    assert evidence == [(4, "300")]
+
+
+def test_find_top_code_evidence_returns_rows_at_the_ceiling():
+    from dataforensics.dictionary import find_top_code_evidence
+
+    rows = [{"age": "34"}, {"age": "99"}, {"age": "40"}, {"age": "99"}]
+    evidence = find_top_code_evidence(rows, "age", 99.0)
+    assert evidence == [(1, "99"), (3, "99")]

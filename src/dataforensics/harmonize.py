@@ -139,6 +139,77 @@ def assert_row_and_column_integrity(
         raise ValueError(f"unknown columns mode: {columns!r}")
 
 
+def compute_safety_report(input_rows: list[dict], output_rows: list[dict], primary_key: list[str]) -> dict:
+    """The same row/column-preservation invariants
+    assert_row_and_column_integrity enforces (there, by raising
+    HarmonizeSafetyError on the first failure) plus two more, as a
+    non-raising, fully-itemized report meant for DISPLAY -- e.g. the
+    Streamlit app's Apply flow shows every check, passed or failed,
+    instead of only ever surfacing the first failure as an exception (or,
+    before this function existed, running no check there at all -- the
+    app called apply_transformations directly with no safety net,
+    unlike the CLI's harmonize commands).
+
+    Checks:
+      - row_count: input_rows and output_rows have the same length.
+        Assumes (like apply_transformations guarantees) that output_rows
+        is a 1:1, order-preserving transform of input_rows -- this is NOT
+        re-derived from output_rows alone, since a row COUNT match alone
+        can't prove order was preserved.
+      - column_count: same column names, as a set, on both sides.
+      - primary_key_uniqueness: the number of distinct primary_key tuples
+        is the same before and after -- catches an approved mapping that
+        accidentally collapses two originally-distinct key values onto
+        the same value (a real, if unlikely, way a "safe" value
+        substitution could silently create duplicate records).
+      - unmodified_columns / modified_columns: for every column present
+        on both sides, whether every row's value is byte-for-byte
+        identical before and after. This is NEW verification beyond what
+        assert_row_and_column_integrity does (that function only checks
+        column NAMES, never per-cell values) -- it's what actually lets
+        "columns I didn't approve a change for are provably untouched"
+        be a checked fact instead of an assumed one.
+
+    `all_passed` is only True if row_count, column_count, and
+    primary_key_uniqueness all passed (unmodified/modified is informational,
+    not a pass/fail check -- a column genuinely SHOULD appear in
+    `modified_columns` when a mutation was approved for it).
+    """
+    input_columns = column_union(input_rows)
+    output_columns = column_union(output_rows)
+
+    row_count_passed = len(input_rows) == len(output_rows)
+    column_count_passed = set(input_columns) == set(output_columns) and len(input_columns) == len(output_columns)
+
+    def _pk_tuples(rows: list[dict]) -> set[tuple]:
+        return {tuple(row.get(k) for k in primary_key) for row in rows}
+
+    input_pk_unique = len(_pk_tuples(input_rows))
+    output_pk_unique = len(_pk_tuples(output_rows))
+    pk_uniqueness_passed = input_pk_unique == output_pk_unique
+
+    modified_columns: list[str] = []
+    if row_count_passed:
+        common_columns = [c for c in input_columns if c in set(output_columns)]
+        for col in common_columns:
+            if any(input_rows[i].get(col) != output_rows[i].get(col) for i in range(len(input_rows))):
+                modified_columns.append(col)
+    unmodified_columns = [c for c in input_columns if c not in set(modified_columns)]
+
+    return {
+        "row_count": {"before": len(input_rows), "after": len(output_rows), "passed": row_count_passed},
+        "column_count": {"before": len(input_columns), "after": len(output_columns), "passed": column_count_passed},
+        "primary_key_uniqueness": {
+            "before": input_pk_unique,
+            "after": output_pk_unique,
+            "passed": pk_uniqueness_passed,
+        },
+        "modified_columns": modified_columns,
+        "unmodified_columns": unmodified_columns,
+        "all_passed": row_count_passed and column_count_passed and pk_uniqueness_passed,
+    }
+
+
 def plan_transformations(rows: list[dict], rules: dict) -> list[dict]:
     plan = []
     missing_values = rules.get("missing_values", {})

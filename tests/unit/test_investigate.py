@@ -3,6 +3,9 @@ from dataforensics.investigate import (
     detect_candidate_sentinels,
     detect_duplicate_rows,
     detect_similar_categories,
+    find_ambiguous_date_evidence,
+    find_category_value_evidence,
+    find_sentinel_evidence,
 )
 
 
@@ -50,6 +53,26 @@ def test_detect_ambiguous_date_columns_flags_dash_dates():
     rows = [{"visit": "03-04-2024"}, {"visit": "2024-01-01"}]
     found = detect_ambiguous_date_columns(rows, ["visit"])
     assert found == {"visit": 1}
+
+
+def test_find_sentinel_evidence_returns_real_row_indices():
+    rows = [{"status": "10"}, {"status": "99"}, {"status": "5"}, {"status": "99"}]
+    assert find_sentinel_evidence(rows, "status", "99") == [1, 3]
+
+
+def test_find_sentinel_evidence_matches_after_stripping_whitespace():
+    rows = [{"status": " 99 "}, {"status": "10"}]
+    assert find_sentinel_evidence(rows, "status", "99") == [0]
+
+
+def test_find_ambiguous_date_evidence_returns_real_rows_and_values():
+    rows = [{"visit": "03/04/2024"}, {"visit": "2024-01-01"}, {"visit": "01/02/2024"}]
+    assert find_ambiguous_date_evidence(rows, "visit") == [(0, "03/04/2024"), (2, "01/02/2024")]
+
+
+def test_find_category_value_evidence_returns_real_row_indices():
+    rows = [{"sex": "male"}, {"sex": "Male"}, {"sex": "female"}, {"sex": "male"}]
+    assert find_category_value_evidence(rows, "sex", "male") == [0, 3]
 
 
 def test_detect_similar_categories_high_confidence_on_case_variants():
