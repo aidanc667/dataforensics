@@ -1,6 +1,6 @@
 import pytest
 
-from dataforensics.config_schema import RulesConfigError, load_rules
+from dataforensics.config_schema import RulesConfigError, find_chained_keys, load_rules
 
 
 def test_load_valid_rules(tmp_path):
@@ -416,3 +416,23 @@ def test_load_rules_accepts_non_chained_missing_values(tmp_path):
     )
     rules = load_rules(f)
     assert rules["missing_values"]["deaths"]["Suppressed"] == "Suppressed (small-cell)"
+
+
+def test_find_chained_keys_detects_a_real_chain():
+    # "99" -> "Refused" -> "Unknown": a value already mapped to "Refused"
+    # would map again on a second run, breaking idempotency.
+    assert find_chained_keys({"99": "Refused", "Refused": "Unknown"}) == ["Refused"]
+
+
+def test_find_chained_keys_no_chain():
+    assert find_chained_keys({"1": "M", "2": "F"}) == []
+
+
+def test_find_chained_keys_ignores_self_mappings():
+    # "Male" -> "Male" is a no-op on re-application, not a chain, even
+    # though "Male" is literally both a key and a value in the raw dict.
+    assert find_chained_keys({"M": "Male", "Male": "Male"}) == []
+
+
+def test_find_chained_keys_empty_mapping():
+    assert find_chained_keys({}) == []

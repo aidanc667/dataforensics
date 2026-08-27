@@ -7,7 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from dataforensics.config_schema import RulesConfigError, load_rules
+from dataforensics.config_schema import find_chained_keys
 from dataforensics.dictionary import build_data_dictionary, read_rows
 from dataforensics.harmonize import apply_transformations, column_union
 from dataforensics.ingest import (
@@ -559,12 +559,39 @@ with tab_analyze:
 
     st.divider()
     overlap_columns = set(approved_sentinels) & set(approved_categories)
+    # Same idempotency-chain check load_rules() runs on a file-based rules
+    # YAML (e.g. {"99": "Refused", "Refused": "Unknown"} -- a value already
+    # mapped to "Refused" would map again on a second run). This app builds
+    # its rules dict from checkbox/text-input state instead of a file, so
+    # it needs the identical check rather than skipping it just because
+    # there's no YAML to validate -- a hand-typed "Map to" label that
+    # collides with another approved sentinel's raw value in the same
+    # column would otherwise apply a silently non-idempotent mapping with
+    # no warning at all.
+    chained_columns = {
+        col: chained
+        for source in (approved_sentinels, approved_categories)
+        for col, mapping in source.items()
+        if (chained := find_chained_keys(mapping))
+    }
     if overlap_columns:
         st.warning(
             f"You approved both a missing-value mapping and a category mapping for the same "
             f"column(s) ({', '.join(sorted(overlap_columns))}) — which one applies first is "
             "ambiguous, so DataForensics refuses this combination rather than guess. Un-check one of the "
             "two for each column listed before applying."
+        )
+        apply_clicked = False
+    elif chained_columns:
+        details = "; ".join(
+            f"{_esc(col)} ({', '.join(repr(v) for v in vals)})" for col, vals in sorted(chained_columns.items())
+        )
+        st.warning(
+            f"⚠ Some approved \"Map to\" labels would chain in the same column ({details}) — a "
+            "value mapped to one of these would map again the next time this ran, so the result "
+            "would keep changing instead of stabilizing. DataForensics refuses this combination "
+            "rather than guess which mapping should apply first. Change the \"Map to\" label(s) "
+            "so no mapped-to value matches another mapped-from value in the same column."
         )
         apply_clicked = False
     else:

@@ -10,6 +10,30 @@ class RulesConfigError(Exception):
 _REQUIRED_KEYS = ("version", "primary_key", "columns")
 
 
+def find_chained_keys(mapping: dict) -> list[str]:
+    """Returns the sorted list of values in `mapping` that also appear as a
+    key elsewhere in it -- i.e. re-applying this mapping to
+    already-transformed data would keep changing values, breaking
+    idempotency (e.g. {"99": "Refused", "Refused": "Unknown"}: a value
+    already mapped to "Refused" would map again to "Unknown" on a second
+    run). Empty list means no chain.
+
+    Self-mappings (key == value, e.g. {"M": "Male", "Male": "Male"}) are
+    excluded from both sides before checking: a self-mapped key is a no-op
+    on re-application, so it can neither participate in a chain as a
+    source nor count as a colliding target -- only an actual value-to-key
+    collision among non-identity entries is a real chain.
+
+    Shared by load_rules's static file-validation (below) and the
+    Streamlit app's interactively-assembled rules -- the app builds a
+    rules dict directly from checkbox/text-input state rather than
+    loading one from a file, so it needs this exact same check rather
+    than skipping it just because there's no YAML file to validate.
+    """
+    non_identity = {key: value for key, value in mapping.items() if value != key}
+    return sorted(set(non_identity.values()) & set(non_identity.keys()))
+
+
 def load_rules(path: Path) -> dict:
     try:
         raw = yaml.safe_load(path.read_text())
@@ -145,16 +169,7 @@ def load_rules(path: Path) -> dict:
                         "targets must be simple scalar values (e.g. a string), not a list/dict"
                     ) from None
 
-            # Exclude self-mappings (key == value) from BOTH sides before
-            # intersecting: a self-mapped key is a no-op on re-application,
-            # so it can neither participate in a chain as a source nor
-            # count as a colliding target. {M: Male, Male: Male} must NOT
-            # be flagged (re-applying is a no-op: "Male" maps to itself),
-            # even though "Male" is literally both a value and a key in the
-            # raw mapping -- only an actual value-to-key collision among
-            # non-identity entries is a real chain.
-            non_identity = {key: value for key, value in mapping.items() if value != key}
-            chained = sorted(set(non_identity.values()) & set(non_identity.keys()))
+            chained = find_chained_keys(mapping)
             if chained:
                 targets = ", ".join(f"'{c}'" for c in chained)
                 raise RulesConfigError(
