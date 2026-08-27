@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Auditable profiling, validation, and rules-driven harmonization for messy research tabular exports."
 requires-python = ">=3.11"
 dependencies = [
-    "polars>=1.0",
     "click>=8.1",
     "pyyaml>=6.0",
     "charset-normalizer>=3.3",

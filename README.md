@@ -152,6 +152,16 @@ recover it afterward. This is a limitation of the Excel file format itself, not 
 `dataforensics`'s `.xlsx`/`.xls` reader can detect or fix. If leading zeros matter, prefer a
 CSV/TSV/JSON export of the same data, where the value is preserved as literal text.
 
+**Every input is fully loaded into memory — there is no streaming or chunked read path.**
+`scan`/`harmonize`/the app all read a delimited file via `path.read_text()` and an Excel workbook
+via `openpyxl`/`xlrd`'s in-memory APIs, then hold every row as a `list[dict]` for the full run.
+Several of this tool's own checks (exact IQR outlier quartiles, exact duplicate-row detection,
+`unique_count`) inherently need the whole column or whole row set materialized anyway, so a
+partial streaming pass wouldn't remove the memory ceiling for those checks even if added. In
+practice this means peak memory scales with file size — comfortable for the messy-but-modest
+research exports (thousands to a few hundred thousand rows) this tool targets, but a multi-GB file
+should be split or pre-filtered first rather than run through as-is.
+
 ## Project status
 
 The core engine — ingest, data dictionary, three-tier validation, single-file harmonize, and
