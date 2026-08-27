@@ -213,19 +213,31 @@ def validate(rows: list[dict], rules: dict) -> dict:
                 )
 
         # 2. Rare category suggestions — only run on columns that look
-        # categorical-ish (unique-value count < half the non-null row
-        # count), so free-text columns aren't flagged wholesale. The
-        # cardinality heuristic alone isn't enough to exclude ID-shaped or
-        # PII-like columns, though: a *low-cardinality* ID-shaped column
+        # categorical-ish, using the exact same cardinality cap
+        # dictionary.py's own category classification uses
+        # (dictionary.cardinality_cap), not an independent threshold. An
+        # earlier, independent "unique_count < half the row count"
+        # threshold here was far more permissive than dictionary.py's cap
+        # and caused a real, confirmed divergence: a household-identifier
+        # column (e.g. ACS PUMS's SERIALNO — high cardinality since
+        # multiple people share one household's serial number, but not
+        # maximal, since households have 1+ members) satisfied the old
+        # "under half the rows" threshold and got flagged as categorical
+        # here, firing a misleading "rare category" suggestion on every
+        # single-person household — while dictionary.py correctly called
+        # the same column "free_text". Sharing one cap keeps both modules'
+        # notion of "categorical enough to matter" in agreement.
+        #
+        # The cardinality heuristic alone isn't enough to exclude ID-shaped
+        # or PII-like columns, though: a *low-cardinality* ID-shaped column
         # (e.g. county_fips with only 2 distinct leading-zero values across
-        # many rows) can still satisfy "unique_count < half the row count"
-        # and get flagged as a rare category despite dictionary.py
-        # classifying it category "id" — and a low-cardinality PII-like
-        # column (e.g. a "phone" column with a handful of shared area
-        # codes) would likewise get a suggestion fired on it even though
-        # its message is masked, contradicting dictionary.py's treatment of
-        # the same column — so apply the same combined ID/PII guard used
-        # for outlier suggestions above.
+        # many rows) can still fall under the cap and get flagged as a rare
+        # category despite dictionary.py classifying it category "id" — and
+        # a low-cardinality PII-like column (e.g. a "phone" column with a
+        # handful of shared area codes) would likewise get a suggestion
+        # fired on it even though its message is masked, contradicting
+        # dictionary.py's treatment of the same column — so apply the same
+        # combined ID/PII guard used for outlier suggestions above.
         value_counts: dict[str, int] = {}
         for raw_value, _row_key_ in values_with_keys:
             value_counts[raw_value] = value_counts.get(raw_value, 0) + 1
@@ -233,7 +245,9 @@ def validate(rows: list[dict], rules: dict) -> dict:
         unique_count = len(value_counts)
         non_null_count = len(values_with_keys)
         looks_categorical = (
-            not is_id_or_pii_like and unique_count > 1 and unique_count < (non_null_count / 2)
+            not is_id_or_pii_like
+            and unique_count > 1
+            and unique_count <= dictionary.cardinality_cap(non_null_count)
         )
 
         if looks_categorical:

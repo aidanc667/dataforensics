@@ -74,7 +74,20 @@ def _load_table(path: Path, sheet: str | None = None) -> tuple[list[str], list[l
     return header, body_rows
 
 
-def _cardinality_cap(n_rows: int) -> int:
+def cardinality_cap(n_rows: int) -> int:
+    """The same categorical-vs-free-text cardinality threshold used by
+    build_data_dictionary's own category classification -- public so
+    validation.py's rare-category suggestion heuristic can share it
+    instead of using an independent, much more permissive threshold. A
+    household-identifier-shaped column (e.g. ACS PUMS's SERIALNO: high
+    but not maximal cardinality, since multiple people share one
+    household's serial number) is real-world evidence this divergence
+    isn't theoretical: dictionary.py correctly classifies it "free_text"
+    once it exceeds this cap, but validation.py's old ad-hoc
+    "unique_count < half the rows" threshold still called it categorical
+    -- firing a misleading "rare category" suggestion on every household
+    that happened to have exactly one person in this sample.
+    """
     if n_rows <= 0:
         return _CARDINALITY_FLOOR
     ratio_cap = int(_CARDINALITY_RATIO * n_rows)
@@ -97,7 +110,7 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
             if name in columns:
                 columns[name].append(value)
 
-    cardinality_cap = _cardinality_cap(n_rows)
+    cap = cardinality_cap(n_rows)
 
     result = {}
     for name, raw_values in columns.items():
@@ -115,7 +128,7 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
         if id_like:
             category = "id"
             levels = None
-        elif unique_count <= cardinality_cap:
+        elif unique_count <= cap:
             category = "categorical"
             levels = sorted(unique_values)
         else:

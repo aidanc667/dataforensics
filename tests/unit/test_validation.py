@@ -107,8 +107,18 @@ def test_rare_category_is_suggestion_with_correct_row_key():
     assert result["warnings"] == []
 
 
-def test_id_shaped_column_not_flagged_as_rare_category():
-    # every value unique -> looks like an ID column, not a categorical column with one rare value
+def test_high_cardinality_column_not_flagged_as_rare_category():
+    # 100 rows, every "site" value unique -> unique_count (100) exceeds
+    # dictionary.cardinality_cap(100) (10, the small-N floor), so
+    # dictionary.py itself would classify this column "free_text", not
+    # "categorical" -- validation.py's rare-category heuristic must reach
+    # the same conclusion using the same cap, not an independent threshold
+    # (a real, confirmed divergence: see cardinality_cap's own docstring
+    # for the ACS PUMS SERIALNO case this guards against). At only 10 rows
+    # the floor would make even a fully-unique column count as
+    # "categorical" in both modules -- this test uses enough rows that the
+    # ratio genuinely dominates the floor, so the distinction is
+    # unambiguous.
     rules = {
         "version": 1,
         "primary_key": ["participant_id"],
@@ -117,9 +127,46 @@ def test_id_shaped_column_not_flagged_as_rare_category():
         "category_mappings": {},
         "weights_strata": {"columns": []},
     }
-    rows = [{"participant_id": str(i), "site": f"site-{i}"} for i in range(10)]
+    rows = [{"participant_id": str(i), "site": f"site-{i}"} for i in range(100)]
     result = validate(rows, rules)
     rare = [s for s in result["suggestions"] if s["rule"] == "rare_category"]
+    assert rare == []
+
+
+def test_rare_category_cardinality_threshold_matches_dictionary_classification():
+    # Regression test for a real bug found running this tool against a real
+    # ACS PUMS extract: a household-identifier column (SERIALNO) has high
+    # but not maximal cardinality (multiple people share one household's
+    # serial number), so dictionary.py's cardinality_cap-based
+    # classification correctly calls it "free_text" -- but validation.py's
+    # OLD independent "unique_count < half the rows" threshold was far more
+    # permissive and still called it categorical, firing a misleading
+    # "rare category" suggestion on every single-person household. This
+    # test reproduces that exact shape (high, non-maximal cardinality) at
+    # a scale where the two thresholds genuinely disagreed, and pins down
+    # that they must not anymore.
+    from dataforensics.dictionary import build_data_dictionary, cardinality_cap
+
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    # 200 rows, ~90 distinct household ids (each shared by ~2 people) --
+    # under half of 200 (the old threshold's cutoff) but well above
+    # cardinality_cap(200).
+    household_ids = [f"H{i:04d}" for i in range(90)]
+    rows = [
+        {"participant_id": str(i), "household_ref": household_ids[i % len(household_ids)]}
+        for i in range(200)
+    ]
+    assert cardinality_cap(200) < 90  # sanity: this shape genuinely exercises the divergence
+
+    result = validate(rows, rules)
+    rare = [s for s in result["suggestions"] if s["rule"] == "rare_category" and s["column"] == "household_ref"]
     assert rare == []
 
 
