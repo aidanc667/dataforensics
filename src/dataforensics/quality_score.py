@@ -13,12 +13,24 @@ the source instead of only the UI.
 
 
 def _score(flagged: float, total: float) -> int:
-    """100 when nothing is flagged, decreasing linearly with the fraction
-    of `total` that is, floored at 0. Returns 100 (not a divide-by-zero
-    error) when `total` is 0 -- nothing to flag means nothing is wrong."""
+    """100 when nothing is flagged, dropping steeply -- proportional to
+    the SQUARE of the pass rate, not the raw pass rate -- as more of
+    `total` is flagged. Floored at 0. Returns 100 (not a divide-by-zero
+    error) when `total` is 0 -- nothing to flag means nothing is wrong.
+
+    A straight linear score (100 * pass_rate) makes "30% of cells have a
+    documented issue" read as "70/100" -- which undersells it: a
+    researcher deciding whether to trust a dataset does not experience a
+    30%-affected column as "mostly fine." Squaring the pass rate keeps a
+    genuinely clean dataset (0% flagged) at 100 but makes a real,
+    non-trivial problem rate cost much more than its raw percentage would
+    suggest -- e.g. 10% flagged scores 81, not 90; 30% flagged scores 49,
+    not 70.
+    """
     if total <= 0:
         return 100
-    return round(max(0.0, 100.0 * (1 - flagged / total)))
+    pass_rate = max(0.0, 1 - flagged / total)
+    return round(100.0 * pass_rate**2)
 
 
 def compute_quality_score(
@@ -35,7 +47,7 @@ def compute_quality_score(
     ambiguous_date_cell_count: int,
     category_inconsistent_cell_count: int,
 ) -> dict:
-    """Five sub-scores (0-100) plus their unweighted mean as `overall`.
+    """Five sub-scores (0-100) plus a worst-dimension-weighted `overall`.
 
       - completeness: share of cells that are NOT null.
       - uniqueness: share of rows that are NOT an exact duplicate of an
@@ -51,10 +63,20 @@ def compute_quality_score(
         that are NOT zero-variance (only one distinct value across every
         row, often a sign of a broken export rather than a real constant).
 
-    `overall` is the plain, unweighted mean of the five sub-scores,
-    rounded to the nearest integer -- deliberately simple and stated as
-    such, rather than an unexplained weighted formula that would look
-    more precise than it actually is.
+    Each sub-score uses `_score`'s squared-pass-rate curve (see its
+    docstring) -- a real, non-trivial problem rate costs more than its
+    raw percentage would suggest.
+
+    `overall` is 40% the single WORST sub-score plus 60% the mean of all
+    five -- not a plain average. A plain average lets one badly-failing
+    dimension hide behind four clean ones (a real case this was checked
+    against: Consistency 49 alongside four scores of 95+ averaged out to
+    a hollow 88, even though nearly a third of the dataset's categorical
+    values needed cleanup). A dataset is only as trustworthy as its
+    weakest documented dimension, so the worst score gets real weight in
+    the headline number instead of being diluted to near-invisibility.
+    This is still a plainly stated, simple formula -- not an opaque one
+    dressed up to look more precise than it is.
     """
     total_cells = row_count * column_count
 
@@ -69,7 +91,8 @@ def compute_quality_score(
         (_score(ragged_row_count, row_count) + _score(zero_variance_column_count, column_count)) / 2
     )
 
-    overall = round((completeness + uniqueness + validity + consistency + structural_quality) / 5)
+    subscores = [completeness, uniqueness, validity, consistency, structural_quality]
+    overall = round(0.4 * min(subscores) + 0.6 * (sum(subscores) / len(subscores)))
 
     return {
         "overall": overall,
