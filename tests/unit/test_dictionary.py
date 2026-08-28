@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dataforensics.dictionary import build_data_dictionary, read_rows
+from dataforensics.dictionary import build_data_dictionary, count_stripped_footer_lines, read_rows
 from dataforensics.ingest import DuplicateHeaderError
 
 
@@ -220,6 +220,48 @@ def test_find_outlier_evidence_skips_nulls():
     # row index 4 (not 3) is the outlier, since the blank at index 1 is
     # correctly skipped rather than shifting every later index down by one.
     assert evidence == [(4, "300")]
+
+
+def test_read_rows_does_not_drop_data_after_a_mid_file_blank_and_ragged_row(tmp_path):
+    # Regression test for a real user-reported bug: id,name.csv with 5 real
+    # rows, a blank line, then one ragged (2-field, missing "name") row,
+    # then more real rows -- previously silently truncated everything from
+    # the ragged row onward because it looked like the start of a footer.
+    f = tmp_path / "sample.csv"
+    f.write_text(
+        "id,name,city\n"
+        "1,Ada,Berlin\n"
+        "2,Bob,Osaka\n"
+        "\n"
+        "3,Carol\n"
+        "4,Dan,Lisbon\n"
+        "5,Eve,Toronto\n"
+    )
+    rows = read_rows(f)
+    assert len(rows) == 5
+    assert rows[-1] == {"id": "5", "name": "Eve", "city": "Toronto"}
+    assert rows[2] == {"id": "3", "name": "Carol", "city": ""}
+
+
+def test_count_stripped_footer_lines_zero_when_nothing_stripped(tmp_path):
+    f = tmp_path / "clean.csv"
+    f.write_text("id,name\n1,Ada\n2,Bob\n")
+    assert count_stripped_footer_lines(f) == 0
+
+
+def test_count_stripped_footer_lines_counts_a_genuine_footer(tmp_path):
+    f = tmp_path / "with_footer.csv"
+    f.write_text("id,name\n1,Ada\n2,Bob\nQuery Parameters:\nGroup By: id\n")
+    assert count_stripped_footer_lines(f) == 2
+
+
+def test_count_stripped_footer_lines_zero_for_mid_file_noise_not_a_real_footer(tmp_path):
+    # A blank line followed by one ragged row, with real data resuming
+    # after -- must NOT be misread as a footer (the exact bug this
+    # function's caller warns about must not fire on ordinary ragged data).
+    f = tmp_path / "ragged.csv"
+    f.write_text("id,name\n1,Ada\n2,Bob\n\n3\n4,Carol\n5,Dan\n")
+    assert count_stripped_footer_lines(f) == 0
 
 
 def test_find_top_code_evidence_returns_rows_at_the_ceiling():

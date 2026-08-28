@@ -11,6 +11,7 @@ import streamlit as st
 from dataforensics.config_schema import find_chained_keys
 from dataforensics.dictionary import (
     build_data_dictionary,
+    count_stripped_footer_lines,
     find_outlier_evidence,
     find_top_code_evidence,
     read_rows,
@@ -270,7 +271,7 @@ def _write_temp(name: str, content: bytes) -> Path:
 
 
 def _sniff_header(path: Path, sheet: str | None = None) -> list[str]:
-    from dataforensics.ingest import detect_delimiter, detect_encoding, read_excel_rows, read_json_rows, split_delimited_line, strip_footer
+    from dataforensics.ingest import detect_delimiter, read_excel_rows, read_json_rows, read_source_lines, split_delimited_line, strip_footer
 
     fmt = detect_file_format(path)
     if fmt == "json":
@@ -280,18 +281,16 @@ def _sniff_header(path: Path, sheet: str | None = None) -> list[str]:
         rows = read_excel_rows(path, sheet=sheet)
         return list(rows[0].keys()) if rows else []
 
-    encoding = detect_encoding(path)
-    raw_lines = path.read_text(encoding=encoding).splitlines()
+    raw_lines, _encoding = read_source_lines(path)
     delimiter = detect_delimiter(raw_lines[:10])
     data_lines, _ = strip_footer(raw_lines, delimiter)
     return split_delimited_line(data_lines[0], delimiter) if data_lines else []
 
 
 def _rewrite_with_deduplicated_header(path: Path) -> Path:
-    from dataforensics.ingest import detect_delimiter, detect_encoding, join_delimited_line, split_delimited_line, strip_footer
+    from dataforensics.ingest import detect_delimiter, join_delimited_line, read_source_lines, split_delimited_line, strip_footer
 
-    encoding = detect_encoding(path)
-    raw_lines = path.read_text(encoding=encoding).splitlines()
+    raw_lines, _encoding = read_source_lines(path)
     delimiter = detect_delimiter(raw_lines[:10])
     data_lines, footer = strip_footer(raw_lines, delimiter)
     if not data_lines:
@@ -416,8 +415,29 @@ with tab_analyze:
             "you may want to check the source file."
         )
 
+    if raw_format == "delimited":
+        stripped_footer_count = count_stripped_footer_lines(data_path)
+        if stripped_footer_count:
+            st.warning(
+                f"⚠ {stripped_footer_count} line(s) at the end of this file were treated as a "
+                "footer/non-data block and excluded from parsing — everything from the first "
+                "detected mismatch to end-of-file, not just one line (e.g. a CDC WONDER-style "
+                "\"Query Parameters:\" block, but this could also be a genuine data problem). "
+                "Open the source file and check what's there before trusting this dataset "
+                "is complete."
+            )
+
     dup_rows = detect_duplicate_rows(rows)
-    sentinels = detect_candidate_sentinels(rows, columns)
+    # A column already classified "id" (a stable, system-assigned
+    # identifier) essentially never legitimately encodes a survey-style
+    # missing-value convention -- so it's exempted here, the same way an
+    # id-like column is already exempted from categorical/free_text
+    # classification elsewhere in this app. This uses a classification
+    # DataForensics has ALREADY computed (not a guess about the column's
+    # actual values), and avoids the false positive of a sequential id
+    # column's "99" being flagged as a probable missing-value code.
+    sentinel_columns = [c for c in columns if dictionary[c].get("category") != "id"]
+    sentinels = detect_candidate_sentinels(rows, sentinel_columns)
     ambiguous_dates = detect_ambiguous_date_columns(rows, columns)
     category_clusters = {
         col: detect_similar_categories(fields["levels"])

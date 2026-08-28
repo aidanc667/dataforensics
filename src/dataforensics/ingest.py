@@ -76,6 +76,34 @@ def detect_encoding(path: Path) -> str:
     return encoding
 
 
+def read_source_lines(path: Path) -> tuple[list[str], str]:
+    """Read `path` as text and split into lines, dropping any fully blank
+    (whitespace-only) line before it reaches delimiter detection or
+    strip_footer's field-count heuristic.
+
+    A blank line in a CSV/TSV is formatting noise (e.g. a stray trailing
+    newline, or a spacer someone added by hand), not a genuine empty
+    record -- this matches how virtually every real-world CSV reader
+    treats it (pandas' `skip_blank_lines=True` default included). Left
+    unfiltered, a blank line does two bad things: it counts as a
+    "0 vs N fields" mismatch toward strip_footer's footer-detection run
+    (turning an innocuous blank line into an accidental trigger for
+    truncating the rest of the file), and once past that, it becomes a
+    spurious all-null row once zip_longest pads it out to the header's
+    width in read_rows -- a real observed bug where mid-file blank lines
+    silently inflated the row count with fake empty records.
+
+    The single shared primitive every delimited-text call site in this
+    codebase should read a file's lines through, instead of each one
+    hand-rolling `detect_encoding` + `.read_text().splitlines()` (and, as
+    happened before this function existed, each one being independently
+    exposed to the blank-line bug above). Returns (data_lines, encoding).
+    """
+    encoding = detect_encoding(path)
+    raw_lines = path.read_text(encoding=encoding).splitlines()
+    return [line for line in raw_lines if line.strip() != ""], encoding
+
+
 def detect_delimiter(sample_lines: list[str]) -> str:
     non_empty = [line for line in sample_lines if line.strip()]
     if not non_empty:
@@ -131,6 +159,20 @@ def strip_footer(lines: list[str], delimiter: str) -> tuple[list[str], list[str]
     """Split ``lines`` into (data_lines, stripped_lines) by looking for a run
     of consecutive lines whose real (quote-aware) field count disagrees with
     the header's (e.g. a CDC WONDER-style "Query Parameters:" footer block).
+
+    A candidate run is only treated as a genuine footer if EVERY line from
+    its start to end-of-file also mismatches the header's field count. A
+    real trailing footer never has ordinary data mixed back in after it
+    starts -- if a normal-shaped line reappears anywhere after the run
+    (e.g. a stray ragged/short row in the middle of an otherwise clean
+    file), this isn't a footer, it's noise in the MIDDLE of the file, and
+    nothing is stripped. This was a real observed bug: a single ragged
+    row happening to sit right after a mismatched line was enough to
+    silently discard every genuine row after it, all the way to
+    end-of-file. Downstream code (read_rows' zip_longest padding) already
+    handles a ragged row without losing it, so refusing to strip here
+    never leaves that row unhandled -- it just stops treating it as the
+    start of a footer.
     """
     if not lines:
         return [], []
@@ -151,6 +193,13 @@ def strip_footer(lines: list[str], delimiter: str) -> tuple[list[str], list[str]
 
     if mismatch_start is None:
         return lines, []
+
+    genuinely_footer = all(
+        len(split_delimited_line(line, delimiter)) != header_fields for line in lines[mismatch_start:]
+    )
+    if not genuinely_footer:
+        return lines, []
+
     return lines[:mismatch_start], lines[mismatch_start:]
 
 

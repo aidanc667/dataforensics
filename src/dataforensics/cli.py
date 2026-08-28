@@ -22,10 +22,10 @@ from dataforensics.ingest import (
     IngestFormatError,
     check_header_has_no_duplicates,
     detect_delimiter,
-    detect_encoding,
     detect_file_format,
     read_excel_table,
     read_json_rows,
+    read_source_lines,
     split_delimited_line,
     strip_footer,
 )
@@ -45,7 +45,7 @@ _REPORT_TITLES = {
 def _read_header_and_row_count(path: Path, sheet: str | None = None) -> tuple[list[str], int, int]:
     """Read the header row, the on-disk data-row count, and the number of
     lines ``strip_footer`` stripped, directly from the input file, via
-    cli.py's own re-implementation of the parse (detect_encoding /
+    cli.py's own re-implementation of the parse (read_source_lines /
     detect_delimiter / strip_footer), independent of ``dictionary.read_rows``.
 
     Returns ``(header, row_count, stripped_line_count)``. ``stripped_line_count``
@@ -79,7 +79,7 @@ def _read_header_and_row_count(path: Path, sheet: str | None = None) -> tuple[li
     not automatically propagate into the anchor too.
 
     This independence is bounded, though: this function calls the exact
-    same ``ingest.strip_footer`` / ``detect_delimiter`` / ``detect_encoding``
+    same ``ingest.strip_footer`` / ``detect_delimiter`` / ``read_source_lines``
     functions that ``dictionary.py`` calls -- two bindings of one function
     each, not two independent implementations -- so a regression inside one
     of those shared primitives themselves (e.g. ``strip_footer``'s
@@ -111,8 +111,7 @@ def _read_header_and_row_count(path: Path, sheet: str | None = None) -> tuple[li
         header = list(rows[0].keys()) if rows else []
         return header, len(rows), 0
 
-    encoding = detect_encoding(path)
-    raw_lines = path.read_text(encoding=encoding).splitlines()
+    raw_lines, _encoding = read_source_lines(path)
     delimiter = detect_delimiter(raw_lines[:10])
     data_lines, stripped = strip_footer(raw_lines, delimiter)
     if not data_lines:

@@ -4,10 +4,10 @@ from pathlib import Path
 from dataforensics.ingest import (
     check_header_has_no_duplicates,
     detect_delimiter,
-    detect_encoding,
     detect_file_format,
     read_excel_table,
     read_json_rows,
+    read_source_lines,
     split_delimited_line,
     strip_footer,
 )
@@ -30,12 +30,25 @@ _CARDINALITY_RATIO = 0.05
 _TOP_CODE_SPIKE_THRESHOLD = 0.05
 
 
-def _read_cleaned_lines(path: Path) -> tuple[list[str], str]:
-    encoding = detect_encoding(path)
-    raw_lines = path.read_text(encoding=encoding).splitlines()
+def _read_cleaned_lines(path: Path) -> tuple[list[str], str, list[str]]:
+    raw_lines, _encoding = read_source_lines(path)
     delimiter = detect_delimiter(raw_lines[:10])
-    data_lines, _stripped = strip_footer(raw_lines, delimiter)
-    return data_lines, delimiter
+    data_lines, stripped = strip_footer(raw_lines, delimiter)
+    return data_lines, delimiter, stripped
+
+
+def count_stripped_footer_lines(path: Path) -> int:
+    """How many lines strip_footer discarded as a non-data footer block
+    for this delimited-text file (0 for a file where nothing was
+    stripped, and 0 for a non-delimited format, since footer-stripping
+    only applies to CSV/TSV). For display -- e.g. the Streamlit app
+    surfaces this as a warning, matching the CLI's own long-standing
+    stderr warning for the same event, so a genuine footer being
+    stripped is never silent in the app either."""
+    if detect_file_format(path) != "delimited":
+        return 0
+    _data_lines, _delimiter, stripped = _read_cleaned_lines(path)
+    return len(stripped)
 
 
 def _load_table(path: Path, sheet: str | None = None) -> tuple[list[str], list[list[str]]]:
@@ -55,7 +68,7 @@ def _load_table(path: Path, sheet: str | None = None) -> tuple[list[str], list[l
     """
     fmt = detect_file_format(path)
     if fmt == "delimited":
-        data_lines, delimiter = _read_cleaned_lines(path)
+        data_lines, delimiter, _stripped = _read_cleaned_lines(path)
         if not data_lines:
             return [], []
         header = split_delimited_line(data_lines[0], delimiter)
