@@ -1,3 +1,14 @@
+def _is_uniform_dict_list(fields: list) -> bool:
+    """True when `fields` is a non-empty list of dicts that all share the
+    exact same set of keys -- genuinely tabular data (e.g. a findings
+    summary or a mutation log), as opposed to a mixed-shape list better
+    left as bullets."""
+    if not fields or not all(isinstance(item, dict) for item in fields):
+        return False
+    first_keys = set(fields[0].keys())
+    return all(set(item.keys()) == first_keys for item in fields)
+
+
 def render_html(title: str, data: dict) -> str:
     """Same content as render_markdown, as a single self-contained HTML
     file (inline CSS, no external assets) -- for deliverables meant to be
@@ -14,6 +25,16 @@ def render_html(title: str, data: dict) -> str:
         elif isinstance(fields, list):
             if not fields:
                 body_parts.append("<p><em>(none)</em></p>")
+            elif _is_uniform_dict_list(fields):
+                columns = list(fields[0].keys())
+                body_parts.append("<table><thead><tr>")
+                body_parts.extend(f"<th>{_escape(c)}</th>" for c in columns)
+                body_parts.append("</tr></thead><tbody>")
+                for item in fields:
+                    body_parts.append("<tr>")
+                    body_parts.extend(f"<td>{_escape(item[c])}</td>" for c in columns)
+                    body_parts.append("</tr>")
+                body_parts.append("</tbody></table>")
             else:
                 body_parts.append("<ul>")
                 for item in fields:
@@ -38,6 +59,9 @@ def render_html(title: str, data: dict) -> str:
   ul {{ padding-left: 1.2rem; }}
   li {{ margin-bottom: 0.3rem; }}
   strong {{ color: #4338CA; }}
+  table {{ border-collapse: collapse; width: 100%; margin-top: 0.5rem; }}
+  th, td {{ border: 1px solid #E2E8F0; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.9rem; }}
+  th {{ background: #F8FAFC; color: #334155; }}
 </style>
 </head>
 <body>
@@ -63,12 +87,19 @@ def render_markdown(title: str, data: dict) -> str:
         elif isinstance(fields, list):
             if not fields:
                 lines.append("- (none)")
-            for item in fields:
-                if isinstance(item, dict):
-                    rendered = ", ".join(f"**{k}**: {v}" for k, v in item.items())
-                    lines.append(f"- {rendered}")
-                else:
-                    lines.append(f"- {item}")
+            elif _is_uniform_dict_list(fields):
+                columns = list(fields[0].keys())
+                lines.append("| " + " | ".join(columns) + " |")
+                lines.append("| " + " | ".join("---" for _ in columns) + " |")
+                for item in fields:
+                    lines.append("| " + " | ".join(str(item[c]) for c in columns) + " |")
+            else:
+                for item in fields:
+                    if isinstance(item, dict):
+                        rendered = ", ".join(f"**{k}**: {v}" for k, v in item.items())
+                        lines.append(f"- {rendered}")
+                    else:
+                        lines.append(f"- {item}")
         else:
             lines.append(f"- {fields}")
         lines.append("")

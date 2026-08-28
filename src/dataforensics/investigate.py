@@ -341,6 +341,152 @@ def discover_shared_key_columns(file_rows: dict[str, list[dict]], min_overlap: f
     return sorted(candidates, key=lambda c: c["overlap_fraction"], reverse=True)
 
 
+# --------------------------------------------------------------------- #
+# Dataset-type profiles — optional, additional checks a human opts into
+# by declaring what kind of dataset this is (Survey / Clinical / Research,
+# Geographic). "General" runs none of these; every check below is purely
+# additive to the always-on checks above, still detection-only, and still
+# requires human review before anything is approved. Deliberately narrow:
+# a handful of well-known, name-pattern-triggered, defensible rules rather
+# than an attempt to guess every possible domain-specific issue.
+# --------------------------------------------------------------------- #
+
+# Widely-accepted plausible-range bounds for a small set of common clinical
+# / research measurements, matched against a column by name pattern. Every
+# bound here is stated explicitly in the evidence panel shown for a flagged
+# value, so a human can judge the rule itself, not just trust it.
+CLINICAL_RANGE_RULES: list[dict] = [
+    {"pattern": re.compile(r"(^|_)age(_|$)", re.IGNORECASE), "min": 0, "max": 120, "label": "age", "unit": "years"},
+    {"pattern": re.compile(r"(^|_)height_?cm(_|$)", re.IGNORECASE), "min": 30, "max": 250, "label": "height", "unit": "cm"},
+    {"pattern": re.compile(r"(^|_)weight_?kg(_|$)", re.IGNORECASE), "min": 1, "max": 300, "label": "weight", "unit": "kg"},
+    {"pattern": re.compile(r"(^|_)bmi(_|$)", re.IGNORECASE), "min": 10, "max": 80, "label": "BMI", "unit": ""},
+]
+
+_SURVEY_WEIGHT_PATTERN = re.compile(r"(^|_)(wt|wgt|weight)(_|\d|$)", re.IGNORECASE)
+
+# FIPS: 2-digit (state) or 5-digit (state+county) numeric string. Leading
+# zeros matter (Alabama is "01"), so this matches the raw string, never a
+# parsed integer.
+_FIPS_PATTERN = re.compile(r"^\d{2}(\d{3})?$")
+# ZIP: 5-digit, or ZIP+4 (5 digits, hyphen, 4 digits).
+_ZIP_PATTERN = re.compile(r"^\d{5}(-\d{4})?$")
+
+_FIPS_COLUMN_NAME_PATTERN = re.compile(r"fips", re.IGNORECASE)
+_ZIP_COLUMN_NAME_PATTERN = re.compile(r"zip", re.IGNORECASE)
+
+
+def find_fips_like_columns(columns: list[str]) -> list[str]:
+    """Column names containing "fips" (case-insensitive) -- candidates for
+    find_invalid_fips_evidence under the Geographic dataset profile."""
+    return [c for c in columns if _FIPS_COLUMN_NAME_PATTERN.search(c)]
+
+
+def find_zip_like_columns(columns: list[str]) -> list[str]:
+    """Column names containing "zip" (case-insensitive) -- candidates for
+    find_invalid_zip_evidence under the Geographic dataset profile."""
+    return [c for c in columns if _ZIP_COLUMN_NAME_PATTERN.search(c)]
+
+DATASET_PROFILES = {
+    "General": [],
+    "Survey": ["survey_weight_columns"],
+    "Clinical / Research": ["clinical_ranges", "conflicting_id_records"],
+    "Geographic": ["fips_format", "zip_format"],
+}
+
+
+def match_clinical_range_rule(column: str) -> dict | None:
+    """Return the first CLINICAL_RANGE_RULES entry whose name pattern
+    matches `column`, or None if no rule applies to this column."""
+    for rule in CLINICAL_RANGE_RULES:
+        if rule["pattern"].search(column):
+            return rule
+    return None
+
+
+def find_implausible_value_evidence(
+    rows: list[dict], column: str, min_value: float, max_value: float
+) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for numeric-parseable values in
+    `column` outside [min_value, max_value]. Non-numeric values are
+    skipped, not flagged -- this is a range check, not a type check."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = row.get(column, "")
+        if raw == "":
+            continue
+        try:
+            numeric = float(raw)
+        except ValueError:
+            continue
+        if numeric < min_value or numeric > max_value:
+            evidence.append((i, raw))
+    return evidence
+
+
+def detect_conflicting_id_records(rows: list[dict], id_column: str) -> list[dict]:
+    """Values of `id_column` appearing on 2+ rows where at least one OTHER
+    field differs between those rows -- e.g. the same participant_id with
+    two different recorded ages. Distinct from detect_duplicate_rows,
+    which only catches EXACT full-row repeats; this catches the more
+    common and more concerning case of the same real-world entity recorded
+    inconsistently. Never concludes which row is correct -- only that a
+    human should look.
+    """
+    by_id: dict[str, list[int]] = {}
+    for i, row in enumerate(rows):
+        key = row.get(id_column)
+        if key in (None, ""):
+            continue
+        by_id.setdefault(str(key), []).append(i)
+
+    conflicts = []
+    for id_value, indices in by_id.items():
+        if len(indices) < 2:
+            continue
+        first = rows[indices[0]]
+        if any(rows[i] != first for i in indices[1:]):
+            conflicts.append({"id_value": id_value, "row_indices": indices})
+    return conflicts
+
+
+def find_invalid_fips_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for non-null values in `column`
+    that don't match a 2-digit (state) or 5-digit (state+county) numeric
+    FIPS code -- the standard US Census geographic identifier shape."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, "")).strip()
+        if raw == "":
+            continue
+        if not _FIPS_PATTERN.match(raw):
+            evidence.append((i, raw))
+    return evidence
+
+
+def find_invalid_zip_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for non-null values in `column`
+    that don't match a 5-digit ZIP or ZIP+4 shape."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, "")).strip()
+        if raw == "":
+            continue
+        if not _ZIP_PATTERN.match(raw):
+            evidence.append((i, raw))
+    return evidence
+
+
+def detect_survey_weight_columns(columns: list[str]) -> list[str]:
+    """Column names that look like a survey sampling/replicate weight
+    (e.g. "wt_final", "wgt2011") -- purely a name-pattern flag, never
+    inferred from the values themselves, since a sampling weight is a
+    study-design concept no value-shape heuristic can confirm. Meant to
+    warn against treating it as an ordinary numeric variable (e.g.
+    flagging it for outliers) without realizing what it actually
+    represents."""
+    return [c for c in columns if _SURVEY_WEIGHT_PATTERN.search(c)]
+
+
 def check_referential_integrity(parent_values: set, child_values: set) -> dict:
     """How many values in `child_values` don't appear in `parent_values` --
     e.g. lab records referencing a participant_id absent from participants.csv.

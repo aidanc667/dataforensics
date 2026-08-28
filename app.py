@@ -3,6 +3,7 @@ import html
 import io
 import json
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 import streamlit as st
@@ -25,20 +26,30 @@ from dataforensics.ingest import (
 )
 from dataforensics.investigate import (
     COMMON_SENTINEL_STRINGS,
+    DATASET_PROFILES,
     check_referential_integrity,
     compare_fingerprints,
     compute_dataset_fingerprint,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
+    detect_conflicting_id_records,
     detect_duplicate_rows,
     detect_similar_categories,
+    detect_survey_weight_columns,
     discover_shared_key_columns,
     find_ambiguous_date_evidence,
     find_category_value_evidence,
+    find_fips_like_columns,
+    find_implausible_value_evidence,
+    find_invalid_fips_evidence,
+    find_invalid_zip_evidence,
     find_sentinel_evidence,
+    find_zip_like_columns,
     infer_semantic_role,
+    match_clinical_range_rule,
 )
 from dataforensics.manifest import build_manifest
+from dataforensics.quality_score import compute_quality_score
 from dataforensics.report import render_html, render_markdown
 from dataforensics.typing_guards import is_pii_like_column
 from dataforensics.validation import validate
@@ -380,6 +391,7 @@ with tab_analyze:
     dictionary = build_data_dictionary(data_path, sheet=sheet_choice)
     rows = read_rows(data_path, sheet=sheet_choice)
     columns = list(dictionary.keys())
+    id_like_defaults = [c for c, f in dictionary.items() if f.get("category") == "id"]
 
     ragged_row_count = sum(1 for r in rows if "" in r)
     if ragged_row_count and raw_format == "delimited":
@@ -399,6 +411,66 @@ with tab_analyze:
         if fields.get("category") == "categorical" and fields.get("levels")
     }
     category_clusters = {col: c for col, c in category_clusters.items() if c}
+
+    # --- Dataset type: optional, additive domain-specific checks ---
+    # These never feed the quality scorecard below (that stays comparable
+    # across datasets regardless of profile) and are purely detection --
+    # shown alongside outliers/duplicates in "Detected, left as-is by
+    # design" further down, never auto-applied to anything.
+    dataset_type = st.selectbox(
+        "Dataset type — optional, adds a few extra domain-specific checks",
+        list(DATASET_PROFILES.keys()),
+        index=0,
+        help=(
+            '"General" runs only the checks above. Survey / Clinical / Research / Geographic add '
+            "a small, clearly-labeled set of additional checks common to that kind of dataset — "
+            "still detection-only, still requiring your review before anything changes."
+        ),
+    )
+    profile_checks = DATASET_PROFILES[dataset_type]
+
+    clinical_range_findings: dict[str, dict] = {}
+    if "clinical_ranges" in profile_checks:
+        for col in columns:
+            rule = match_clinical_range_rule(col)
+            if rule:
+                evidence = find_implausible_value_evidence(rows, col, rule["min"], rule["max"])
+                if evidence:
+                    clinical_range_findings[col] = {"rule": rule, "evidence": evidence}
+
+    conflicting_id_findings: dict[str, list[dict]] = {}
+    if "conflicting_id_records" in profile_checks:
+        # Restrict to columns that are actually near-unique per row, not
+        # every column dictionary.py happened to classify "id" -- a shared
+        # grouping code like county_fips is legitimately "id"-shaped (a
+        # stable, short, non-numeric-looking code) but is EXPECTED to
+        # repeat across many rows, so running this check against it would
+        # flag nearly the entire dataset as "conflicting" for no reason.
+        conflicting_id_candidates = [
+            col for col in id_like_defaults if rows and dictionary[col]["unique_count"] >= 0.5 * len(rows)
+        ]
+        for col in conflicting_id_candidates:
+            conflicts = detect_conflicting_id_records(rows, col)
+            if conflicts:
+                conflicting_id_findings[col] = conflicts
+
+    invalid_fips_findings: dict[str, list[tuple[int, str]]] = {}
+    if "fips_format" in profile_checks:
+        for col in find_fips_like_columns(columns):
+            evidence = find_invalid_fips_evidence(rows, col)
+            if evidence:
+                invalid_fips_findings[col] = evidence
+
+    invalid_zip_findings: dict[str, list[tuple[int, str]]] = {}
+    if "zip_format" in profile_checks:
+        for col in find_zip_like_columns(columns):
+            evidence = find_invalid_zip_evidence(rows, col)
+            if evidence:
+                invalid_zip_findings[col] = evidence
+
+    survey_weight_columns: list[str] = []
+    if "survey_weight_columns" in profile_checks:
+        survey_weight_columns = detect_survey_weight_columns(columns)
 
     st.subheader("Data dictionary")
     st.dataframe([{"column": c, **f} for c, f in dictionary.items()], use_container_width=True)
@@ -440,6 +512,70 @@ with tab_analyze:
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+    # --- Data quality scorecard: a deterministic summary of the findings
+    # above, never a judgment about whether the dataset is fit for any
+    # particular analysis. See quality_score.py's docstring for the exact
+    # formula behind each sub-score. ---
+    sentinel_flagged_cell_count = sum(
+        len(find_sentinel_evidence(rows, col, val)) for col, vals in sentinels.items() for val in vals
+    )
+    outlier_flagged_cell_count = sum((f.get("outliers") or {}).get("outlier_count", 0) for f in dictionary.values())
+    top_code_flagged_cell_count = sum(
+        len(find_top_code_evidence(rows, c, f["top_code_spike"]["value"])) for c, f in top_code_cols_preview.items()
+    )
+    ambiguous_date_cell_count = sum(ambiguous_dates.values())
+    category_inconsistent_cell_count = sum(
+        len(find_category_value_evidence(rows, col, v))
+        for col, clusters in category_clusters.items()
+        for cluster in clusters
+        for v in cluster["values"]
+    )
+
+    quality = compute_quality_score(
+        row_count=len(rows),
+        column_count=len(columns),
+        null_cell_count=sum(f["null_count"] for f in dictionary.values()),
+        duplicate_row_count=len(dup_rows),
+        zero_variance_column_count=sum(1 for f in dictionary.values() if f["is_zero_variance"]),
+        ragged_row_count=ragged_row_count,
+        sentinel_flagged_cell_count=sentinel_flagged_cell_count,
+        outlier_flagged_cell_count=outlier_flagged_cell_count,
+        top_code_flagged_cell_count=top_code_flagged_cell_count,
+        ambiguous_date_cell_count=ambiguous_date_cell_count,
+        category_inconsistent_cell_count=category_inconsistent_cell_count,
+    )
+
+    # Findings summary table -- reused by the downloadable audit report in
+    # Step 4 so the report's "Findings" table matches exactly what was
+    # shown here, rather than being independently recomputed.
+    findings_summary = [
+        row
+        for row in [
+            {"Issue": "Duplicate rows", "Count": len(dup_rows), "Severity": "High"},
+            {"Issue": "Candidate missing-value codes", "Count": sentinel_flagged_cell_count, "Severity": "Medium"},
+            {"Issue": "Ambiguous dates", "Count": ambiguous_date_cell_count, "Severity": "Medium"},
+            {"Issue": "Statistical outliers", "Count": outlier_flagged_cell_count, "Severity": "Review"},
+            {"Issue": "Possible top-coding", "Count": top_code_flagged_cell_count, "Severity": "Review"},
+            {"Issue": "Inconsistent category values", "Count": category_inconsistent_cell_count, "Severity": "Low"},
+        ]
+        if row["Count"]
+    ]
+
+    st.markdown('<div class="dataforensics-bucket-header">🔥 Dataset quality score</div>', unsafe_allow_html=True)
+    sq1, sq2, sq3, sq4, sq5, sq6 = st.columns(6)
+    sq1.metric("Overall", f"{quality['overall']}/100")
+    sq2.metric("Completeness", quality["completeness"])
+    sq3.metric("Consistency", quality["consistency"])
+    sq4.metric("Validity", quality["validity"])
+    sq5.metric("Uniqueness", quality["uniqueness"])
+    sq6.metric("Structural quality", quality["structural_quality"])
+    st.caption(
+        f"{quality['overall']}/100 does not mean \"good data.\" It summarizes the findings above "
+        "according to documented, rule-based checks — see each finding's \"Why was this flagged?\" "
+        "panel for exactly what was measured. It is not a judgment of whether this dataset is fit "
+        "for any particular analysis."
     )
 
     # --- Suggested variable roles (informational only — never drives any transformation) ---
@@ -508,7 +644,6 @@ with tab_analyze:
     _step_bar(3)
     st.markdown("Each finding below is a **suggestion with evidence** — nothing is applied until you click *Apply approved changes*.")
 
-    id_like_defaults = [c for c, f in dictionary.items() if f.get("category") == "id"]
     primary_key = st.multiselect(
         "Primary key column(s) — used to detect duplicate/conflicting records",
         options=columns,
@@ -617,7 +752,11 @@ with tab_analyze:
 
     outlier_cols = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
     top_code_cols = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
-    if outlier_cols or top_code_cols or dup_rows:
+    any_domain_findings = bool(
+        clinical_range_findings or conflicting_id_findings or invalid_fips_findings
+        or invalid_zip_findings or survey_weight_columns
+    )
+    if outlier_cols or top_code_cols or dup_rows or any_domain_findings:
         st.markdown('<div class="dataforensics-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
         st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
         for c, f in outlier_cols.items():
@@ -674,6 +813,109 @@ with tab_analyze:
                     st.caption(f"...and {len(dup_rows) - 10} more row(s) not shown.")
                 st.markdown("**Interpretation:**  \nCould be a genuine data-entry duplicate, or a legitimate repeated record (e.g. a second identical visit).")
                 st.markdown("**Recommended action:**  \nReview manually. DataForensics never auto-deletes rows.")
+                st.markdown("**Automatic modification:**  \nNONE.")
+
+        for col, finding in clinical_range_findings.items():
+            rule = finding["rule"]
+            unit_suffix = f" {rule['unit']}" if rule["unit"] else ""
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Clinical range</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {len(finding["evidence"])} value(s) outside the plausible {rule["label"]} range</div>'
+                f'<div class="dataforensics-card-evidence">expected {rule["min"]}–{rule["max"]}{unit_suffix}</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=f'{col} matches the "{rule["label"]}" naming convention; plausible range is {rule["min"]}–{rule["max"]}{unit_suffix} (Clinical / Research dataset profile).',
+                lines=_evidence_lines(col, finding["evidence"]),
+                interpretation=f"These values fall outside the configured plausible {rule['label']} range.",
+                recommended_action="Human review — DataForensics never auto-corrects or removes an implausible value.",
+            )
+
+        for col, conflicts in conflicting_id_findings.items():
+            total_conflicted_rows = sum(len(c["row_indices"]) for c in conflicts)
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Conflicting records</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {len(conflicts)} id value(s) with conflicting field(s) across rows</div>'
+                f'<div class="dataforensics-card-evidence">same {_esc(col)}, different other field(s) — not an exact duplicate</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    f"**Rule:**  \nThe same {_esc(col)} value appears on 2+ rows where at least one other "
+                    "field differs (Clinical / Research dataset profile)."
+                )
+                st.markdown("**Evidence:**")
+                pii = is_pii_like_column(col)
+                conflict_lines = [
+                    f"{col} = {_PII_EVIDENCE_MASK if pii else c['id_value']} → rows "
+                    + ", ".join(str(i + 1) for i in c["row_indices"])
+                    for c in conflicts[:10]
+                ]
+                st.markdown(
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in conflict_lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if len(conflicts) > 10:
+                    st.caption(f"...and {len(conflicts) - 10} more id value(s) not shown.")
+                st.markdown(
+                    "**Interpretation:**  \nCould be a genuine data-entry conflict (the same participant "
+                    "recorded inconsistently), or a legitimate repeated visit with a real field change."
+                )
+                st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which row is correct.")
+                st.markdown("**Automatic modification:**  \nNONE.")
+
+        for col, evidence in invalid_fips_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Geographic format</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {len(evidence)} value(s) not shaped like a FIPS code</div>'
+                f'<div class="dataforensics-card-evidence">expected a 2-digit (state) or 5-digit (state+county) numeric code</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=(
+                    f'{col} matches the "fips" naming convention (Geographic dataset profile); a valid FIPS code '
+                    "is a 2-digit (state) or 5-digit (state+county) numeric string, e.g. \"06\" or \"06037\"."
+                ),
+                lines=_evidence_lines(col, evidence),
+                interpretation="These values don't match the standard US Census FIPS code shape.",
+                recommended_action="Review manually — check for truncated leading zeros or a non-FIPS value.",
+            )
+
+        for col, evidence in invalid_zip_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Geographic format</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {len(evidence)} value(s) not shaped like a ZIP code</div>'
+                f'<div class="dataforensics-card-evidence">expected a 5-digit ZIP or ZIP+4</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=(
+                    f'{col} matches the "zip" naming convention (Geographic dataset profile); a valid ZIP code '
+                    "is 5 digits, or 5 digits + hyphen + 4 digits (ZIP+4)."
+                ),
+                lines=_evidence_lines(col, evidence),
+                interpretation="These values don't match the standard US ZIP / ZIP+4 shape.",
+                recommended_action="Review manually — check for a truncated leading zero or a non-ZIP value.",
+            )
+
+        if survey_weight_columns:
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Survey weight</span>'
+                f'<div class="dataforensics-card-title">{len(survey_weight_columns)} possible survey/sampling weight column(s): {", ".join(_esc(c) for c in survey_weight_columns)}</div>'
+                f'<div class="dataforensics-card-evidence">column name matches a common weight-variable convention</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    "**Rule:**  \nColumn name matches a common survey/sampling weight naming convention "
+                    "(e.g. \"wt\", \"wgt\", \"weight\") (Survey dataset profile)."
+                )
+                st.markdown(
+                    "**Interpretation:**  \nA sampling weight is a study-design concept, not an ordinary "
+                    "numeric variable — treating it as one (e.g. flagging it for outliers, averaging it "
+                    "directly) usually produces a meaningless result."
+                )
+                st.markdown("**Recommended action:**  \nConfirm this is really a sampling weight before analyzing it as a regular column.")
                 st.markdown("**Automatic modification:**  \nNONE.")
 
     rules = {
@@ -778,10 +1020,16 @@ with tab_analyze:
             st.stop()
 
         manifest = build_manifest([data_path], [])
+        # Every mutation records the same timestamp -- the moment this
+        # Apply click ran -- rather than a per-row clock read that would
+        # imply an ordering precision this batch operation doesn't have.
+        for mutation in mutations:
+            mutation["timestamp_utc"] = manifest["timestamp_utc"]
         manifest["mutations"] = mutations
         manifest["schema_sha256"] = []  # rules were assembled interactively, not from a file
         manifest["provenance"] = {"source": "interactive review", "approved_by": "user"}
         manifest["safety_checks"] = safety
+        manifest["findings_summary"] = findings_summary
 
         buffer = io.StringIO()
         # column_union scans every row, not just row 0 -- a ragged input row
@@ -803,37 +1051,100 @@ with tab_analyze:
 
         st.success(f"Done — {len(mutations)} approved change(s) applied and logged.")
 
-        st.caption("Full deliverable bundle — matching a defensible research-data audit trail:")
+        # DataForensics Audit Report data -- the same structure used both
+        # for the on-screen sections below and the downloadable
+        # audit_report.md / quality_report.html, so what's shown here and
+        # what's downloaded never drift apart.
+        audit_data = {
+            "Dataset": {
+                "file": st.session_state["dataforensics_data_name"],
+                "rows": len(rows),
+                "columns": len(columns),
+            },
+            "Quality score": quality,
+            "Findings": findings_summary,
+            "Transformations approved": mutations,
+            "Safety checks": safety,
+        }
+
         dl1, dl2, dl3 = st.columns(3)
         dl1.download_button(
             "⬇ Cleaned CSV (analysis-ready)", data=buffer.getvalue(),
-            file_name=f"cleaned_{st.session_state['dataforensics_data_name']}", mime="text/csv", use_container_width=True,
+            file_name=f"cleaned_{st.session_state['dataforensics_data_name']}", mime="text/csv", width="stretch",
         )
         dl2.download_button(
             "⬇ provenance.json", data=json.dumps(manifest, indent=2),
-            file_name="provenance.json", mime="application/json", use_container_width=True,
+            file_name="provenance.json", mime="application/json", width="stretch",
         )
         dl3.download_button(
             "⬇ validation_results.json", data=json.dumps(report, indent=2),
-            file_name="validation_results.json", mime="application/json", use_container_width=True,
+            file_name="validation_results.json", mime="application/json", width="stretch",
         )
         dl4, dl5, dl6 = st.columns(3)
         dl4.download_button(
             "⬇ data_dictionary.html", data=render_html("Data Dictionary", dictionary),
-            file_name="data_dictionary.html", mime="text/html", use_container_width=True,
+            file_name="data_dictionary.html", mime="text/html", width="stretch",
         )
         dl5.download_button(
             "⬇ quality_report.html", data=render_html("Quality Report", report),
-            file_name="quality_report.html", mime="text/html", use_container_width=True,
+            file_name="quality_report.html", mime="text/html", width="stretch",
         )
         dl6.download_button(
-            "⬇ audit_report.md", data=render_markdown("Validation Report", report) + "\n\n" + render_markdown("Provenance", manifest),
-            file_name="audit_report.md", mime="text/markdown", use_container_width=True,
+            "⬇ audit_report.md",
+            data=render_markdown("DataForensics Audit Report", audit_data) + "\n\n" + render_markdown("Validation Report", report),
+            file_name="audit_report.md", mime="text/markdown", width="stretch",
+        )
+        st.download_button(
+            "⬇ audit_report.html (same content, formatted for a browser)",
+            data=render_html("DataForensics Audit Report", audit_data | {"Validation Report": report}),
+            file_name="audit_report.html", mime="text/html", width="stretch",
         )
 
-        st.markdown('<div class="dataforensics-bucket-header">✅ Detected & changed</div>', unsafe_allow_html=True)
+        # --- Before/After diff: a compact, deduplicated summary of exactly
+        # which value substitutions happened, instead of one line per row
+        # even when the same substitution repeated hundreds of times. ---
+        st.markdown('<div class="dataforensics-bucket-header">✅ Before / after diff</div>', unsafe_allow_html=True)
         if mutations:
-            st.dataframe(mutations, use_container_width=True)
+            diff_counts = Counter((m["column"], m["original_value"], m["new_value"]) for m in mutations)
+            diff_summary = [
+                {"Column": col, "Before": before, "After": after, "Rows affected": count}
+                for (col, before, after), count in sorted(diff_counts.items())
+            ]
+            rows_affected = len({tuple(sorted(m["row_key"].items())) for m in mutations})
+            st.dataframe(diff_summary, width="stretch")
+            st.caption(
+                f"{len(mutations)} value(s) changed across {rows_affected} row(s), in "
+                f"{len(safety['modified_columns'])} column(s) ({', '.join(safety['modified_columns'])}). "
+                f"Every other column is unmodified — see Safety checks above."
+            )
+        else:
+            st.caption("Nothing was approved for change.")
+
+        # --- Provenance chain: the full record for every approved change,
+        # in the order a defensible audit trail needs it -- original
+        # value, new value, the rule that justified it, who approved it,
+        # and when. ---
+        st.markdown('<div class="dataforensics-bucket-header">🔗 Provenance / transformation log</div>', unsafe_allow_html=True)
+        if mutations:
+            st.caption(
+                "Original value → new value → rule used → approved by → timestamp, for every "
+                "individual cell this run changed:"
+            )
+            st.dataframe(
+                [
+                    {
+                        "row_key": m["row_key"],
+                        "column": m["column"],
+                        "original_value": m["original_value"],
+                        "new_value": m["new_value"],
+                        "rule_used": m["transformation_rule"],
+                        "approved_by": m["reason"],
+                        "timestamp_utc": m["timestamp_utc"],
+                    }
+                    for m in mutations
+                ],
+                width="stretch",
+            )
         else:
             st.caption("Nothing was approved for change.")
 

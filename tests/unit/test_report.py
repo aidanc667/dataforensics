@@ -23,3 +23,27 @@ def test_render_html_escapes_unsafe_characters():
     html = render_html("Report", data)
     assert "<script>alert" not in html
     assert "&lt;script&gt;" in html
+
+
+def test_render_html_renders_uniform_dict_list_as_table():
+    data = {"Findings": [{"Issue": "Duplicates", "Count": 14, "Severity": "High"}, {"Issue": "Outliers", "Count": 134, "Severity": "Review"}]}
+    html = render_html("Audit", data)
+    assert "<table>" in html
+    assert "<th>Issue</th>" in html
+    assert "<td>Duplicates</td>" in html
+    assert "<td>134</td>" in html
+
+
+def test_render_html_falls_back_to_bullets_for_non_uniform_dict_list():
+    data = {"Mixed": [{"a": 1}, {"b": 2}]}
+    html = render_html("Report", data)
+    assert "<table>" not in html
+    assert "<li>" in html
+
+
+def test_render_markdown_renders_uniform_dict_list_as_table():
+    data = {"Findings": [{"Issue": "Duplicates", "Count": 14, "Severity": "High"}]}
+    md = render_markdown("Audit", data)
+    assert "| Issue | Count | Severity |" in md
+    assert "| --- | --- | --- |" in md
+    assert "| Duplicates | 14 | High |" in md

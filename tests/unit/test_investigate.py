@@ -1,11 +1,19 @@
 from dataforensics.investigate import (
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
+    detect_conflicting_id_records,
     detect_duplicate_rows,
     detect_similar_categories,
+    detect_survey_weight_columns,
     find_ambiguous_date_evidence,
     find_category_value_evidence,
+    find_fips_like_columns,
+    find_implausible_value_evidence,
+    find_invalid_fips_evidence,
+    find_invalid_zip_evidence,
     find_sentinel_evidence,
+    find_zip_like_columns,
+    match_clinical_range_rule,
 )
 
 
@@ -96,3 +104,78 @@ def test_detect_similar_categories_no_cluster_for_dissimilar_values():
 def test_detect_similar_categories_skips_high_cardinality_columns():
     values = [f"note-{i}" for i in range(60)]
     assert detect_similar_categories(values) == []
+
+
+def test_match_clinical_range_rule_matches_age_column():
+    rule = match_clinical_range_rule("age")
+    assert rule["min"] == 0
+    assert rule["max"] == 120
+
+
+def test_match_clinical_range_rule_matches_age_with_prefix_suffix():
+    assert match_clinical_range_rule("participant_age_years") is not None
+
+
+def test_match_clinical_range_rule_no_match_for_unrelated_column():
+    assert match_clinical_range_rule("participant_id") is None
+
+
+def test_find_implausible_value_evidence_flags_out_of_range_values():
+    rows = [{"age": "30"}, {"age": "300"}, {"age": "-4"}, {"age": "45"}]
+    evidence = find_implausible_value_evidence(rows, "age", min_value=0, max_value=120)
+    assert evidence == [(1, "300"), (2, "-4")]
+
+
+def test_find_implausible_value_evidence_skips_non_numeric_values():
+    rows = [{"age": "30"}, {"age": "unknown"}]
+    assert find_implausible_value_evidence(rows, "age", min_value=0, max_value=120) == []
+
+
+def test_detect_conflicting_id_records_finds_same_id_different_fields():
+    rows = [
+        {"participant_id": "1", "age": "30"},
+        {"participant_id": "1", "age": "31"},  # same id, conflicting age
+        {"participant_id": "2", "age": "40"},
+    ]
+    conflicts = detect_conflicting_id_records(rows, "participant_id")
+    assert len(conflicts) == 1
+    assert conflicts[0]["id_value"] == "1"
+    assert conflicts[0]["row_indices"] == [0, 1]
+
+
+def test_detect_conflicting_id_records_no_conflict_for_exact_repeats():
+    rows = [{"participant_id": "1", "age": "30"}, {"participant_id": "1", "age": "30"}]
+    assert detect_conflicting_id_records(rows, "participant_id") == []
+
+
+def test_find_invalid_fips_evidence_flags_wrong_length_codes():
+    rows = [{"fips": "06"}, {"fips": "06037"}, {"fips": "123"}, {"fips": "abcde"}]
+    evidence = find_invalid_fips_evidence(rows, "fips")
+    assert evidence == [(2, "123"), (3, "abcde")]
+
+
+def test_find_invalid_zip_evidence_flags_wrong_shape_codes():
+    rows = [{"zip": "94103"}, {"zip": "94103-1234"}, {"zip": "941"}, {"zip": "abcde"}]
+    evidence = find_invalid_zip_evidence(rows, "zip")
+    assert evidence == [(2, "941"), (3, "abcde")]
+
+
+def test_detect_survey_weight_columns_matches_common_patterns():
+    columns = ["participant_id", "wt_final", "age", "wgt2011", "final_weight"]
+    assert detect_survey_weight_columns(columns) == ["wt_final", "wgt2011", "final_weight"]
+
+
+def test_detect_survey_weight_columns_no_false_positive():
+    columns = ["participant_id", "age", "weightless_flag_unrelated"]
+    # "weightless_flag_unrelated" doesn't match the (^|_)weight(_|$) boundary
+    assert detect_survey_weight_columns(columns) == []
+
+
+def test_find_fips_like_columns_matches_case_insensitively():
+    columns = ["participant_id", "county_fips", "FIPS_code", "age"]
+    assert find_fips_like_columns(columns) == ["county_fips", "FIPS_code"]
+
+
+def test_find_zip_like_columns_matches_case_insensitively():
+    columns = ["participant_id", "zip_code", "ZIPCODE", "age"]
+    assert find_zip_like_columns(columns) == ["zip_code", "ZIPCODE"]
