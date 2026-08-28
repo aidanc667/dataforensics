@@ -1,11 +1,14 @@
 from dataforensics.investigate import (
+    classify_column_types,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
     detect_conflicting_id_records,
+    detect_duplicate_entities,
     detect_duplicate_rows,
     detect_similar_categories,
     detect_survey_weight_columns,
     find_ambiguous_date_evidence,
+    find_birth_date_after_other_date_evidence,
     find_category_value_evidence,
     find_fips_like_columns,
     find_implausible_value_evidence,
@@ -13,6 +16,7 @@ from dataforensics.investigate import (
     find_invalid_zip_evidence,
     find_sentinel_evidence,
     find_zip_like_columns,
+    infer_semantic_role,
     match_clinical_range_rule,
 )
 
@@ -204,3 +208,100 @@ def test_find_fips_like_columns_matches_case_insensitively():
 def test_find_zip_like_columns_matches_case_insensitively():
     columns = ["participant_id", "zip_code", "ZIPCODE", "age"]
     assert find_zip_like_columns(columns) == ["zip_code", "ZIPCODE"]
+
+
+def test_infer_semantic_role_matches_date_of_birth_not_generic_date():
+    assert infer_semantic_role("dob", {"category": "free_text"})["role"] == "DATE_OF_BIRTH"
+    assert infer_semantic_role("date_of_birth", {"category": "free_text"})["role"] == "DATE_OF_BIRTH"
+    assert infer_semantic_role("birth_date", {"category": "free_text"})["role"] == "DATE_OF_BIRTH"
+
+
+def test_infer_semantic_role_matches_name_and_zip():
+    assert infer_semantic_role("full_name", {"category": "free_text"})["role"] == "NAME"
+    assert infer_semantic_role("zip_code", {"category": "categorical"})["role"] == "ZIP_OR_POSTAL"
+
+
+def test_classify_column_types_identifier_from_dictionary_category():
+    d = {"id": {"category": "id"}}
+    rows = [{"id": "1"}, {"id": "2"}]
+    assert classify_column_types(d, rows) == {"id": "identifier"}
+
+
+def test_classify_column_types_date_when_all_values_date_shaped():
+    d = {"visit_date": {"category": "free_text"}}
+    rows = [{"visit_date": "2024-01-15"}, {"visit_date": "2024-02-20"}]
+    assert classify_column_types(d, rows) == {"visit_date": "date"}
+
+
+def test_classify_column_types_numeric_when_all_values_float_parseable():
+    d = {"age": {"category": "free_text"}}
+    rows = [{"age": "30"}, {"age": "45"}]
+    assert classify_column_types(d, rows) == {"age": "numeric"}
+
+
+def test_classify_column_types_categorical_when_not_date_or_numeric():
+    d = {"sex": {"category": "categorical"}}
+    rows = [{"sex": "M"}, {"sex": "F"}]
+    assert classify_column_types(d, rows) == {"sex": "categorical"}
+
+
+def test_classify_column_types_mixed_uncertain_for_free_text_and_empty():
+    d = {"notes": {"category": "free_text"}, "empty": {"category": "free_text"}}
+    rows = [{"notes": "some text here", "empty": ""}, {"notes": "other text", "empty": ""}]
+    result = classify_column_types(d, rows)
+    assert result["notes"] == "mixed_uncertain"
+    assert result["empty"] == "mixed_uncertain"
+
+
+def test_find_birth_date_after_other_date_evidence_flags_impossible_ordering():
+    rows = [
+        {"dob": "2020-01-01", "visit_date": "2024-01-01"},  # fine
+        {"dob": "2024-06-01", "visit_date": "2024-01-01"},  # birth AFTER visit -- impossible
+    ]
+    evidence = find_birth_date_after_other_date_evidence(rows, "dob", "visit_date")
+    assert evidence == [(1, "2024-06-01", "2024-01-01")]
+
+
+def test_find_birth_date_after_other_date_evidence_skips_ambiguous_or_unparseable():
+    rows = [
+        {"dob": "13/01/2024", "visit_date": "2024-01-01"},  # dob not ISO -- skip
+        {"dob": "2024-01-01", "visit_date": "not a date"},  # visit not ISO -- skip
+    ]
+    assert find_birth_date_after_other_date_evidence(rows, "dob", "visit_date") == []
+
+
+def test_detect_duplicate_entities_finds_same_identity_different_ids():
+    rows = [
+        {"id": "1", "name": "Ada Lovelace", "dob": "1990-01-01", "zip": "94103"},
+        {"id": "2", "name": "Ada Lovelace", "dob": "1990-01-01", "zip": "94103"},
+        {"id": "3", "name": "Bob Smith", "dob": "1985-05-05", "zip": "10001"},
+    ]
+    dups = detect_duplicate_entities(rows, ["name", "dob", "zip"], "id")
+    assert len(dups) == 1
+    assert dups[0]["row_indices"] == [0, 1]
+    assert dups[0]["id_values"] == ["1", "2"]
+
+
+def test_detect_duplicate_entities_normalizes_case_and_whitespace():
+    rows = [
+        {"id": "1", "name": "Ada Lovelace"},
+        {"id": "2", "name": "  ada lovelace  "},
+    ]
+    dups = detect_duplicate_entities(rows, ["name"], "id")
+    assert len(dups) == 1
+
+
+def test_detect_duplicate_entities_no_flag_when_same_id():
+    rows = [
+        {"id": "1", "name": "Ada Lovelace"},
+        {"id": "1", "name": "Ada Lovelace"},
+    ]
+    assert detect_duplicate_entities(rows, ["name"], "id") == []
+
+
+def test_detect_duplicate_entities_skips_rows_with_incomplete_quasi_identifiers():
+    rows = [
+        {"id": "1", "name": "Ada Lovelace", "zip": ""},
+        {"id": "2", "name": "Ada Lovelace", "zip": ""},
+    ]
+    assert detect_duplicate_entities(rows, ["name", "zip"], "id") == []

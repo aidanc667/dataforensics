@@ -29,16 +29,19 @@ from dataforensics.investigate import (
     COMMON_SENTINEL_STRINGS,
     DATASET_PROFILES,
     check_referential_integrity,
+    classify_column_types,
     compare_fingerprints,
     compute_dataset_fingerprint,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
     detect_conflicting_id_records,
+    detect_duplicate_entities,
     detect_duplicate_rows,
     detect_similar_categories,
     detect_survey_weight_columns,
     discover_shared_key_columns,
     find_ambiguous_date_evidence,
+    find_birth_date_after_other_date_evidence,
     find_category_value_evidence,
     find_fips_like_columns,
     find_implausible_value_evidence,
@@ -232,21 +235,25 @@ def _evidence_panel(
     *,
     rule: str,
     lines: list[str],
-    interpretation: str,
+    known: str,
+    not_known: str,
     recommended_action: str,
     max_shown: int = 10,
 ) -> None:
     """Render a "Why was this flagged?" expander: the specific rule that
-    fired, real evidence rows (never just a count), a plain-language
-    interpretation, the recommended next step, and an explicit statement
-    that nothing was changed automatically. This is the "evidence, not
-    blind fixes" design principle applied at the UI level, not just the
-    underlying detection logic -- every finding already carries real
-    evidence internally (row indices, actual values); this makes that
-    evidence visible and traceable instead of collapsing it into a count.
-    "row N" is the Nth data row (1-indexed, not counting the header),
-    since no primary key has necessarily been chosen yet at this point in
-    the flow (that happens in Step 3, after every finding here is shown).
+    fired, real evidence rows (never just a count), an explicit split
+    between what the system actually knows and what it does NOT know
+    (the honest boundary of the detection, not a confident-sounding
+    guess dressed up as a conclusion), the recommended next step, and a
+    statement that nothing was changed automatically. This is the
+    "evidence, not blind fixes" design principle applied at the UI
+    level, not just the underlying detection logic -- every finding
+    already carries real evidence internally (row indices, actual
+    values); this makes that evidence visible and traceable instead of
+    collapsing it into a count. "row N" is the Nth data row (1-indexed,
+    not counting the header), since no primary key has necessarily been
+    chosen yet at this point in the flow (that happens in Step 3, after
+    every finding here is shown).
     """
     with st.expander("Why was this flagged?"):
         st.markdown(f"**Rule:**  \n{_esc(rule)}")
@@ -258,9 +265,61 @@ def _evidence_panel(
         )
         if len(lines) > max_shown:
             st.caption(f"...and {len(lines) - max_shown} more row(s) not shown.")
-        st.markdown(f"**Interpretation:**  \n{_esc(interpretation)}")
+        st.markdown(f"**What the system knows:**  \n{_esc(known)}")
+        st.markdown(f"**What it does NOT know:**  \n{_esc(not_known)}")
         st.markdown(f"**Recommended action:**  \n{_esc(recommended_action)}")
         st.markdown("**Automatic modification:**  \nNONE — only applied if you approve it above and click *Apply approved changes*.")
+
+
+def _format_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("bytes", "KB", "MB"):
+        if size < 1024 or unit == "MB":
+            return f"{int(size)} {unit}" if unit == "bytes" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _dataset_narrative_lines(
+    *,
+    row_count: int,
+    column_types: dict[str, str],
+    missingness_column_count: int,
+    inconsistent_category_column_count: int,
+    duplicate_row_count: int,
+    unusual_distribution_column_count: int,
+) -> list[str]:
+    """Plain-English sentences summarizing what was actually found in
+    this dataset -- "help me understand what I have," not just a table
+    of numbers. Every sentence states a literal, already-computed fact;
+    a zero count for a given kind of finding simply omits that sentence
+    rather than saying "0 columns have X," which reads as noise rather
+    than information.
+    """
+    type_counts = Counter(column_types.values())
+    lines = [f"This dataset contains {row_count:,} record(s) and {len(column_types)} variable(s)."]
+    if type_counts.get("categorical"):
+        lines.append(f"{type_counts['categorical']} column(s) appear categorical.")
+    if type_counts.get("numeric"):
+        lines.append(f"{type_counts['numeric']} column(s) are numeric/continuous measurements.")
+    if type_counts.get("identifier"):
+        lines.append(f"{type_counts['identifier']} column(s) appear to be identifiers.")
+    if type_counts.get("date"):
+        lines.append(f"{type_counts['date']} column(s) contain dates.")
+    if type_counts.get("mixed_uncertain"):
+        lines.append(f"{type_counts['mixed_uncertain']} column(s) have a mixed or uncertain type.")
+    if missingness_column_count:
+        lines.append(f"{missingness_column_count} column(s) have substantial missingness.")
+    if inconsistent_category_column_count:
+        lines.append(f"{inconsistent_category_column_count} column(s) contain potentially inconsistent categorical codes.")
+    if duplicate_row_count:
+        lines.append(
+            f"{duplicate_row_count} record(s) may represent duplicates, although these could be "
+            "legitimate repeated records."
+        )
+    if unusual_distribution_column_count:
+        lines.append(f"{unusual_distribution_column_count} column(s) contain unusual distributions that warrant review.")
+    return lines
 
 
 def _write_temp(name: str, content: bytes) -> Path:
@@ -405,6 +464,13 @@ with tab_analyze:
     rows = read_rows(data_path, sheet=sheet_choice)
     columns = list(dictionary.keys())
     id_like_defaults = [c for c, f in dictionary.items() if f.get("category") == "id"]
+    column_types = classify_column_types(dictionary, rows)
+    # Computed once, shared by the "Suggested variable roles" expander
+    # further down AND the quasi-identifier / birth-date cross-column
+    # checks below -- both need to know which columns look like a name,
+    # date of birth, ZIP, etc., and re-deriving it twice risked exactly
+    # the kind of drift this app has hit before.
+    role_by_column = {col: infer_semantic_role(col, dictionary[col]) for col in columns}
 
     ragged_row_count = sum(1 for r in rows if "" in r)
     if ragged_row_count and raw_format == "delimited":
@@ -439,7 +505,7 @@ with tab_analyze:
     sentinel_columns = [c for c in columns if dictionary[c].get("category") != "id"]
     sentinels = detect_candidate_sentinels(rows, sentinel_columns)
     ambiguous_dates = detect_ambiguous_date_columns(rows, columns)
-    # Gated on "not id" only, NOT on dictionary.py's "categorical"
+    # Gated on column_types, not on dictionary.py's "categorical"
     # classification. A column tips into "free_text" once its unique
     # count exceeds cardinality_cap() -- which real messy data can do
     # for a totally mundane reason: a handful of whitespace/casing
@@ -450,11 +516,19 @@ with tab_analyze:
     # noise that caused the reclassification in the first place.
     # detect_similar_categories already has its own, more permissive
     # cardinality ceiling (_MAX_CARDINALITY_FOR_FUZZY_MATCH) and returns
-    # [] past it, so nothing extra is needed here to bound the cost.
+    # [] past it, so nothing extra is needed to bound the cost.
+    #
+    # "identifier", "date", and "numeric" columns are excluded outright,
+    # not just "id" -- rapidfuzz's character-overlap similarity produces
+    # real false positives on those shapes (e.g. "2024-01-05" and
+    # "2024-01-15" are 85%+ similar as STRINGS despite being unrelated
+    # dates; "10" and "100" likewise for numeric-coded values). Fuzzy
+    # spelling-variant detection is only meaningful for genuinely
+    # free-text/categorical values.
     category_clusters = {
         col: detect_similar_categories([row.get(col, "") for row in rows])
         for col in columns
-        if dictionary[col].get("category") != "id"
+        if column_types.get(col) not in ("identifier", "date", "numeric")
     }
     category_clusters = {col: c for col, c in category_clusters.items() if c}
 
@@ -518,47 +592,143 @@ with tab_analyze:
     if "survey_weight_columns" in profile_checks:
         survey_weight_columns = detect_survey_weight_columns(columns)
 
-    st.subheader("Data dictionary")
-    st.dataframe([{"column": c, **f} for c, f in dictionary.items()], use_container_width=True)
+    # --- Cross-column reasoning: relationships BETWEEN columns, not just
+    # one column in isolation. Always on (not gated behind a dataset
+    # profile) -- both checks only fire when the relevant column roles
+    # are actually present, so there's no cost on a dataset without them. ---
+    birth_date_columns = [col for col, role in role_by_column.items() if role and role["role"] == "DATE_OF_BIRTH"]
+    other_date_columns = [col for col, role in role_by_column.items() if role and role["role"] == "DATE"]
+    birth_date_findings: dict[tuple[str, str], list] = {}
+    for birth_col in birth_date_columns:
+        for other_col in other_date_columns:
+            evidence = find_birth_date_after_other_date_evidence(rows, birth_col, other_col)
+            if evidence:
+                birth_date_findings[(birth_col, other_col)] = evidence
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Columns", len(columns))
-    m2.metric("Rows", len(rows))
-    m3.metric("Duplicate rows", len(dup_rows))
-    m4.metric("Candidate sentinels", sum(len(v) for v in sentinels.values()))
-    m5.metric("Category clusters", sum(len(v) for v in category_clusters.values()))
+    _QUASI_IDENTIFIER_ROLES = {"NAME", "DATE_OF_BIRTH", "SEX_OR_GENDER"}
+    quasi_identifier_columns = [
+        col for col, role in role_by_column.items() if role and role["role"] in _QUASI_IDENTIFIER_ROLES
+    ]
+    # ZIP specifically bypasses infer_semantic_role and uses the same
+    # dedicated name-matcher the Geographic profile's format check uses --
+    # a ZIP code column is very commonly classified "id" by dictionary.py
+    # (a short, structured, near-unique-looking code), and
+    # infer_semantic_role deliberately suppresses ALL role suggestions for
+    # an "id"-classified column. That's the right call for a role that's
+    # redundant with "id" -- but "this is a ZIP code" is additional,
+    # non-redundant information dictionary.py's "id" label doesn't carry,
+    # and quasi-identifier matching needs it.
+    quasi_identifier_columns += [c for c in find_zip_like_columns(columns) if c not in quasi_identifier_columns]
+    duplicate_entities: list[dict] = []
+    # Require 2+ matched roles -- a single weak signal (e.g. name alone)
+    # isn't enough evidence to suggest two IDs might be the same entity.
+    if len(quasi_identifier_columns) >= 2 and id_like_defaults:
+        duplicate_entities = detect_duplicate_entities(rows, quasi_identifier_columns, id_like_defaults[0])
 
-    # --- Findings summary dashboard ---
     outlier_cols_preview = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
     top_code_cols_preview = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
-    n_structural = (1 if dup_rows else 0)
-    n_quality = len(outlier_cols_preview) + len(top_code_cols_preview)
-    n_metadata = sum(len(v) for v in sentinels.values()) + len(ambiguous_dates)
-    n_harmonization = sum(len(v) for v in category_clusters.values())
 
+    # ================================================================== #
+    # Dataset Investigation -- "help me understand what I have," not just
+    # "here's a table of numbers." Everything below is derived from
+    # findings already computed above; this section exists purely to
+    # present them as an investigation summary a human can read in one
+    # pass, before going anywhere near the detailed per-finding review.
+    # ================================================================== #
+    st.markdown('<div class="dataforensics-bucket-header">🔎 Dataset investigation</div>', unsafe_allow_html=True)
+
+    st.markdown("**What did I receive?**")
+    data_size = len(st.session_state["dataforensics_data_bytes"])
     st.markdown(
-        f"""
-        <div style="display:flex; gap:0.6rem; margin: 0.6rem 0 1.2rem 0;">
-          <div class="dataforensics-card" style="flex:1; border-left:4px solid #DC2626;">
-            <div style="font-size:1.4rem; font-weight:700;">{n_structural}</div>
-            <div class="dataforensics-card-evidence">🔴 structural issue(s)</div>
-          </div>
-          <div class="dataforensics-card" style="flex:1; border-left:4px solid #D97706;">
-            <div style="font-size:1.4rem; font-weight:700;">{n_quality}</div>
-            <div class="dataforensics-card-evidence">🟠 quality issue(s)</div>
-          </div>
-          <div class="dataforensics-card" style="flex:1; border-left:4px solid #CA8A04;">
-            <div style="font-size:1.4rem; font-weight:700;">{n_metadata}</div>
-            <div class="dataforensics-card-evidence">🟡 metadata inconsistency/ies</div>
-          </div>
-          <div class="dataforensics-card" style="flex:1; border-left:4px solid #2563EB;">
-            <div style="font-size:1.4rem; font-weight:700;">{n_harmonization}</div>
-            <div class="dataforensics-card-evidence">🔵 harmonization opportunity/ies</div>
-          </div>
-        </div>
-        """,
+        f'<div class="dataforensics-card" style="border-left:4px solid #4F46E5;">'
+        f'<div style="font-size:1.3rem; font-weight:700;">{len(rows):,} rows · {len(columns)} columns · {_format_bytes(data_size)}</div>'
+        f"</div>",
         unsafe_allow_html=True,
     )
+    missingness_columns = [c for c, f in dictionary.items() if f.get("non_null_pct", 100) < 90]
+    unusual_distribution_columns = set(outlier_cols_preview) | set(top_code_cols_preview)
+    for line in _dataset_narrative_lines(
+        row_count=len(rows),
+        column_types=column_types,
+        missingness_column_count=len(missingness_columns),
+        inconsistent_category_column_count=len(category_clusters),
+        duplicate_row_count=len(dup_rows),
+        unusual_distribution_column_count=len(unusual_distribution_columns),
+    ):
+        st.markdown(f"- {line}")
+
+    st.markdown("**Column types**")
+    type_counts = Counter(column_types.values())
+    ct1, ct2, ct3, ct4, ct5 = st.columns(5)
+    ct1.metric("Numeric", type_counts.get("numeric", 0))
+    ct2.metric("Categorical", type_counts.get("categorical", 0))
+    ct3.metric("Dates", type_counts.get("date", 0))
+    ct4.metric("Identifiers", type_counts.get("identifier", 0))
+    ct5.metric("Mixed / uncertain", type_counts.get("mixed_uncertain", 0))
+
+    # "What should I investigate?" -- every column touched by a finding,
+    # bucketed into a priority tier. A structural issue (duplicate rows,
+    # conflicting records, an impossible date ordering, a same-entity
+    # suspicion) outranks a review-worthy one (a sentinel, an outlier, an
+    # inconsistent spelling) in how urgently it deserves attention.
+    columns_with_findings: set[str] = set()
+    columns_with_findings |= set(sentinels) | set(ambiguous_dates) | set(category_clusters)
+    columns_with_findings |= set(outlier_cols_preview) | set(top_code_cols_preview)
+    columns_with_findings |= set(clinical_range_findings) | set(conflicting_id_findings)
+    columns_with_findings |= set(invalid_fips_findings) | set(invalid_zip_findings) | set(survey_weight_columns)
+    if duplicate_entities:
+        columns_with_findings |= set(quasi_identifier_columns)
+    for birth_col, other_col in birth_date_findings:
+        columns_with_findings |= {birth_col, other_col}
+
+    n_high_priority = (
+        (1 if dup_rows else 0)
+        + len(conflicting_id_findings)
+        + (1 if duplicate_entities else 0)
+        + len(birth_date_findings)
+    )
+    n_worth_reviewing = (
+        sum(len(v) for v in sentinels.values())
+        + len(ambiguous_dates)
+        + sum(len(v) for v in category_clusters.values())
+        + len(outlier_cols_preview)
+        + len(top_code_cols_preview)
+        + len(clinical_range_findings)
+        + len(invalid_fips_findings)
+        + len(invalid_zip_findings)
+        + len(survey_weight_columns)
+    )
+    n_clean_columns = len(columns) - len(columns_with_findings)
+
+    st.markdown("**What should I investigate?**")
+    ti1, ti2, ti3 = st.columns(3)
+    ti1.markdown(
+        f'<div class="dataforensics-card" style="border-left:4px solid #DC2626;">'
+        f'<div style="font-size:1.4rem; font-weight:700;">{n_high_priority}</div>'
+        f'<div class="dataforensics-card-evidence">🔴 high-priority finding(s)</div></div>',
+        unsafe_allow_html=True,
+    )
+    ti2.markdown(
+        f'<div class="dataforensics-card" style="border-left:4px solid #D97706;">'
+        f'<div style="font-size:1.4rem; font-weight:700;">{n_worth_reviewing}</div>'
+        f'<div class="dataforensics-card-evidence">🟠 thing(s) worth reviewing</div></div>',
+        unsafe_allow_html=True,
+    )
+    ti3.markdown(
+        f'<div class="dataforensics-card" style="border-left:4px solid #16A34A;">'
+        f'<div style="font-size:1.4rem; font-weight:700;">{n_clean_columns}</div>'
+        f'<div class="dataforensics-card-evidence">🟢 column(s) with no detected issues</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("**What might I change?**")
+    wc1, wc2, wc3 = st.columns(3)
+    wc1.metric("Possible standardizations", sum(len(v) for v in category_clusters.values()))
+    wc2.metric("Possible duplicate row(s)", len(dup_rows))
+    wc3.metric("Automatic deletions", 0, help="DataForensics never deletes rows or columns automatically — ever.")
+
+    with st.expander("📋 Full data dictionary (every column, every computed field)"):
+        st.dataframe([{"column": c, **f} for c, f in dictionary.items()], use_container_width=True)
 
     # --- Data quality scorecard: a deterministic summary of the findings
     # above, never a judgment about whether the dataset is fit for any
@@ -625,10 +795,7 @@ with tab_analyze:
     )
 
     # --- Suggested variable roles (informational only — never drives any transformation) ---
-    role_suggestions = {
-        col: role for col in columns
-        if (role := infer_semantic_role(col, dictionary[col])) is not None
-    }
+    role_suggestions = {col: role for col, role in role_by_column.items() if role is not None}
     if role_suggestions:
         with st.expander(f"🧭 Suggested variable roles ({len(role_suggestions)}) — informational only"):
             st.caption("Based on column naming conventions only. Never applied to anything — for your reference.")
@@ -727,7 +894,8 @@ with tab_analyze:
                         + ", ".join(f'"{s}"' for s in sorted(COMMON_SENTINEL_STRINGS))
                     ),
                     lines=_evidence_lines(col, [(i, val) for i in find_sentinel_evidence(rows, col, val)]),
-                    interpretation=f'"{val}" looks like a coded missing-value convention rather than a genuine {col} value.',
+                    known=f'"{val}" case-insensitively matches a common missing-value convention used across research/survey data.',
+                    not_known=f'Whether "{val}" is actually being used as a missing-value code here, or is a genuine {col} value that happens to match the pattern.',
                     recommended_action='Map to an explicit missing-value label above, or leave the checkbox unchecked if this is a real value.',
                 )
                 if checked:
@@ -755,7 +923,8 @@ with tab_analyze:
                     "and is never parsed automatically."
                 ),
                 lines=_evidence_lines(col, find_ambiguous_date_evidence(rows, col)),
-                interpretation="Whether this is Month/Day or Day/Month cannot be determined from the value alone.",
+                known="This value is shaped like a date, with month and day both being valid numbers (so neither order can be ruled out on shape alone).",
+                not_known="Whether this is Month/Day or Day/Month — that requires knowing the source system's date convention, which nothing in the file states.",
                 recommended_action="Declare the correct format above, or leave the checkbox unchecked if you're not sure.",
             )
             if checked:
@@ -787,7 +956,12 @@ with tab_analyze:
                 _evidence_panel(
                     rule=f"Values in this cluster are {confidence_basis}, suggesting the same real-world category written inconsistently.",
                     lines=_evidence_lines(col, cluster_evidence),
-                    interpretation=f'These values likely all mean "{cluster["suggested_canonical"]}".',
+                    known=f"These values are {confidence_basis}.",
+                    not_known=(
+                        f'Whether they all represent the same real-world category as "{cluster["suggested_canonical"]}", '
+                        "or whether one of these variants was intentionally distinct — that needs domain context "
+                        "this system doesn't have."
+                    ),
                     recommended_action="Approve the merge above to standardize onto the suggested canonical value, or leave unchecked if these are genuinely different categories.",
                 )
                 if checked:
@@ -802,7 +976,8 @@ with tab_analyze:
         clinical_range_findings or conflicting_id_findings or invalid_fips_findings
         or invalid_zip_findings or survey_weight_columns
     )
-    if outlier_cols or top_code_cols or dup_rows or any_domain_findings:
+    any_cross_column_findings = bool(birth_date_findings or duplicate_entities)
+    if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings:
         st.markdown('<div class="dataforensics-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
         st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
         for c, f in outlier_cols.items():
@@ -815,7 +990,8 @@ with tab_analyze:
             _evidence_panel(
                 rule="IQR method: flagged if the value falls below Q1 − 1.5×(Q3−Q1) or above Q3 + 1.5×(Q3−Q1), computed over this column's own non-null values.",
                 lines=_evidence_lines(c, find_outlier_evidence(rows, c)),
-                interpretation="This value is statistically unusual relative to the rest of this column — not necessarily wrong.",
+                known="This value falls outside the IQR-based statistical range of this column's other values.",
+                not_known="Whether this is a data-entry error, a genuine rare observation, or the correct value for a legitimately unusual case.",
                 recommended_action="Review manually. DataForensics never auto-corrects, caps, or removes outliers.",
             )
         for c, f in top_code_cols.items():
@@ -833,7 +1009,8 @@ with tab_analyze:
                     "natural maximum."
                 ),
                 lines=_evidence_lines(c, find_top_code_evidence(rows, c, top_value)),
-                interpretation="Values at this ceiling may represent \"this value or higher,\" not the literal number.",
+                known="A disproportionate share of this column's non-null values sit exactly at its observed maximum.",
+                not_known="Whether this ceiling reflects a genuine natural maximum, or a survey/export cap where the true value could actually be higher.",
                 recommended_action="Review manually. DataForensics never assumes or corrects a top-coding ceiling.",
             )
         if dup_rows:
@@ -857,7 +1034,8 @@ with tab_analyze:
                 )
                 if len(dup_rows) > 10:
                     st.caption(f"...and {len(dup_rows) - 10} more row(s) not shown.")
-                st.markdown("**Interpretation:**  \nCould be a genuine data-entry duplicate, or a legitimate repeated record (e.g. a second identical visit).")
+                st.markdown("**What the system knows:**  \nThese two rows are byte-for-byte identical across every column.")
+                st.markdown("**What it does NOT know:**  \nWhether this is a genuine data-entry duplicate, or a legitimate repeated record (e.g. a second identical visit) that just happens to match on every field.")
                 st.markdown("**Recommended action:**  \nReview manually. DataForensics never auto-deletes rows.")
                 st.markdown("**Automatic modification:**  \nNONE.")
 
@@ -873,7 +1051,8 @@ with tab_analyze:
             _evidence_panel(
                 rule=f'{col} matches the "{rule["label"]}" naming convention; plausible range is {rule["min"]}–{rule["max"]}{unit_suffix} (Clinical / Research dataset profile).',
                 lines=_evidence_lines(col, finding["evidence"]),
-                interpretation=f"These values fall outside the configured plausible {rule['label']} range.",
+                known=f"These values fall outside the configured plausible {rule['label']} range ({rule['min']}–{rule['max']}{unit_suffix}).",
+                not_known="Whether this is a data-entry error, a unit mismatch (e.g. months recorded where years were expected), or a genuinely unusual but real value.",
                 recommended_action="Human review — DataForensics never auto-corrects or removes an implausible value.",
             )
 
@@ -904,8 +1083,13 @@ with tab_analyze:
                 if len(conflicts) > 10:
                     st.caption(f"...and {len(conflicts) - 10} more id value(s) not shown.")
                 st.markdown(
-                    "**Interpretation:**  \nCould be a genuine data-entry conflict (the same participant "
-                    "recorded inconsistently), or a legitimate repeated visit with a real field change."
+                    f"**What the system knows:**  \nThe same {_esc(col)} value appears on 2+ rows where at "
+                    "least one other field differs between them."
+                )
+                st.markdown(
+                    "**What it does NOT know:**  \nWhether this is a genuine data-entry conflict (the same "
+                    "participant recorded inconsistently), or a legitimate repeated visit with a real field "
+                    "change — and if it IS a conflict, which row holds the correct value."
                 )
                 st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which row is correct.")
                 st.markdown("**Automatic modification:**  \nNONE.")
@@ -923,7 +1107,8 @@ with tab_analyze:
                     "is a 2-digit (state) or 5-digit (state+county) numeric string, e.g. \"06\" or \"06037\"."
                 ),
                 lines=_evidence_lines(col, evidence),
-                interpretation="These values don't match the standard US Census FIPS code shape.",
+                known="These values don't match the standard 2- or 5-digit numeric US Census FIPS code shape.",
+                not_known="Whether this is a formatting issue (e.g. a stripped leading zero), a non-US or non-FIPS geographic code, or genuinely invalid data.",
                 recommended_action="Review manually — check for truncated leading zeros or a non-FIPS value.",
             )
 
@@ -940,7 +1125,8 @@ with tab_analyze:
                     "is 5 digits, or 5 digits + hyphen + 4 digits (ZIP+4)."
                 ),
                 lines=_evidence_lines(col, evidence),
-                interpretation="These values don't match the standard US ZIP / ZIP+4 shape.",
+                known="These values don't match the standard 5-digit ZIP or ZIP+4 shape.",
+                not_known="Whether this is a formatting issue (e.g. a stripped leading zero), a non-US postal code, or genuinely invalid data.",
                 recommended_action="Review manually — check for a truncated leading zero or a non-ZIP value.",
             )
 
@@ -956,12 +1142,90 @@ with tab_analyze:
                     "**Rule:**  \nColumn name matches a common survey/sampling weight naming convention "
                     "(e.g. \"wt\", \"wgt\", \"weight\") (Survey dataset profile)."
                 )
+                st.markdown("**What the system knows:**  \nThis column's name matches a common survey/sampling weight naming convention.")
                 st.markdown(
-                    "**Interpretation:**  \nA sampling weight is a study-design concept, not an ordinary "
-                    "numeric variable — treating it as one (e.g. flagging it for outliers, averaging it "
-                    "directly) usually produces a meaningless result."
+                    "**What it does NOT know:**  \nWhether this column IS actually a sampling weight — that's a "
+                    "study-design fact only the study documentation can confirm. If it is, treating it as an "
+                    "ordinary numeric variable (flagging it for outliers, averaging it directly) usually "
+                    "produces a meaningless result."
                 )
                 st.markdown("**Recommended action:**  \nConfirm this is really a sampling weight before analyzing it as a regular column.")
+                st.markdown("**Automatic modification:**  \nNONE.")
+
+        for (birth_col, other_col), evidence in birth_date_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Temporal inconsistency</span>'
+                f'<div class="dataforensics-card-title">{len(evidence)} row(s) where {_esc(birth_col)} is AFTER {_esc(other_col)}</div>'
+                f'<div class="dataforensics-card-evidence">a birth date cannot come after another event in the same record</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    f"**Rule:**  \n{_esc(birth_col)} matches the \"date of birth\" naming convention and "
+                    f"{_esc(other_col)} matches the generic \"date\" naming convention; a birth date can never "
+                    "be later than another recorded date for the same person."
+                )
+                st.markdown("**Evidence:**")
+                birth_lines = [
+                    f"row {i + 1:,} → {birth_col} = {b} is after {other_col} = {o}" for i, b, o in evidence[:10]
+                ]
+                st.markdown(
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in birth_lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if len(evidence) > 10:
+                    st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
+                st.markdown(f"**What the system knows:**  \nIn these rows, {_esc(birth_col)}'s date value is chronologically after {_esc(other_col)}'s.")
+                st.markdown(
+                    "**What it does NOT know:**  \nWhich of the two dates is wrong (or whether the columns "
+                    "were mislabeled/swapped) — only that both cannot be correct as recorded."
+                )
+                st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which date is correct.")
+                st.markdown("**Automatic modification:**  \nNONE.")
+
+        if duplicate_entities:
+            total_flagged_rows = sum(len(d["row_indices"]) for d in duplicate_entities)
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Potential duplicate entity</span>'
+                f'<div class="dataforensics-card-title">{len(duplicate_entities)} group(s), {total_flagged_rows} row(s) — same {", ".join(_esc(c) for c in quasi_identifier_columns)}, different {_esc(id_like_defaults[0])}</div>'
+                f'<div class="dataforensics-card-evidence">the same apparent real-world entity may have been assigned more than one ID — DataForensics does not merge these</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    f"**Rule:**  \n2+ rows share the same value (case/whitespace-normalized) across every one of "
+                    f"{', '.join(_esc(c) for c in quasi_identifier_columns)}, but have different "
+                    f"{_esc(id_like_defaults[0])} values."
+                )
+                st.markdown("**Evidence:**")
+                pii_cols = [c for c in quasi_identifier_columns if is_pii_like_column(c)]
+                entity_lines = []
+                for d in duplicate_entities[:10]:
+                    sample_row = rows[d["row_indices"][0]]
+                    key_desc = ", ".join(
+                        f"{c}={_PII_EVIDENCE_MASK if c in pii_cols else sample_row.get(c)}" for c in quasi_identifier_columns
+                    )
+                    entity_lines.append(
+                        f"{key_desc} → {id_like_defaults[0]} values {', '.join(d['id_values'])} "
+                        f"(rows {', '.join(str(i + 1) for i in d['row_indices'])})"
+                    )
+                st.markdown(
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in entity_lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if len(duplicate_entities) > 10:
+                    st.caption(f"...and {len(duplicate_entities) - 10} more group(s) not shown.")
+                st.markdown(
+                    f"**What the system knows:**  \nThese rows match on every one of "
+                    f"{', '.join(_esc(c) for c in quasi_identifier_columns)}, but carry different "
+                    f"{_esc(id_like_defaults[0])} values."
+                )
+                st.markdown(
+                    "**What it does NOT know:**  \nWhether this is genuinely the same real-world entity "
+                    "recorded under two IDs (e.g. a re-registration), a coincidental match, or two different "
+                    "people who happen to share these attributes."
+                )
+                st.markdown("**Recommended action:**  \nHuman review — DataForensics never merges records.")
                 st.markdown("**Automatic modification:**  \nNONE.")
 
     rules = {

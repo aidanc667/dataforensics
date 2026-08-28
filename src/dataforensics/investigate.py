@@ -22,7 +22,7 @@ import json
 import re
 from itertools import combinations
 
-from dataforensics.validation import is_ambiguous_date
+from dataforensics.validation import is_ambiguous_date, is_date_like, is_iso_date
 
 COMMON_SENTINEL_STRINGS = {
     "-99", "-9", "99", "999", "9999",
@@ -191,11 +191,18 @@ def detect_similar_categories(values: list[str], threshold: int = 85) -> list[di
 _ROLE_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
     ("AGE", re.compile(r"(^|_)age(_|$)", re.IGNORECASE)),
     ("SEX_OR_GENDER", re.compile(r"(^|_)(sex|gender)(_|$)", re.IGNORECASE)),
-    ("DATE", re.compile(r"(^|_)(date|dt|visit_?date|dob)(_|$)", re.IGNORECASE)),
+    # Checked before the generic DATE pattern below, so a birth-date-shaped
+    # column name is never left to fall through to the generic role -- the
+    # distinction matters for find_birth_date_after_other_date_evidence,
+    # which needs to know specifically which date column is the birth date.
+    ("DATE_OF_BIRTH", re.compile(r"(^|_)(dob|date_?of_?birth|birth_?date|birthdate)(_|$)", re.IGNORECASE)),
+    ("DATE", re.compile(r"(^|_)(date|dt|visit_?date)(_|$)", re.IGNORECASE)),
     ("WEIGHT", re.compile(r"(^|_)weight(_kg|_lb|_lbs)?(_|$)", re.IGNORECASE)),
     ("HEIGHT", re.compile(r"(^|_)height(_cm|_in)?(_|$)", re.IGNORECASE)),
     ("INCOME", re.compile(r"(^|_)(income|salary|earnings)(_|$)", re.IGNORECASE)),
     ("RACE_OR_ETHNICITY", re.compile(r"(^|_)(race|ethnicity)(_|$)", re.IGNORECASE)),
+    ("NAME", re.compile(r"(^|_)(name|full_?name|patient_?name|participant_?name)(_|$)", re.IGNORECASE)),
+    ("ZIP_OR_POSTAL", re.compile(r"(^|_)(zip|zip_?code|postal_?code)(_|$)", re.IGNORECASE)),
 ]
 
 
@@ -224,6 +231,116 @@ def infer_semantic_role(column_name: str, dictionary_entry: dict) -> dict | None
                 confidence = "high"
             return {"role": role, "confidence": confidence, "evidence": evidence}
     return None
+
+
+def _is_numeric_value(value: str) -> bool:
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+
+def classify_column_types(dictionary: dict, rows: list[dict]) -> dict[str, str]:
+    """One of "identifier" / "numeric" / "date" / "categorical" /
+    "mixed_uncertain" per column -- a coarser, presentation-oriented
+    classification for a "what did I receive?" investigation overview.
+    This does NOT replace dictionary.py's own "category" field (id /
+    categorical / free_text), which every other check in this codebase
+    already depends on; it's a separate, additive read of the same data
+    for a different, simpler purpose.
+
+    Priority per column: identifier (dictionary.py already classified it
+    "id") > date (every non-null value is date-shaped) > numeric (every
+    non-null value is float-parseable) > categorical (dictionary.py's own
+    "categorical" classification) > mixed_uncertain (everything else,
+    including a column with no non-null values to classify from).
+    """
+    result: dict[str, str] = {}
+    for col, entry in dictionary.items():
+        if entry.get("category") == "id":
+            result[col] = "identifier"
+            continue
+        non_null = [str(row.get(col, "")).strip() for row in rows if row.get(col, "") != ""]
+        if not non_null:
+            result[col] = "mixed_uncertain"
+        elif all(is_date_like(v) for v in non_null):
+            result[col] = "date"
+        elif all(_is_numeric_value(v) for v in non_null):
+            result[col] = "numeric"
+        elif entry.get("category") == "categorical":
+            result[col] = "categorical"
+        else:
+            result[col] = "mixed_uncertain"
+    return result
+
+
+# --------------------------------------------------------------------- #
+# Cross-column reasoning -- checks that look at the RELATIONSHIP between
+# two or more columns in the same row, not just one column in isolation.
+# Still pure detection: never concludes a relationship IS a problem
+# (a birth date after a visit date is impossible; a shared identity
+# across two IDs merely deserves a look), and never merges or modifies
+# anything.
+# --------------------------------------------------------------------- #
+
+
+def find_birth_date_after_other_date_evidence(
+    rows: list[dict], birth_date_column: str, other_date_column: str
+) -> list[tuple[int, str, str]]:
+    """Real (row_index, birth_date_value, other_date_value) triples where
+    `birth_date_column`'s value is chronologically AFTER
+    `other_date_column`'s value in the same row -- not possible for the
+    same real-world person (nobody's birth date follows another event in
+    their own record).
+
+    Only compares values where BOTH are unambiguous ISO dates
+    (YYYY-MM-DD, via is_iso_date) -- an ambiguous (MM/DD vs DD/MM) or
+    otherwise unparseable value on either side is skipped rather than
+    guessed at, since comparing two non-ISO shapes as plain strings would
+    silently produce a meaningless ordering.
+    """
+    evidence = []
+    for i, row in enumerate(rows):
+        birth_raw = str(row.get(birth_date_column, "")).strip()
+        other_raw = str(row.get(other_date_column, "")).strip()
+        if not (is_iso_date(birth_raw) and is_iso_date(other_raw)):
+            continue
+        if birth_raw > other_raw:
+            evidence.append((i, birth_raw, other_raw))
+    return evidence
+
+
+def detect_duplicate_entities(rows: list[dict], quasi_identifier_columns: list[str], id_column: str) -> list[dict]:
+    """Groups of rows that share the same value (case/whitespace-
+    normalized) across EVERY column in `quasi_identifier_columns`, but
+    have 2+ DISTINCT values in `id_column` -- e.g. the same name, date of
+    birth, and ZIP code recorded under two different participant IDs.
+
+    Distinct from detect_conflicting_id_records (same ID, different
+    other fields): here the ID itself differs but everything else lines
+    up, suggesting the same real-world entity may have been assigned two
+    IDs. A row missing any one of the quasi-identifier values is skipped
+    entirely -- an incomplete tuple isn't meaningful evidence either way.
+    Never concludes these ARE the same entity, and never merges anything
+    -- only that a human should look.
+    """
+    groups: dict[tuple, list[int]] = {}
+    for i, row in enumerate(rows):
+        key_values = [row.get(c) for c in quasi_identifier_columns]
+        if any(v in (None, "") for v in key_values):
+            continue
+        key = tuple(str(v).strip().casefold() for v in key_values)
+        groups.setdefault(key, []).append(i)
+
+    duplicates = []
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        id_values = {rows[i].get(id_column) for i in indices}
+        if len(id_values) >= 2:
+            duplicates.append({"row_indices": indices, "id_values": sorted(str(v) for v in id_values)})
+    return duplicates
 
 
 # --------------------------------------------------------------------- #

@@ -20,6 +20,26 @@ def is_ambiguous_date(value: str) -> bool:
     return bool(_SLASH_DATE_PATTERN.match(value) or _DASH_DATE_PATTERN.match(value))
 
 
+def is_iso_date(value: str) -> bool:
+    """True if `value` is a YYYY-MM-DD date -- the one date shape safe to
+    compare lexicographically as a plain string without parsing, since
+    ISO 8601 date ordering matches string ordering exactly. Used by
+    cross-column temporal checks (e.g. "birth date after visit date")
+    that need a definite chronological ordering, not just "this looks
+    date-shaped.\""""
+    return bool(_ISO_DATE_PATTERN.match(value))
+
+
+def is_date_like(value: str) -> bool:
+    """True if `value` matches ANY date shape this codebase recognizes --
+    ISO (unambiguous) or slash-/dash-separated (ambiguous MM/DD vs
+    DD/MM). For coarse "is this a date column" classification only; see
+    is_iso_date for anything that needs an actual chronological
+    ordering, since a slash/dash value's month-vs-day order is unknown
+    here."""
+    return bool(_ISO_DATE_PATTERN.match(value) or _SLASH_DATE_PATTERN.match(value) or _DASH_DATE_PATTERN.match(value))
+
+
 def _row_key(row: dict, primary_key: list[str]) -> dict:
     # Known limitation: not masked even if a primary_key column is itself
     # PII-like (e.g. primary_key: [ssn]) — masking it would break the
