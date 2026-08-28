@@ -93,7 +93,15 @@ st.markdown(
         font-size: 1.4rem;
     }
     .dataforensics-hero h1 { font-size: 1.65rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
-    .dataforensics-tagline { color: #64748B; font-size: 0.95rem; margin: 0.35rem 0 1.6rem 0; max-width: 720px; }
+
+    .dataforensics-workflow {
+        font-family: "IBM Plex Mono", ui-monospace, monospace;
+        font-size: 1.08rem; font-weight: 600; letter-spacing: 0.01em;
+        color: #4338CA; margin: 0.55rem 0 0.7rem 0;
+    }
+    .dataforensics-workflow .arrow { color: #A5B4FC; font-weight: 400; margin: 0 0.35rem; }
+
+    .dataforensics-tagline { color: #64748B; font-size: 0.95rem; margin: 0 0 1.6rem 0; max-width: 760px; }
 
     .dataforensics-steps { display: flex; gap: 0.5rem; margin-bottom: 1.8rem; }
     .dataforensics-step {
@@ -143,11 +151,17 @@ st.markdown(
         <div class="dataforensics-hero-badge">🧬</div>
         <h1>DataForensics</h1>
     </div>
+    <div class="dataforensics-workflow">
+        Understand<span class="arrow">→</span>Investigate<span class="arrow">→</span>Decide<span class="arrow">→</span>Clean<span class="arrow">→</span>Verify<span class="arrow">→</span>Document
+    </div>
     <p class="dataforensics-tagline">
-        DataForensics gives a messy research export a rigorous first examination before anything changes.
-        It profiles every column, surfaces duplicate records, inconsistent categories, ambiguous dates,
-        and statistical outliers, and shows the evidence behind each finding instead of guessing. You
-        decide what to approve, and every change is permanently logged for a defensible audit trail.
+        DataForensics helps analysts investigate unfamiliar research data before trusting it for analysis.
+        It automatically profiles the dataset, identifies potential problems such as duplicates, missing
+        values, inconsistent categories, unusual values, and conflicting records, and shows the evidence
+        behind every finding. Instead of making assumptions or silently changing the data, DataForensics
+        puts the analyst in control: review the evidence, decide what should change, and approve each
+        modification. The tool then verifies the cleaned dataset and records every change, creating a
+        transparent trail from the original data to the final analysis-ready version.
     </p>
     """,
     unsafe_allow_html=True,
