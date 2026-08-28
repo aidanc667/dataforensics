@@ -30,6 +30,38 @@ def test_maximum_violation_is_warning_not_error():
     assert result["warnings"][0]["rule"] == "maximum"
 
 
+def test_nan_value_excluded_from_minimum_maximum_checks_like_any_non_numeric_value():
+    rows = [{"participant_id": "1", "age": "nan"}]
+    result = validate(rows, _RULES)
+    assert result["errors"] == []
+    assert result["warnings"] == []
+
+
+def test_nan_in_column_disables_outlier_suggestions_instead_of_corrupting_them():
+    # Regression test: Python's bare float("nan") does not raise, so a
+    # naive try/except-ValueError parse would have let "nan" stay in the
+    # numeric_values list passed to detect_outliers -- corrupting its
+    # sort-based min/max/quartile calculation (NaN's sort position is
+    # implementation-defined) and producing unreliable outlier
+    # suggestions for the WHOLE column, not just the NaN row. The column
+    # must instead be excluded from outlier detection entirely, the same
+    # "all or nothing" treatment any other non-numeric value already gets.
+    rules = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {},
+        "missing_values": {},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+    }
+    rows = [{"participant_id": str(i), "lab_value": "10"} for i in range(8)]
+    rows[7]["lab_value"] = "500"  # would be a genuine outlier if the column were numeric
+    rows[3]["lab_value"] = "nan"
+    result = validate(rows, rules)
+    outlier_suggestions = [s for s in result["suggestions"] if s["rule"] == "iqr_outlier"]
+    assert outlier_suggestions == []
+
+
 def test_plausible_extreme_value_is_not_flagged():
     rows = [{"participant_id": "1", "age": "95"}]
     result = validate(rows, _RULES)

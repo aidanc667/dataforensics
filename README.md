@@ -47,14 +47,35 @@ streamlit run app.py
 
 Two tabs:
 
-- **Analyze & Clean** — upload a CSV/TSV/JSON/Excel file (or click "Use bundled example"), and
-  it runs the full
-  Upload → Investigate → Review & Approve → Cleaned Dataset workflow: data dictionary, a
-  findings-severity dashboard, suggested variable roles, dataset fingerprinting (download today's
-  fingerprint, upload a prior one next time to see exactly what changed), duplicate-row/sentinel/
-  ambiguous-date/near-duplicate-category findings you approve individually, and — once you apply —
-  a full deliverable bundle: cleaned CSV, `provenance.json`, `validation_results.json`,
-  `data_dictionary.html`, `quality_report.html`, `audit_report.md`.
+- **Analyze & Clean** — upload a CSV/TSV/JSON/Excel file and it runs the full
+  Understand → Investigate → Decide → Clean → Verify → Document workflow:
+  - A **Dataset Investigation** overview — a plain-English read of what the file actually is
+    (structure: numeric/categorical/date/identifier variable counts) and a "Requires attention"
+    list with every finding itemized by type (never collapsed into one opaque count), each
+    expandable for real evidence inline.
+  - A **data quality score** (Completeness/Consistency/Validity/Uniqueness/Structural quality,
+    plus an overall score) computed from those same findings via a documented, non-linear formula
+    — shown with an explicit "does not mean good data" caveat, never a judgment about fitness for
+    any particular analysis.
+  - Every finding — duplicate rows, candidate missing-value sentinels, ambiguous dates,
+    inconsistent category spellings, statistical outliers, top-coding — expands into a "Why was
+    this flagged?" panel: the exact rule, real evidence rows, an explicit split between what the
+    system knows and what it does NOT know, a recommended action, and confirmation that nothing
+    was changed automatically.
+  - **Cross-column reasoning**: an impossible date ordering (a birth date after another recorded
+    date in the same row), and potential duplicate entities (the same name/DOB/ZIP/sex recorded
+    under two different ID values).
+  - Optional **dataset-type profiles** (Survey / Clinical & Research / Geographic) add a small set
+    of additional, still detection-only checks — plausible-range checks for age/height/weight/BMI,
+    conflicting-ID-record detection, FIPS/ZIP format validation, survey sampling-weight column
+    flags.
+  - Suggested variable roles and dataset fingerprinting (download today's fingerprint, upload a
+    prior one next time to see exactly what changed) round out the investigation.
+  - Approve findings individually, then apply — DataForensics verifies row/column counts and
+    primary-key uniqueness were preserved and that every unmodified column is provably
+    byte-identical before offering a full deliverable bundle: cleaned CSV, `provenance.json`,
+    `validation_results.json`, `data_dictionary.html`, `quality_report.html`, `audit_report.md`,
+    `audit_report.html`.
 - **Multi-File Relationships** — upload 2+ files from the same study; it suggests shared key
   columns by name *and* real value overlap, and checks referential integrity across a pair you
   pick. Discovery only — nothing is ever joined or merged.

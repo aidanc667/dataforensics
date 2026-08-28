@@ -71,3 +71,28 @@ def test_review_and_approve_apply_flow_runs_without_exception():
     apply_button.click().run(timeout=30)
     assert not at.exception
     assert any("Done" in s.value for s in at.success)
+
+
+def test_birth_date_after_other_date_evidence_masks_pii_like_columns():
+    # Regression test: the birth-date-after-other-date cross-column
+    # finding's evidence panel showed the raw date-of-birth value
+    # unmasked, unlike every other evidence panel in this app -- a real
+    # gap in the PII-masking discipline every other finding type already
+    # follows. "dob" matches is_pii_like_column's birth-date pattern.
+    csv_bytes = (
+        b"participant_id,dob,visit_date\n"
+        b"1,2020-01-01,2024-01-01\n"
+        b"2,2024-06-01,2024-01-01\n"  # dob after visit_date -- triggers the finding
+    )
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["dataforensics_data_bytes"] = csv_bytes
+    at.session_state["dataforensics_data_name"] = "dob_test.csv"
+    at.run(timeout=30)
+    assert not at.exception
+
+    evidence_lines = [md.value for md in at.markdown if "is after" in md.value and "row 2" in md.value]
+    assert len(evidence_lines) == 1
+    assert "2024-06-01" not in evidence_lines[0]
+    assert "[masked: potential identifier pattern detected]" in evidence_lines[0]
+    # visit_date is not PII-like -- its value must still show through.
+    assert "2024-01-01" in evidence_lines[0]

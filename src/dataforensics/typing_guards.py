@@ -1,3 +1,4 @@
+import math
 import re
 
 _ID_LIKE_PATTERN = re.compile(
@@ -72,3 +73,29 @@ def preserves_leading_zero(values: list[str]) -> bool:
 
 def classify_sentinel(value: str, sentinel_map: dict) -> str | None:
     return sentinel_map.get(str(value))
+
+
+def parse_finite_float(value) -> float | None:
+    """Parse `value` as a float, returning None if it doesn't parse OR
+    parses to a non-finite value (NaN, +inf, -inf).
+
+    Python's own `float()` happily accepts the literal strings "nan",
+    "inf", "-inf", "infinity" (case-insensitively) and returns a value
+    that silently breaks every numeric comparison that touches it: NaN
+    compares False against everything, so a "nan" cell would pass a
+    configured minimum/maximum check completely undetected instead of
+    being flagged; and sorting a list containing NaN or inf produces an
+    implementation-defined order that corrupts min/max/median/quartile
+    calculations downstream. Real-world exports do contain these literal
+    strings often enough (a stringified numpy/pandas NaN, an
+    overflow/division-by-zero result) that every numeric-detection site
+    in this codebase should parse through this instead of a bare
+    `float(value)` + `except ValueError`, which lets all of them through.
+    """
+    try:
+        parsed = float(value)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed

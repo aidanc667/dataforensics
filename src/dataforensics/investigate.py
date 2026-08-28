@@ -22,6 +22,7 @@ import json
 import re
 from itertools import combinations
 
+from dataforensics.typing_guards import parse_finite_float
 from dataforensics.validation import is_ambiguous_date, is_date_like, is_iso_date
 
 COMMON_SENTINEL_STRINGS = {
@@ -270,11 +271,7 @@ def infer_semantic_role(column_name: str, dictionary_entry: dict) -> dict | None
 
 
 def _is_numeric_value(value: str) -> bool:
-    try:
-        float(value)
-        return True
-    except ValueError:
-        return False
+    return parse_finite_float(value) is not None
 
 
 def classify_column_types(dictionary: dict, rows: list[dict]) -> dict[str, str]:
@@ -360,7 +357,15 @@ def detect_duplicate_entities(rows: list[dict], quasi_identifier_columns: list[s
     entirely -- an incomplete tuple isn't meaningful evidence either way.
     Never concludes these ARE the same entity, and never merges anything
     -- only that a human should look.
+
+    Returns [] immediately if `quasi_identifier_columns` is empty --
+    grouping rows on zero columns groups every row into one match by
+    construction, which is not evidence of anything and would otherwise
+    silently flag the entire dataset as one giant "duplicate."
     """
+    if not quasi_identifier_columns:
+        return []
+
     groups: dict[tuple, list[int]] = {}
     for i, row in enumerate(rows):
         key_values = [row.get(c) for c in quasi_identifier_columns]
@@ -577,9 +582,8 @@ def find_implausible_value_evidence(
         raw = row.get(column, "")
         if raw == "":
             continue
-        try:
-            numeric = float(raw)
-        except ValueError:
+        numeric = parse_finite_float(raw)
+        if numeric is None:
             continue
         if numeric < min_value or numeric > max_value:
             evidence.append((i, raw))

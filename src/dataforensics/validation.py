@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 
 from dataforensics import dictionary
-from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
+from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, parse_finite_float, preserves_leading_zero
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
@@ -102,9 +102,8 @@ def validate(rows: list[dict], rules: dict) -> dict:
 
             if "minimum" in col_rules:
                 checks_evaluated += 1
-                try:
-                    numeric = float(raw_value)
-                except ValueError:
+                numeric = parse_finite_float(raw_value)
+                if numeric is None:
                     continue
                 if numeric < col_rules["minimum"]:
                     errors.append(
@@ -119,9 +118,8 @@ def validate(rows: list[dict], rules: dict) -> dict:
 
             if "maximum" in col_rules:
                 checks_evaluated += 1
-                try:
-                    numeric = float(raw_value)
-                except ValueError:
+                numeric = parse_finite_float(raw_value)
+                if numeric is None:
                     continue
                 if numeric > col_rules["maximum"]:
                     warnings.append(
@@ -212,11 +210,11 @@ def validate(rows: list[dict], rules: dict) -> dict:
         for raw_value, _row_key_ in values_with_keys:
             if not is_numeric:
                 break
-            try:
-                numeric_values.append(float(raw_value))
-            except ValueError:
+            parsed = parse_finite_float(raw_value)
+            if parsed is None:
                 is_numeric = False
                 break
+            numeric_values.append(parsed)
 
         if is_numeric:
             outliers = dictionary.detect_outliers(numeric_values)

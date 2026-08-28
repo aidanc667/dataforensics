@@ -222,6 +222,28 @@ def test_find_outlier_evidence_skips_nulls():
     assert evidence == [(4, "300")]
 
 
+def test_find_outlier_evidence_empty_when_column_contains_nan_string():
+    from dataforensics.dictionary import find_outlier_evidence
+
+    # Regression test: Python's bare float() accepts the literal string
+    # "nan" without raising, so a naive "all values must parse" check
+    # would have treated this column as uniformly numeric and let NaN
+    # corrupt detect_outliers' sort-based min/max/median/quartiles. Must
+    # be treated the same as any other non-numeric value: not numeric.
+    rows = [{"age": "30"}, {"age": "nan"}, {"age": "31"}, {"age": "300"}]
+    assert find_outlier_evidence(rows, "age") == []
+
+
+def test_build_data_dictionary_column_with_nan_string_is_not_treated_as_numeric(tmp_path):
+    f = tmp_path / "sample.csv"
+    f.write_text("id,age\n1,30\n2,nan\n3,45\n4,inf\n5,50\n")
+    d = build_data_dictionary(f)
+    # Falls back to categorical (low cardinality), never "numeric" with a
+    # NaN/inf silently baked into its outlier/top-code statistics.
+    assert d["age"]["outliers"] is None
+    assert d["age"]["top_code_spike"] is None
+
+
 def test_read_rows_does_not_drop_data_after_a_mid_file_blank_and_ragged_row(tmp_path):
     # Regression test for a real user-reported bug: id,name.csv with 5 real
     # rows, a blank line, then one ragged (2-field, missing "name") row,

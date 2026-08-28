@@ -338,3 +338,11 @@ def test_detect_duplicate_entities_skips_rows_with_incomplete_quasi_identifiers(
         {"id": "2", "name": "Ada Lovelace", "zip": ""},
     ]
     assert detect_duplicate_entities(rows, ["name", "zip"], "id") == []
+
+
+def test_detect_duplicate_entities_empty_quasi_identifier_list_flags_nothing():
+    # Regression test: grouping on zero columns groups every row into one
+    # match by construction (an empty tuple key), which would otherwise
+    # silently flag the entire dataset as one giant "duplicate entity."
+    rows = [{"id": "1", "age": "10"}, {"id": "2", "age": "20"}, {"id": "3", "age": "30"}]
+    assert detect_duplicate_entities(rows, [], "id") == []

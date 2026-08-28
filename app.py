@@ -749,7 +749,27 @@ with tab_analyze:
     st.caption("DataForensics never deletes or modifies anything automatically — every change requires your approval below.")
 
     with st.expander("📋 Full data dictionary (every column, every computed field)"):
-        st.dataframe([{"column": c, **f} for c, f in dictionary.items()], use_container_width=True)
+        # "levels" is None, a list, OR a string (the PII-masked-value
+        # sentinel), and "outliers"/"top_code_spike" are None or a dict --
+        # a real dataset mixing a categorical column with a PII-masked
+        # column (a very common combination: an SSN/name column alongside
+        # any demographic categorical) puts all three of those types into
+        # the SAME dataframe column across different rows here, which
+        # pyarrow cannot serialize as one Arrow column and previously
+        # crashed the render with an ArrowTypeError. Stringify these three
+        # fields uniformly for DISPLAY ONLY -- build_data_dictionary's own
+        # return contract (a list for genuine levels, tested elsewhere)
+        # stays exactly as-is; nothing else reads this dict's "levels" /
+        # "outliers" / "top_code_spike" keys after this point.
+        display_rows = []
+        for c, f in dictionary.items():
+            row = dict(f)
+            if isinstance(row.get("levels"), list):
+                row["levels"] = ", ".join(row["levels"])
+            row["outliers"] = str(row["outliers"]) if row.get("outliers") is not None else None
+            row["top_code_spike"] = str(row["top_code_spike"]) if row.get("top_code_spike") is not None else None
+            display_rows.append({"column": c, **row})
+        st.dataframe(display_rows, use_container_width=True)
 
     # --- Data quality scorecard: a deterministic summary of the findings
     # above, never a judgment about whether the dataset is fit for any
@@ -1193,8 +1213,12 @@ with tab_analyze:
                     "be later than another recorded date for the same person."
                 )
                 st.markdown("**Evidence:**")
+                birth_pii = is_pii_like_column(birth_col)
+                other_pii = is_pii_like_column(other_col)
                 birth_lines = [
-                    f"row {i + 1:,} → {birth_col} = {b} is after {other_col} = {o}" for i, b, o in evidence[:10]
+                    f"row {i + 1:,} → {birth_col} = {_PII_EVIDENCE_MASK if birth_pii else b} is after "
+                    f"{other_col} = {_PII_EVIDENCE_MASK if other_pii else o}"
+                    for i, b, o in evidence[:10]
                 ]
                 st.markdown(
                     f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in birth_lines)}</div>',

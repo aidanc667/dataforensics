@@ -2,6 +2,7 @@ from dataforensics.typing_guards import (
     classify_sentinel,
     is_id_like_column,
     is_pii_like_column,
+    parse_finite_float,
     preserves_leading_zero,
 )
 
@@ -79,3 +80,36 @@ def test_pii_like_column_name_matching_unaffected_by_phone_dob_ssn_loosening():
     assert is_pii_like_column("county_name") is False
     assert is_pii_like_column("site_name") is False
     assert is_pii_like_column("test_name") is False
+
+
+def test_parse_finite_float_parses_ordinary_numbers():
+    assert parse_finite_float("42") == 42.0
+    assert parse_finite_float("-3.14") == -3.14
+    assert parse_finite_float("0") == 0.0
+
+
+def test_parse_finite_float_rejects_nan():
+    # Python's bare float() happily accepts "nan" and returns a value that
+    # compares False against everything -- a "nan" cell would silently
+    # pass a configured minimum/maximum check undetected, and corrupt
+    # sort-based statistics (min/max/median/quartiles) if it slipped into
+    # a values list. Must be rejected, not silently parsed.
+    assert parse_finite_float("nan") is None
+    assert parse_finite_float("NaN") is None
+    assert parse_finite_float("NAN") is None
+
+
+def test_parse_finite_float_rejects_infinity():
+    assert parse_finite_float("inf") is None
+    assert parse_finite_float("-inf") is None
+    assert parse_finite_float("Infinity") is None
+
+
+def test_parse_finite_float_rejects_non_numeric_text():
+    assert parse_finite_float("not a number") is None
+    assert parse_finite_float("") is None
+
+
+def test_parse_finite_float_rejects_non_string_types_gracefully():
+    assert parse_finite_float(None) is None
+    assert parse_finite_float(["1", "2"]) is None

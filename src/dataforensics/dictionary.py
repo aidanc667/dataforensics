@@ -11,7 +11,7 @@ from dataforensics.ingest import (
     split_delimited_line,
     strip_footer,
 )
-from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, preserves_leading_zero
+from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, parse_finite_float, preserves_leading_zero
 
 # Never claim "PII-safe" or "HIPAA-compliant" here — the honest phrasing is
 # "potential identifier pattern detected," which is a naming-convention
@@ -158,11 +158,11 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
         # runs.
         if category != "id" and not mask_pii:
             for v in non_null_values:
-                try:
-                    numeric_values.append(float(v))
-                except ValueError:
+                parsed = parse_finite_float(v)
+                if parsed is None:
                     numeric_values = []
                     break
+                numeric_values.append(parsed)
 
         outliers = detect_outliers(numeric_values) if numeric_values else None
         top_code_spike = detect_top_code_spike(numeric_values) if numeric_values else None
@@ -252,13 +252,9 @@ def find_outlier_evidence(rows: list[dict], column: str) -> list[tuple[int, str]
     column the dictionary didn't actually treat as numeric.
     """
     non_null = [(i, row.get(column, "")) for i, row in enumerate(rows) if row.get(column, "") != ""]
-    try:
-        numeric_pairs = [(i, float(v)) for i, v in non_null]
-    except ValueError:
+    values_only = [parse_finite_float(v) for _, v in non_null]
+    if not values_only or any(v is None for v in values_only):
         return []
-    if not numeric_pairs:
-        return []
-    values_only = [v for _, v in numeric_pairs]
     result = detect_outliers(values_only)
     return [non_null[pos] for pos in result["outlier_indices"]]
 
@@ -274,9 +270,8 @@ def find_top_code_evidence(rows: list[dict], column: str, top_value: float) -> l
         raw = row.get(column, "")
         if raw == "":
             continue
-        try:
-            numeric = float(raw)
-        except ValueError:
+        numeric = parse_finite_float(raw)
+        if numeric is None:
             continue
         if numeric == top_value:
             evidence.append((i, raw))
