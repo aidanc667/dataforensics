@@ -171,9 +171,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-_FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
-
 def _step_bar(current: int) -> None:
     labels = ["Upload", "Investigate", "Review & Approve", "Cleaned Dataset"]
     parts = ['<div class="dataforensics-steps">']
@@ -367,18 +364,9 @@ with tab_analyze:
     # ------------------------------------------------------------------ #
     # Step 1: Upload
     # ------------------------------------------------------------------ #
-    upload_col, example_col = st.columns([2, 1])
-    with upload_col:
-        data_file = st.file_uploader(
-            "Upload a CSV/TSV/JSON/Excel file", type=["csv", "tsv", "json", "xlsx", "xls"], label_visibility="visible"
-        )
-    with example_col:
-        st.write("")
-        st.write("")
-        if st.button("Use bundled example", use_container_width=True):
-            st.session_state["dataforensics_data_bytes"] = (_FIXTURES_DIR / "sample.csv").read_bytes()
-            st.session_state["dataforensics_data_name"] = "sample.csv"
-            st.session_state.pop("dataforensics_dedup_choice_made", None)
+    data_file = st.file_uploader(
+        "Upload a CSV/TSV/JSON/Excel file", type=["csv", "tsv", "json", "xlsx", "xls"], label_visibility="visible"
+    )
 
     if data_file is not None and data_file.name != st.session_state.get("dataforensics_data_name"):
         st.session_state["dataforensics_data_bytes"] = data_file.getvalue()
@@ -387,7 +375,7 @@ with tab_analyze:
 
     if not st.session_state.get("dataforensics_data_bytes"):
         _step_bar(1)
-        st.info("Upload a file above, or click \"Use bundled example\" to try it immediately.")
+        st.info("Upload a file above to get started.")
         st.stop()
 
     raw_path = _write_temp(st.session_state["dataforensics_data_name"], st.session_state["dataforensics_data_bytes"])
