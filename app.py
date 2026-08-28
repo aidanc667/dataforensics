@@ -277,48 +277,6 @@ def _format_bytes(n: int) -> str:
     return f"{size:.1f} GB"
 
 
-def _dataset_narrative_lines(
-    *,
-    row_count: int,
-    column_types: dict[str, str],
-    missingness_column_count: int,
-    inconsistent_category_column_count: int,
-    duplicate_row_count: int,
-    unusual_distribution_column_count: int,
-) -> list[str]:
-    """Plain-English sentences summarizing what was actually found in
-    this dataset -- "help me understand what I have," not just a table
-    of numbers. Every sentence states a literal, already-computed fact;
-    a zero count for a given kind of finding simply omits that sentence
-    rather than saying "0 columns have X," which reads as noise rather
-    than information.
-    """
-    type_counts = Counter(column_types.values())
-    lines = [f"This dataset contains {row_count:,} record(s) and {len(column_types)} variable(s)."]
-    if type_counts.get("categorical"):
-        lines.append(f"{type_counts['categorical']} column(s) appear categorical.")
-    if type_counts.get("numeric"):
-        lines.append(f"{type_counts['numeric']} column(s) are numeric/continuous measurements.")
-    if type_counts.get("identifier"):
-        lines.append(f"{type_counts['identifier']} column(s) appear to be identifiers.")
-    if type_counts.get("date"):
-        lines.append(f"{type_counts['date']} column(s) contain dates.")
-    if type_counts.get("mixed_uncertain"):
-        lines.append(f"{type_counts['mixed_uncertain']} column(s) have a mixed or uncertain type.")
-    if missingness_column_count:
-        lines.append(f"{missingness_column_count} column(s) have substantial missingness.")
-    if inconsistent_category_column_count:
-        lines.append(f"{inconsistent_category_column_count} column(s) contain potentially inconsistent categorical codes.")
-    if duplicate_row_count:
-        lines.append(
-            f"{duplicate_row_count} record(s) may represent duplicates, although these could be "
-            "legitimate repeated records."
-        )
-    if unusual_distribution_column_count:
-        lines.append(f"{unusual_distribution_column_count} column(s) contain unusual distributions that warrant review.")
-    return lines
-
-
 def _write_temp(name: str, content: bytes) -> Path:
     tmp_dir = Path(tempfile.mkdtemp(prefix="dataforensics_app_"))
     path = tmp_dir / name
@@ -617,57 +575,156 @@ with tab_analyze:
     top_code_cols_preview = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
 
     # ================================================================== #
-    # Dataset Investigation -- "help me understand what I have," not just
-    # "here's a table of numbers." Everything below is derived from
-    # findings already computed above; this section exists purely to
-    # present them as an investigation summary a human can read in one
-    # pass, before going anywhere near the detailed per-finding review.
+    # Dataset Investigation -- a researcher's first-pass summary: what IS
+    # this dataset, what did DataForensics infer about its structure, and
+    # what deserves attention -- not a repeat of the row/column count.
+    # Every line here is either an inference ("2 columns appear to be
+    # identifiers") or a specific, itemized finding a human can expand
+    # for real evidence, never a vague aggregate count standing alone.
     # ================================================================== #
     st.markdown('<div class="dataforensics-bucket-header">🔎 Dataset investigation</div>', unsafe_allow_html=True)
 
-    st.markdown("**What did I receive?**")
     data_size = len(st.session_state["dataforensics_data_bytes"])
     st.markdown(
         f'<div class="dataforensics-card" style="border-left:4px solid #4F46E5;">'
-        f'<div style="font-size:1.3rem; font-weight:700;">{len(rows):,} rows · {len(columns)} columns · {_format_bytes(data_size)}</div>'
+        f'<div style="font-size:1.3rem; font-weight:700;">{len(rows):,} record(s) · {len(columns)} variable(s) · {_format_bytes(data_size)}</div>'
         f"</div>",
         unsafe_allow_html=True,
     )
-    missingness_columns = [c for c, f in dictionary.items() if f.get("non_null_pct", 100) < 90]
-    unusual_distribution_columns = set(outlier_cols_preview) | set(top_code_cols_preview)
-    for line in _dataset_narrative_lines(
-        row_count=len(rows),
-        column_types=column_types,
-        missingness_column_count=len(missingness_columns),
-        inconsistent_category_column_count=len(category_clusters),
-        duplicate_row_count=len(dup_rows),
-        unusual_distribution_column_count=len(unusual_distribution_columns),
-    ):
+
+    st.markdown("**Structure**")
+    type_counts = Counter(column_types.values())
+    structure_lines = []
+    if type_counts.get("numeric"):
+        n = type_counts["numeric"]
+        structure_lines.append(f"{n} numeric variable{'s' if n != 1 else ''}")
+    if type_counts.get("categorical"):
+        n = type_counts["categorical"]
+        structure_lines.append(f"{n} categorical variable{'s' if n != 1 else ''}")
+    if type_counts.get("date"):
+        n = type_counts["date"]
+        structure_lines.append(f"{n} date variable{'s' if n != 1 else ''}")
+    if type_counts.get("identifier"):
+        n = type_counts["identifier"]
+        structure_lines.append(f"{n} potential identifier variable{'s' if n != 1 else ''}")
+    if type_counts.get("mixed_uncertain"):
+        n = type_counts["mixed_uncertain"]
+        structure_lines.append(f"{n} variable{'s' if n != 1 else ''} with a mixed or uncertain type")
+    for line in structure_lines:
         st.markdown(f"- {line}")
 
-    st.markdown("**Column types**")
-    type_counts = Counter(column_types.values())
-    ct1, ct2, ct3, ct4, ct5 = st.columns(5)
-    ct1.metric("Numeric", type_counts.get("numeric", 0))
-    ct2.metric("Categorical", type_counts.get("categorical", 0))
-    ct3.metric("Dates", type_counts.get("date", 0))
-    ct4.metric("Identifiers", type_counts.get("identifier", 0))
-    ct5.metric("Mixed / uncertain", type_counts.get("mixed_uncertain", 0))
+    # --- Requires attention: every finding itemized by TYPE (never
+    # collapsed into one opaque count), each expandable for real
+    # evidence -- not just "2 things worth reviewing," but which two
+    # things, and why. A structural finding (duplicate records,
+    # conflicting IDs, a same-entity suspicion, an impossible date
+    # ordering) outranks a review-worthy one (a possible missing-value
+    # code, an unusual distribution, an inconsistent spelling) in how
+    # urgently it deserves attention -- never in whether it's "wrong":
+    # an unusual distribution is not necessarily a data-quality problem
+    # (e.g. income is normally right-skewed), so that finding is phrased
+    # as "warrants review," never "is incorrect."
+    missingness_columns = [c for c, f in dictionary.items() if f.get("non_null_pct", 100) < 90]
+    distribution_columns = sorted(set(outlier_cols_preview) | set(top_code_cols_preview))
+    total_conflicting_records = sum(len(v) for v in conflicting_id_findings.values())
+    total_birth_date_rows = sum(len(v) for v in birth_date_findings.values())
+    total_duplicate_entity_rows = sum(len(d["row_indices"]) for d in duplicate_entities)
+    total_domain_findings = len(clinical_range_findings) + len(invalid_fips_findings) + len(invalid_zip_findings) + len(survey_weight_columns)
 
-    # "What should I investigate?" -- every column touched by a finding,
-    # bucketed into a priority tier. A structural issue (duplicate rows,
-    # conflicting records, an impossible date ordering, a same-entity
-    # suspicion) outranks a review-worthy one (a sentinel, an outlier, an
-    # inconsistent spelling) in how urgently it deserves attention.
-    columns_with_findings: set[str] = set()
-    columns_with_findings |= set(sentinels) | set(ambiguous_dates) | set(category_clusters)
-    columns_with_findings |= set(outlier_cols_preview) | set(top_code_cols_preview)
-    columns_with_findings |= set(clinical_range_findings) | set(conflicting_id_findings)
-    columns_with_findings |= set(invalid_fips_findings) | set(invalid_zip_findings) | set(survey_weight_columns)
+    st.markdown("**Requires attention**")
+    any_attention_items = False
+
+    if dup_rows:
+        any_attention_items = True
+        with st.expander(f"🔴 {len(dup_rows)} potential duplicate record{'s' if len(dup_rows) != 1 else ''}"):
+            st.caption("Every field is identical to an earlier row — could be a genuine duplicate, or a legitimate repeated record.")
+            for d in dup_rows[:5]:
+                st.markdown(f"- row {d['row_index'] + 1:,} is identical to row {d['duplicate_of_row_index'] + 1:,}")
+            if len(dup_rows) > 5:
+                st.caption(f"...and {len(dup_rows) - 5} more, in Review & Approve below.")
+            st.caption("Approve or dismiss in **Review & Approve** below — DataForensics never auto-deletes rows.")
+
+    if conflicting_id_findings:
+        any_attention_items = True
+        cols_desc = ", ".join(conflicting_id_findings.keys())
+        with st.expander(f"🔴 {total_conflicting_records} record(s) with conflicting information under the same ID ({cols_desc})"):
+            st.caption("The same ID appears on 2+ rows where at least one other field differs between them.")
+            st.caption("Full evidence in **Review & Approve** below — DataForensics never guesses which row is correct.")
+
     if duplicate_entities:
-        columns_with_findings |= set(quasi_identifier_columns)
-    for birth_col, other_col in birth_date_findings:
-        columns_with_findings |= {birth_col, other_col}
+        any_attention_items = True
+        id_col = id_like_defaults[0] if id_like_defaults else "id"
+        with st.expander(f"🔴 {len(duplicate_entities)} potential duplicate entit{'ies' if len(duplicate_entities) != 1 else 'y'} ({total_duplicate_entity_rows} record(s))"):
+            st.caption(f"Same {', '.join(quasi_identifier_columns)}, but different {id_col} — the same real-world entity may have been assigned more than one ID.")
+            st.caption("Full evidence in **Review & Approve** below — DataForensics never merges records.")
+
+    if birth_date_findings:
+        any_attention_items = True
+        with st.expander(f"🔴 {total_birth_date_rows} record(s) with an impossible date ordering"):
+            for (birth_col, other_col), evidence in birth_date_findings.items():
+                st.markdown(f"- {birth_col} is after {other_col} in {len(evidence)} row(s)")
+            st.caption("A birth date cannot come after another recorded date for the same person. Full evidence in **Review & Approve** below.")
+
+    if distribution_columns:
+        any_attention_items = True
+        n = len(distribution_columns)
+        with st.expander(f"🟠 {n} variable{'s' if n != 1 else ''} ha{'ve' if n != 1 else 's'} distributions that warrant review"):
+            st.caption("Unusual is not the same as incorrect — e.g. income is normally right-skewed. Worth a human look, not evidence of an error.")
+            for c in distribution_columns:
+                f = dictionary[c]
+                outliers = f.get("outliers") or {}
+                top_code = f.get("top_code_spike")
+                st.markdown(f"**{c}**")
+                stat_line = []
+                if "median" in outliers:
+                    stat_line.append(f"Median {outliers['median']:,.2f}")
+                    stat_line.append(f"IQR {outliers['iqr']:,.2f}")
+                    stat_line.append(f"Maximum {outliers['max']:,.2f}")
+                if outliers.get("outlier_count"):
+                    stat_line.append(f"Flagged {outliers['outlier_count']} observation(s) outside the IQR range")
+                if top_code:
+                    stat_line.append(f"{top_code['fraction']:.1%} of values sit at the observed max ({top_code['value']:,.2f})")
+                if stat_line:
+                    st.markdown(f'<div class="dataforensics-card-evidence">{" · ".join(stat_line)}</div>', unsafe_allow_html=True)
+            st.caption("Full evidence and evidence panels in **Review & Approve** below.")
+
+    if sentinels:
+        any_attention_items = True
+        n = sum(len(v) for v in sentinels.values())
+        with st.expander(f"🟠 {n} possible missing-value code{'s' if n != 1 else ''} ({', '.join(sentinels.keys())})"):
+            for col, values in sentinels.items():
+                st.markdown(f"- {col}: {', '.join(repr(v) for v in values)}")
+            st.caption("Matches a common missing-value convention — review and map to an explicit label in **Review & Approve** below, or leave as-is if genuine.")
+
+    if ambiguous_dates:
+        any_attention_items = True
+        n = len(ambiguous_dates)
+        with st.expander(f"🟠 {n} variable{'s' if n != 1 else ''} with ambiguous date format{'s' if n != 1 else ''} ({', '.join(ambiguous_dates.keys())})"):
+            st.caption("Date-shaped values with no way to tell Month/Day from Day/Month — declare the format in **Review & Approve** below.")
+
+    if category_clusters:
+        any_attention_items = True
+        n = sum(len(v) for v in category_clusters.values())
+        with st.expander(f"🟠 {n} possible standardization{'s' if n != 1 else ''} ({', '.join(category_clusters.keys())})"):
+            st.caption("Values that look like the same category written inconsistently — review and approve a merge in **Review & Approve** below.")
+
+    if missingness_columns:
+        any_attention_items = True
+        n = len(missingness_columns)
+        with st.expander(f"🟠 {n} variable{'s' if n != 1 else ''} with substantial missingness"):
+            for c in missingness_columns:
+                st.markdown(f"- {c}: {dictionary[c]['non_null_pct']:.1f}% non-null")
+
+    if total_domain_findings:
+        any_attention_items = True
+        domain_cols = sorted(
+            set(clinical_range_findings) | set(invalid_fips_findings) | set(invalid_zip_findings) | set(survey_weight_columns)
+        )
+        with st.expander(f"🟠 {total_domain_findings} finding(s) from the {dataset_type} profile ({', '.join(domain_cols)})"):
+            st.caption("Full evidence in **Review & Approve** below.")
+
+    if not any_attention_items:
+        st.success("No findings — every column looks clean by the checks above.")
 
     n_high_priority = (
         (1 if dup_rows else 0)
@@ -679,41 +736,17 @@ with tab_analyze:
         sum(len(v) for v in sentinels.values())
         + len(ambiguous_dates)
         + sum(len(v) for v in category_clusters.values())
-        + len(outlier_cols_preview)
-        + len(top_code_cols_preview)
-        + len(clinical_range_findings)
-        + len(invalid_fips_findings)
-        + len(invalid_zip_findings)
-        + len(survey_weight_columns)
+        + len(distribution_columns)
+        + len(missingness_columns)
+        + total_domain_findings
     )
-    n_clean_columns = len(columns) - len(columns_with_findings)
-
-    st.markdown("**What should I investigate?**")
-    ti1, ti2, ti3 = st.columns(3)
-    ti1.markdown(
-        f'<div class="dataforensics-card" style="border-left:4px solid #DC2626;">'
-        f'<div style="font-size:1.4rem; font-weight:700;">{n_high_priority}</div>'
-        f'<div class="dataforensics-card-evidence">🔴 high-priority finding(s)</div></div>',
-        unsafe_allow_html=True,
-    )
-    ti2.markdown(
-        f'<div class="dataforensics-card" style="border-left:4px solid #D97706;">'
-        f'<div style="font-size:1.4rem; font-weight:700;">{n_worth_reviewing}</div>'
-        f'<div class="dataforensics-card-evidence">🟠 thing(s) worth reviewing</div></div>',
-        unsafe_allow_html=True,
-    )
-    ti3.markdown(
-        f'<div class="dataforensics-card" style="border-left:4px solid #16A34A;">'
-        f'<div style="font-size:1.4rem; font-weight:700;">{n_clean_columns}</div>'
-        f'<div class="dataforensics-card-evidence">🟢 column(s) with no detected issues</div></div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("**What might I change?**")
-    wc1, wc2, wc3 = st.columns(3)
-    wc1.metric("Possible standardizations", sum(len(v) for v in category_clusters.values()))
-    wc2.metric("Possible duplicate row(s)", len(dup_rows))
-    wc3.metric("Automatic deletions", 0, help="DataForensics never deletes rows or columns automatically — ever.")
+    st.markdown("**Overall**")
+    total_findings = n_high_priority + n_worth_reviewing
+    if total_findings:
+        st.markdown(f"{total_findings} finding{'s' if total_findings != 1 else ''} require review before analysis.")
+    else:
+        st.markdown("No findings require review before analysis.")
+    st.caption("DataForensics never deletes or modifies anything automatically — every change requires your approval below.")
 
     with st.expander("📋 Full data dictionary (every column, every computed field)"):
         st.dataframe([{"column": c, **f} for c, f in dictionary.items()], use_container_width=True)

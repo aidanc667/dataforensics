@@ -197,9 +197,23 @@ def detect_outliers(values: list[float]) -> dict:
     iqr = q3 - q1
     lower = q1 - 1.5 * iqr
     upper = q3 + 1.5 * iqr
+    median = sorted_vals[n // 2] if n % 2 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
 
     indices = [i for i, v in enumerate(values) if v < lower or v > upper]
-    return {"method": "IQR", "outlier_count": len(indices), "outlier_indices": indices}
+    return {
+        "method": "IQR",
+        "outlier_count": len(indices),
+        "outlier_indices": indices,
+        # Summary statistics for DISPLAY (e.g. "Median $62,400 / IQR
+        # $31,200 / Maximum $1,240,000") -- not used by the detection
+        # logic above, which only needs q1/q3/iqr as local values.
+        "median": median,
+        "q1": q1,
+        "q3": q3,
+        "iqr": iqr,
+        "min": sorted_vals[0],
+        "max": sorted_vals[-1],
+    }
 
 
 def read_rows(path: Path, sheet: str | None = None) -> list[dict]:

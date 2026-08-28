@@ -15,6 +15,21 @@ def test_iqr_outlier_detection_no_false_positive_on_tight_cluster():
     assert result["outlier_count"] == 0
 
 
+def test_detect_outliers_exposes_summary_statistics_for_display():
+    values = [10, 11, 12, 13, 12, 11, 10, 200]
+    result = detect_outliers(values)
+    assert result["min"] == 10
+    assert result["max"] == 200
+    assert result["median"] == 11.5
+    assert result["q1"] <= result["median"] <= result["q3"]
+    assert result["iqr"] == result["q3"] - result["q1"]
+
+
+def test_detect_outliers_below_minimum_sample_size_omits_statistics():
+    result = detect_outliers([1, 2, 3])
+    assert "median" not in result
+
+
 def test_top_code_spike_detected_for_census_style_capping():
     # 250000 is a plausible ACS PUMS top-code; heavy mass at the max
     values = [45000, 62000, 38000] + [250000] * 20
