@@ -48,9 +48,11 @@ def test_review_and_approve_apply_flow_runs_without_exception():
     next(b for b in at.button if b.label == "Use bundled example").click().run(timeout=30)
     assert not at.exception
 
-    # The bundled fixture has one real candidate-sentinel checkbox
-    # (smoking_status == "99"); approve it and apply, exactly what a user
-    # would click through.
+    # The bundled fixture has at least one real approval checkbox
+    # (currently the visit_date ambiguous-date format checkbox -- bare
+    # "99" is deliberately never flagged as a candidate sentinel, so
+    # smoking_status == "99" no longer produces one); approve it and
+    # apply, exactly what a user would click through.
     assert len(at.checkbox) >= 1
     at.checkbox[0].check().run(timeout=30)
     assert not at.exception

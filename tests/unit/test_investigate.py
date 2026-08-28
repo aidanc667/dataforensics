@@ -39,13 +39,13 @@ def test_detect_duplicate_rows_no_false_positive_on_distinct_rows():
 
 
 def test_detect_candidate_sentinels_finds_common_codes():
-    # "99" appears in only 1 of 10 rows (10%, well under the dominance
+    # "-99" appears in only 1 of 10 rows (10%, well under the dominance
     # threshold) -- a plausible rare missing-value code, not a common
     # legitimate value.
-    rows = [{"smoking": "99"}] + [{"smoking": str(i)} for i in range(9)]
+    rows = [{"smoking": "-99"}] + [{"smoking": str(i)} for i in range(9)]
     rows += [{"income": "N/A"}] + [{"income": str(i)} for i in range(9)]
     found = detect_candidate_sentinels(rows, ["smoking", "income"])
-    assert found["smoking"] == ["99"]
+    assert found["smoking"] == ["-99"]
     assert found["income"] == ["N/A"]
 
 
@@ -54,22 +54,32 @@ def test_detect_candidate_sentinels_no_false_positive_on_ordinary_values():
     assert detect_candidate_sentinels(rows, ["age"]) == {}
 
 
-def test_detect_candidate_sentinels_does_not_flag_a_dominant_value():
-    # "99" is a genuinely common, legitimate value here (6 of 10 rows,
-    # 60%) -- e.g. a real neighborhood code, not a missing-value marker.
-    # A real missing-value convention essentially never dominates a
-    # column like this, so it must not be flagged.
-    rows = [{"neighborhood": "99"}] * 6 + [{"neighborhood": str(i)} for i in range(4)]
+def test_detect_candidate_sentinels_never_flags_bare_99():
+    # Bare "99" is excluded from COMMON_SENTINEL_STRINGS entirely -- it's
+    # an extremely common legitimate value in its own right (a
+    # neighborhood/district code, a percentile, a real category id) far
+    # more often than it's actually a missing-value marker. Must not be
+    # flagged even where it's genuinely rare, unlike "-99"/"999"/"9999".
+    rows = [{"neighborhood": "99"}] + [{"neighborhood": str(i)} for i in range(99)]
     assert detect_candidate_sentinels(rows, ["neighborhood"]) == {}
+
+
+def test_detect_candidate_sentinels_does_not_flag_a_dominant_value():
+    # "-99" is genuinely common here (6 of 10 rows, 60%) -- unusual for
+    # an actual missing-value convention. A real missing-value convention
+    # essentially never dominates a column like this, so it must not be
+    # flagged even though "-99" itself is still a recognized pattern.
+    rows = [{"code": "-99"}] * 6 + [{"code": str(i)} for i in range(4)]
+    assert detect_candidate_sentinels(rows, ["code"]) == {}
 
 
 def test_detect_candidate_sentinels_flags_right_at_the_threshold_boundary():
     # Exactly 25% (2 of 8) is still flagged (<=, not <) -- one below that
     # share should not be.
-    rows = [{"code": "99"}] * 2 + [{"code": str(i)} for i in range(6)]
-    assert detect_candidate_sentinels(rows, ["code"]) == {"code": ["99"]}
+    rows = [{"code": "-99"}] * 2 + [{"code": str(i)} for i in range(6)]
+    assert detect_candidate_sentinels(rows, ["code"]) == {"code": ["-99"]}
 
-    rows_just_over = [{"code": "99"}] * 3 + [{"code": str(i)} for i in range(6)]
+    rows_just_over = [{"code": "-99"}] * 3 + [{"code": str(i)} for i in range(6)]
     assert detect_candidate_sentinels(rows_just_over, ["code"]) == {}
 
 

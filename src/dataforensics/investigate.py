@@ -25,7 +25,17 @@ from itertools import combinations
 from dataforensics.validation import is_ambiguous_date, is_date_like, is_iso_date
 
 COMMON_SENTINEL_STRINGS = {
-    "-99", "-9", "99", "999", "9999",
+    # Bare "99" deliberately excluded: it's an extremely common
+    # legitimate value in its own right (e.g. a neighborhood/district
+    # code, a percentile, a real category id) far more often than it's
+    # actually a missing-value convention, and _SENTINEL_DOMINANCE_THRESHOLD
+    # alone wasn't enough -- a value that's rare in one dataset but a
+    # real, correct answer in another still got flagged every time
+    # regardless of frequency. "-99"/"999"/"9999" stay: a negative number
+    # or an all-9s value of 3+ digits is a much stronger, more
+    # unambiguous missing-value signal with far less legitimate-value
+    # collision risk.
+    "-99", "-9", "999", "9999",
     "n/a", "na", "n.a.", "unknown", "unk",
     "refused", "dk", "don't know", "not applicable", ".",
 }
@@ -56,11 +66,13 @@ def detect_duplicate_rows(rows: list[dict]) -> list[dict]:
 # real research/survey data -- documented non-response rates for even
 # sensitive survey items rarely exceed ~20-30%. A sentinel-looking value
 # that accounts for MORE than this share of a column's non-null values
-# (e.g. "99" as a genuine, frequently-occurring neighborhood code, not a
-# missing-value marker) is far more likely a legitimate, common value
-# that happens to match the pattern than actual evidence of missingness
-# -- so it's not flagged at all, rather than flagged with a misleadingly
-# confident-sounding "looks like a common missing-value convention."
+# is far more likely a legitimate, common value that happens to match
+# the pattern (e.g. "999" as a genuine numeric code, not a missing-value
+# marker) than actual evidence of missingness -- so it's not flagged at
+# all, rather than flagged with a misleadingly confident-sounding "looks
+# like a common missing-value convention." Bare "99" hit this so often
+# in practice that it's excluded from COMMON_SENTINEL_STRINGS entirely,
+# above, rather than left to this threshold alone.
 _SENTINEL_DOMINANCE_THRESHOLD = 0.25
 
 
