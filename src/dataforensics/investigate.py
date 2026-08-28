@@ -52,9 +52,23 @@ def detect_duplicate_rows(rows: list[dict]) -> list[dict]:
     return duplicates
 
 
+# A missing-value convention is essentially never the dominant answer in
+# real research/survey data -- documented non-response rates for even
+# sensitive survey items rarely exceed ~20-30%. A sentinel-looking value
+# that accounts for MORE than this share of a column's non-null values
+# (e.g. "99" as a genuine, frequently-occurring neighborhood code, not a
+# missing-value marker) is far more likely a legitimate, common value
+# that happens to match the pattern than actual evidence of missingness
+# -- so it's not flagged at all, rather than flagged with a misleadingly
+# confident-sounding "looks like a common missing-value convention."
+_SENTINEL_DOMINANCE_THRESHOLD = 0.25
+
+
 def detect_candidate_sentinels(rows: list[dict], columns: list[str]) -> dict[str, list[str]]:
     """Values that look like common research/survey missing-value codes
-    (e.g. "-99", "N/A", "Refused") appearing literally in the data.
+    (e.g. "-99", "N/A", "Refused") appearing literally in the data --
+    excluding any that account for more than _SENTINEL_DOMINANCE_THRESHOLD
+    of the column's non-null values (see that constant's docstring).
 
     Never claims these ARE sentinels -- only that they match a common
     naming convention and are worth a human decision (map to a specific
@@ -62,8 +76,18 @@ def detect_candidate_sentinels(rows: list[dict], columns: list[str]) -> dict[str
     """
     found: dict[str, list[str]] = {}
     for col in columns:
-        values = {str(row.get(col, "")).strip() for row in rows if row.get(col) not in (None, "")}
-        hits = sorted(v for v in values if v.casefold() in COMMON_SENTINEL_STRINGS)
+        raw_values = [str(row.get(col, "")).strip() for row in rows if row.get(col) not in (None, "")]
+        if not raw_values:
+            continue
+        counts: dict[str, int] = {}
+        for v in raw_values:
+            counts[v] = counts.get(v, 0) + 1
+        total = len(raw_values)
+        hits = sorted(
+            v
+            for v in counts
+            if v.casefold() in COMMON_SENTINEL_STRINGS and counts[v] / total <= _SENTINEL_DOMINANCE_THRESHOLD
+        )
         if hits:
             found[col] = hits
     return found

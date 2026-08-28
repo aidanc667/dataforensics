@@ -888,13 +888,19 @@ with tab_analyze:
                     unsafe_allow_html=True,
                 )
                 label = c3.text_input("Map to", value="Missing", key=f"{key}_label", label_visibility="collapsed")
+                sentinel_evidence_rows = find_sentinel_evidence(rows, col, val)
+                non_null_count = len(rows) - dictionary[col].get("null_count", 0)
+                sentinel_share = len(sentinel_evidence_rows) / non_null_count if non_null_count else 0.0
                 _evidence_panel(
                     rule=(
                         f'"{val}" case-insensitively matches a common missing-value convention: '
                         + ", ".join(f'"{s}"' for s in sorted(COMMON_SENTINEL_STRINGS))
                     ),
-                    lines=_evidence_lines(col, [(i, val) for i in find_sentinel_evidence(rows, col, val)]),
-                    known=f'"{val}" case-insensitively matches a common missing-value convention used across research/survey data.',
+                    lines=_evidence_lines(col, [(i, val) for i in sentinel_evidence_rows]),
+                    known=(
+                        f'"{val}" case-insensitively matches a common missing-value convention used across '
+                        f"research/survey data, and accounts for {sentinel_share:.1%} of {col}'s non-null values."
+                    ),
                     not_known=f'Whether "{val}" is actually being used as a missing-value code here, or is a genuine {col} value that happens to match the pattern.',
                     recommended_action='Map to an explicit missing-value label above, or leave the checkbox unchecked if this is a real value.',
                 )
