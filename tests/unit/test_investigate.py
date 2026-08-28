@@ -106,6 +106,31 @@ def test_detect_similar_categories_skips_high_cardinality_columns():
     assert detect_similar_categories(values) == []
 
 
+def test_detect_similar_categories_prefers_trimmed_value_as_canonical():
+    # A plain alphabetical sort would pick "  Ada Lovelace" first (a
+    # leading space sorts before a letter) -- backwards, since that
+    # suggests merging the clean value INTO the messy one. The trimmed
+    # value must be suggested instead.
+    clusters = detect_similar_categories(["Ada Lovelace", "  Ada Lovelace"])
+    assert len(clusters) == 1
+    assert clusters[0]["suggested_canonical"] == "Ada Lovelace"
+
+
+def test_detect_similar_categories_trailing_whitespace_canonical_unaffected():
+    # Trailing whitespace already sorted correctly before this fix (a
+    # shorter prefix sorts before the longer string it prefixes) --
+    # confirms the fix didn't accidentally break that case.
+    clusters = detect_similar_categories(["Bangalore", "Bangalore "])
+    assert len(clusters) == 1
+    assert clusters[0]["suggested_canonical"] == "Bangalore"
+
+
+def test_detect_similar_categories_falls_back_to_alphabetical_when_no_member_trimmed():
+    clusters = detect_similar_categories(["Refused", "Refuse", "Accepted"], threshold=80)
+    assert len(clusters) == 1
+    assert clusters[0]["suggested_canonical"] == "Refuse"
+
+
 def test_match_clinical_range_rule_matches_age_column():
     rule = match_clinical_range_rule("age")
     assert rule["min"] == 0

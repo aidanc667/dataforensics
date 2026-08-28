@@ -162,10 +162,20 @@ def detect_similar_categories(values: list[str], threshold: int = 85) -> list[di
             frozenset((a, b)) in exact_after_normalize or normalized[a] == normalized[b]
             for a, b in combinations(members, 2)
         )
+        # Prefer an already-trimmed member as the canonical suggestion. A
+        # plain alphabetical sort would pick a LEADING-whitespace variant
+        # first (" Ada Lovelace" < "Ada Lovelace", since a space sorts
+        # before a letter) -- exactly backwards, suggesting a merge INTO
+        # the messier value instead of out of it. Falls back to plain
+        # alphabetical sort only when no member is trimmed (e.g. a
+        # case-only cluster, or a medium-confidence fuzzy cluster like
+        # "Refused"/"Refuse" where neither has a whitespace issue).
+        trimmed_members = [v for v in members if v == v.strip()]
+        canonical_pool = sorted(trimmed_members) if trimmed_members else sorted(members)
         clusters.append(
             {
                 "values": sorted(members),
-                "suggested_canonical": sorted(members)[0],
+                "suggested_canonical": canonical_pool[0],
                 "confidence": "high" if all_exact else "medium",
             }
         )

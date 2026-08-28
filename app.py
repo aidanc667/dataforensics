@@ -439,10 +439,22 @@ with tab_analyze:
     sentinel_columns = [c for c in columns if dictionary[c].get("category") != "id"]
     sentinels = detect_candidate_sentinels(rows, sentinel_columns)
     ambiguous_dates = detect_ambiguous_date_columns(rows, columns)
+    # Gated on "not id" only, NOT on dictionary.py's "categorical"
+    # classification. A column tips into "free_text" once its unique
+    # count exceeds cardinality_cap() -- which real messy data can do
+    # for a totally mundane reason: a handful of whitespace/casing
+    # variants of an otherwise-small set of values (e.g. 6 real cities
+    # plus 5 " City " typo variants = 11 unique values, just over a cap
+    # of 10) push it over the line. Gating on "categorical" would then
+    # silently stop looking for exactly the kind of duplicate-spelling
+    # noise that caused the reclassification in the first place.
+    # detect_similar_categories already has its own, more permissive
+    # cardinality ceiling (_MAX_CARDINALITY_FOR_FUZZY_MATCH) and returns
+    # [] past it, so nothing extra is needed here to bound the cost.
     category_clusters = {
-        col: detect_similar_categories(fields["levels"])
-        for col, fields in dictionary.items()
-        if fields.get("category") == "categorical" and fields.get("levels")
+        col: detect_similar_categories([row.get(col, "") for row in rows])
+        for col in columns
+        if dictionary[col].get("category") != "id"
     }
     category_clusters = {col: c for col, c in category_clusters.items() if c}
 
