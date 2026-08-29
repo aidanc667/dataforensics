@@ -32,6 +32,26 @@ def test_is_ambiguous_date_flags_dash_format():
     assert is_ambiguous_date("03-04-2024") is True
 
 
+def test_is_ambiguous_date_not_flagged_when_first_number_exceeds_12():
+    # Regression: "07/27/2005" was flagged ambiguous purely for being
+    # non-ISO, even though 27 can only ever be a day (no month is 27) --
+    # there's nothing to actually be unsure about. On a real 48,880-row
+    # dataset this overflagged 59% of a date column's values as "no way
+    # to tell which" when the vast majority genuinely had only one valid
+    # reading.
+    assert is_ambiguous_date("07/27/2005") is False
+
+
+def test_is_ambiguous_date_not_flagged_when_second_number_exceeds_12():
+    assert is_ambiguous_date("25/01/2030") is False
+
+
+def test_is_ambiguous_date_still_flagged_when_both_numbers_are_plausible_months():
+    # 01/05/2030 could genuinely be Jan 5 (MM/DD) or May 1 (DD/MM) --
+    # both numbers are <= 12, so there's a real question here.
+    assert is_ambiguous_date("01/05/2030") is True
+
+
 def test_dash_date_with_no_declared_format_is_error():
     rows = [{"participant_id": "1", "visit_date": "03-04-2024"}]
     result = validate(rows, _DATE_RULES)

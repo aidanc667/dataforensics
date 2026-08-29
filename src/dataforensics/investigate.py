@@ -20,6 +20,7 @@ project's entire design philosophy exists to reject.
 import hashlib
 import json
 import re
+from collections import Counter
 from itertools import combinations
 
 from dataforensics.typing_guards import parse_finite_float
@@ -165,6 +166,7 @@ def detect_similar_categories(values: list[str], threshold: int = 85) -> list[di
     if len(unique_values) > _MAX_CARDINALITY_FOR_FUZZY_MATCH:
         return []
 
+    frequency = Counter(v for v in values if v and v.strip())
     normalized = {v: v.strip().casefold() for v in unique_values}
     parent: dict[str, str] = {v: v for v in unique_values}
 
@@ -199,20 +201,29 @@ def detect_similar_categories(values: list[str], threshold: int = 85) -> list[di
             frozenset((a, b)) in exact_after_normalize or normalized[a] == normalized[b]
             for a, b in combinations(members, 2)
         )
-        # Prefer an already-trimmed member as the canonical suggestion. A
+        # Prefer the most FREQUENT member as the canonical suggestion --
+        # the dominant spelling in the actual data is virtually always
+        # the correct one, and this is what actually matters: a rare
+        # OCR/typo corruption that happens to sort alphabetically first
+        # (e.g. "158an Francisco", 1 occurrence, digit sorts before a
+        # letter) must never outrank the overwhelmingly common correct
+        # spelling ("San Francisco", tens of thousands of occurrences)
+        # just because of where it falls in the alphabet. Ties (equal
+        # frequency, e.g. every value in a small test fixture appearing
+        # once) fall back to preferring an already-trimmed member -- a
         # plain alphabetical sort would pick a LEADING-whitespace variant
         # first (" Ada Lovelace" < "Ada Lovelace", since a space sorts
-        # before a letter) -- exactly backwards, suggesting a merge INTO
-        # the messier value instead of out of it. Falls back to plain
-        # alphabetical sort only when no member is trimmed (e.g. a
-        # case-only cluster, or a medium-confidence fuzzy cluster like
-        # "Refused"/"Refuse" where neither has a whitespace issue).
-        trimmed_members = [v for v in members if v == v.strip()]
-        canonical_pool = sorted(trimmed_members) if trimmed_members else sorted(members)
+        # before a letter), exactly backwards, suggesting a merge INTO
+        # the messier value instead of out of it -- and finally to plain
+        # alphabetical order for full determinism.
+        def _canonical_rank(v: str) -> tuple:
+            return (-frequency[v], v != v.strip(), v)
+
+        canonical = min(members, key=_canonical_rank)
         clusters.append(
             {
                 "values": sorted(members),
-                "suggested_canonical": canonical_pool[0],
+                "suggested_canonical": canonical,
                 "confidence": "high" if all_exact else "medium",
             }
         )

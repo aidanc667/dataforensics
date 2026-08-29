@@ -87,6 +87,52 @@ def test_dictionary_zero_count_ignores_whitespace_padding(tmp_path):
     assert d["cigs_per_day"]["zero_count"] == 2
 
 
+def test_dictionary_skips_top_code_detection_on_zero_variance_categorical_column(tmp_path):
+    # Regression: a boolean-flag-shaped column (every non-null value
+    # literally "1") got classified "categorical" (unique_count == 1) but
+    # STILL ran numeric top-code detection, which trivially fires 100%
+    # of the time on any single-value column -- "100% of values sit at
+    # the observed maximum" is meaningless when there's only one value to
+    # begin with; that's already captured by is_zero_variance.
+    lines = ["id,flag"] + [f"{i},1" for i in range(1, 21)]
+    f = tmp_path / "flag.csv"
+    f.write_text("\n".join(lines) + "\n")
+    d = build_data_dictionary(f)
+    assert d["flag"]["category"] == "categorical"
+    assert d["flag"]["is_zero_variance"] is True
+    assert d["flag"]["top_code_spike"] is None
+    assert d["flag"]["outliers"] is None
+
+
+def test_dictionary_skips_outlier_detection_on_low_cardinality_numeric_coded_column(tmp_path):
+    # Regression: a low-cardinality numeric-coded column (e.g. a district
+    # number 1-11) is a small closed set of discrete labels, not a
+    # continuum -- IQR-based outlier/top-code detection doesn't apply to
+    # it any more than it would to a column of city names. Statistical
+    # detection should only run for "free_text" (high-enough-cardinality
+    # to look continuous) numeric columns.
+    lines = ["id,district"] + [f"{i},{(i % 11) + 1}" for i in range(1, 301)]
+    f = tmp_path / "district.csv"
+    f.write_text("\n".join(lines) + "\n")
+    d = build_data_dictionary(f)
+    assert d["district"]["category"] == "categorical"
+    assert d["district"]["top_code_spike"] is None
+    assert d["district"]["outliers"] is None
+
+
+def test_dictionary_still_runs_top_code_detection_on_high_cardinality_numeric_column(tmp_path):
+    # Confirms the fix didn't overreach: a genuinely high-cardinality
+    # numeric column (classified "free_text") must still get outlier/
+    # top-code detection -- that's the exact case this feature exists for.
+    lines = ["id,income"] + [f"{i},{30000 + i}" for i in range(1, 20)] + ["20,250000", "21,250000", "22,250000"]
+    f = tmp_path / "income.csv"
+    f.write_text("\n".join(lines) + "\n")
+    d = build_data_dictionary(f)
+    assert d["income"]["category"] == "free_text"
+    assert d["income"]["top_code_spike"] is not None
+    assert d["income"]["top_code_spike"]["value"] == 250000.0
+
+
 def test_dictionary_high_cardinality_is_free_text(tmp_path):
     rows = "\n".join(f"{i},note-{i}-unique" for i in range(60))
     f = tmp_path / "notes.csv"

@@ -5,8 +5,8 @@ from dataforensics import dictionary
 from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, parse_finite_float, preserves_leading_zero
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
-_DASH_DATE_PATTERN = re.compile(r"^\d{1,2}-\d{1,2}-\d{4}$")
+_SLASH_DATE_PATTERN = re.compile(r"^(\d{1,2})/(\d{1,2})/\d{4}$")
+_DASH_DATE_PATTERN = re.compile(r"^(\d{1,2})-(\d{1,2})-\d{4}$")
 
 # Same honest phrasing as dictionary.py's _PII_MASK_MESSAGE: this is a
 # naming-convention heuristic, not a guarantee about the column's actual
@@ -15,9 +15,23 @@ _PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern detected]"
 
 
 def is_ambiguous_date(value: str) -> bool:
+    """True only if `value` is slash/dash-shaped AND could genuinely be
+    read two ways -- both the first and second number are <= 12, so
+    either could plausibly be the month. "07/27/2005" is NOT ambiguous
+    despite not being ISO: 27 can only be a day (no month is 27), which
+    pins the format down to MM/DD with nothing left to guess. Without
+    this check, every non-ISO date got flagged regardless of whether
+    there was ever a real question about which number is which -- on one
+    real-world dataset this overflagged 28,970 of 48,880 genuinely
+    unambiguous dates (59%) as "no way to tell."
+    """
     if _ISO_DATE_PATTERN.match(value):
         return False
-    return bool(_SLASH_DATE_PATTERN.match(value) or _DASH_DATE_PATTERN.match(value))
+    match = _SLASH_DATE_PATTERN.match(value) or _DASH_DATE_PATTERN.match(value)
+    if not match:
+        return False
+    first, second = int(match.group(1)), int(match.group(2))
+    return first <= 12 and second <= 12
 
 
 def is_iso_date(value: str) -> bool:

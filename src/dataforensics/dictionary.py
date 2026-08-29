@@ -161,14 +161,22 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
             levels = None
 
         numeric_values = []
-        # Skip numeric parsing for masked PII-like columns too: outliers and
-        # top_code_spike below carry an actual raw value from the column
-        # (the max value / the flagged indices' underlying magnitude), which
-        # would leak a real identifier value (e.g. a recurring MRN) around
-        # the masking done just below. When include_raw_samples=True the
-        # column behaves exactly like any other, so numeric detection still
-        # runs.
-        if category != "id" and not mask_pii:
+        # Only run outlier/top-code detection for "free_text" (i.e.
+        # high-enough-cardinality-to-look-continuous) numeric columns --
+        # never for "id" (obviously) or "categorical". A low-cardinality
+        # numeric-coded column (a district number 1-11, a satisfaction
+        # score 1-5, a 0/1 flag) is a small closed set of discrete
+        # labels, not a continuum: "100% of values sit at the observed
+        # maximum" is trivially true and meaningless for a zero-variance
+        # flag column, and "11 is unusually common" is meaningless for a
+        # column whose whole domain IS {1..11}. Skip numeric parsing for
+        # masked PII-like columns too: outliers and top_code_spike below
+        # carry an actual raw value from the column (the max value / the
+        # flagged indices' underlying magnitude), which would leak a real
+        # identifier value (e.g. a recurring MRN) around the masking done
+        # just below. When include_raw_samples=True the column behaves
+        # exactly like any other, so numeric detection still runs.
+        if category == "free_text" and not mask_pii:
             for v in non_null_values:
                 parsed = parse_finite_float(v)
                 if parsed is None:

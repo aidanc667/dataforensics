@@ -168,6 +168,30 @@ def test_detect_similar_categories_falls_back_to_alphabetical_when_no_member_tri
     assert clusters[0]["suggested_canonical"] == "Refuse"
 
 
+def test_detect_similar_categories_prefers_most_frequent_value_as_canonical():
+    # Regression: a plain alphabetical-among-trimmed-members pick chose
+    # "158an Francisco" (a single-occurrence OCR/typo corruption) over
+    # "San Francisco" (tens of thousands of occurrences in the real
+    # dataset this was found on) purely because a digit sorts before a
+    # letter -- backwards. The dominant, most frequent spelling must win.
+    values = (
+        ["San Francisco"] * 100
+        + ["158an Francisco", "San Frnacisco", "Sn Francisco"]
+    )
+    clusters = detect_similar_categories(values, threshold=80)
+    assert len(clusters) == 1
+    assert clusters[0]["suggested_canonical"] == "San Francisco"
+
+
+def test_detect_similar_categories_frequency_tie_still_prefers_trimmed():
+    # When frequency ties, the existing trimmed-member preference still
+    # applies as the tiebreaker.
+    values = ["Ada Lovelace", "Ada Lovelace", "  Ada Lovelace", "  Ada Lovelace"]
+    clusters = detect_similar_categories(values)
+    assert len(clusters) == 1
+    assert clusters[0]["suggested_canonical"] == "Ada Lovelace"
+
+
 def test_match_clinical_range_rule_matches_age_column():
     rule = match_clinical_range_rule("age")
     assert rule["min"] == 0
