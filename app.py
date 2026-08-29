@@ -326,6 +326,8 @@ with tab_analyze:
         st.session_state["dataforensics_data_bytes"] = data_file.getvalue()
         st.session_state["dataforensics_data_name"] = data_file.name
         st.session_state.pop("dataforensics_dedup_choice_made", None)
+        st.session_state.pop("dataforensics_applied", None)
+        st.session_state.pop("dataforensics_applied_at", None)
 
     if not st.session_state.get("dataforensics_data_bytes"):
         _step_bar(1)
@@ -1308,7 +1310,7 @@ with tab_analyze:
             "ambiguous, so DataForensics refuses this combination rather than guess. Un-check one of the "
             "two for each column listed before applying."
         )
-        apply_clicked = False
+        st.session_state["dataforensics_applied"] = False
     elif chained_columns:
         details = "; ".join(
             f"{_esc(col)} ({', '.join(repr(v) for v in vals)})" for col, vals in sorted(chained_columns.items())
@@ -1320,14 +1322,22 @@ with tab_analyze:
             "rather than guess which mapping should apply first. Change the \"Map to\" label(s) "
             "so no mapped-to value matches another mapped-from value in the same column."
         )
-        apply_clicked = False
+        st.session_state["dataforensics_applied"] = False
     else:
-        apply_clicked = st.button("✅ Apply approved changes", type="primary")
+        if st.button("✅ Apply approved changes", type="primary"):
+            st.session_state["dataforensics_applied"] = True
+            st.session_state["dataforensics_applied_at"] = datetime.now(timezone.utc).isoformat()
 
     # ------------------------------------------------------------------ #
     # Step 4: Cleaned dataset + audit report
     # ------------------------------------------------------------------ #
-    if apply_clicked:
+    # Gated on session_state (set once, when the button is actually
+    # clicked) rather than the button's transient True-only-on-the-click-
+    # frame return value -- otherwise clicking any of the three download
+    # buttons below triggers a rerun on which the button reads False again,
+    # collapsing this whole section back to just the "Apply approved
+    # changes" button and losing the results the user just clicked to get.
+    if st.session_state.get("dataforensics_applied"):
         _step_bar(4)
         try:
             report = validate(rows, rules)
@@ -1376,10 +1386,12 @@ with tab_analyze:
             )
             st.stop()
 
-        # Every mutation records the same timestamp -- the moment this
-        # Apply click ran -- rather than a per-row clock read that would
-        # imply an ordering precision this batch operation doesn't have.
-        applied_at = datetime.now(timezone.utc).isoformat()
+        # Every mutation records the same timestamp -- the moment the Apply
+        # button was actually clicked (persisted in session_state, not
+        # re-read from the clock on every rerun this section now survives)
+        # -- rather than a per-row clock read that would imply an ordering
+        # precision this batch operation doesn't have.
+        applied_at = st.session_state["dataforensics_applied_at"]
         for mutation in mutations:
             mutation["timestamp_utc"] = applied_at
 
@@ -1458,74 +1470,6 @@ with tab_analyze:
             "⬇ audit_report.html", data=audit_report_html,
             file_name="audit_report.html", mime="text/html", width="stretch",
         )
-
-        # --- Before/After diff: a compact, deduplicated summary of exactly
-        # which value substitutions happened, instead of one line per row
-        # even when the same substitution repeated hundreds of times. ---
-        st.markdown('<div class="dataforensics-bucket-header">✅ Before / after diff</div>', unsafe_allow_html=True)
-        if mutations:
-            diff_counts = Counter((m["column"], m["original_value"], m["new_value"]) for m in mutations)
-            diff_summary = [
-                {"Column": col, "Before": before, "After": after, "Rows affected": count}
-                for (col, before, after), count in sorted(diff_counts.items())
-            ]
-            rows_affected = len({tuple(sorted(m["row_key"].items())) for m in mutations})
-            st.dataframe(diff_summary, width="stretch")
-            st.caption(
-                f"{len(mutations)} value(s) changed across {rows_affected} row(s), in "
-                f"{len(safety['modified_columns'])} column(s) ({', '.join(safety['modified_columns'])}). "
-                f"Every other column is unmodified — see Safety checks above."
-            )
-        else:
-            st.caption("Nothing was approved for change.")
-
-        # --- Provenance chain: the full record for every approved change,
-        # in the order a defensible audit trail needs it -- original
-        # value, new value, the rule that justified it, who approved it,
-        # and when. ---
-        st.markdown('<div class="dataforensics-bucket-header">🔗 Provenance / transformation log</div>', unsafe_allow_html=True)
-        if mutations:
-            st.caption(
-                "Original value → new value → rule used → approved by → timestamp, for every "
-                "individual cell this run changed:"
-            )
-            st.dataframe(
-                [
-                    {
-                        "row_key": m["row_key"],
-                        "column": m["column"],
-                        "original_value": m["original_value"],
-                        "new_value": m["new_value"],
-                        "rule_used": m["transformation_rule"],
-                        "approved_by": m["reason"],
-                        "timestamp_utc": m["timestamp_utc"],
-                    }
-                    for m in mutations
-                ],
-                width="stretch",
-            )
-        else:
-            st.caption("Nothing was approved for change.")
-
-        st.markdown('<div class="dataforensics-bucket-header">👁️ Detected, left untouched</div>', unsafe_allow_html=True)
-        unapproved_sentinels = sum(len(v) for v in sentinels.values()) - sum(len(v) for v in approved_sentinels.values())
-        st.caption(
-            f"{len(dup_rows)} duplicate row(s) · {len(outlier_cols)} column(s) with outliers · "
-            f"{len(top_code_cols)} possible top-coded column(s) · {unapproved_sentinels} sentinel(s) not mapped — "
-            "none of these were altered."
-        )
-
-        st.markdown('<div class="dataforensics-bucket-header">🚩 Still needs human review</div>', unsafe_allow_html=True)
-        if report["errors"]:
-            for finding in report["errors"]:
-                st.markdown(
-                    f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-error">Error</span>'
-                    f'<span class="dataforensics-card-title">{_esc(finding["rule"])}</span> — {_esc(finding["message"])}<br>'
-                    f'<span class="dataforensics-card-evidence">row_key: {_esc(finding["row_key"])}</span></div>',
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.success("No unresolved blocking errors.")
 
 with tab_multifile:
     st.caption(

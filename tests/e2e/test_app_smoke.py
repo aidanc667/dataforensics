@@ -83,6 +83,20 @@ def test_review_and_approve_apply_flow_runs_without_exception():
     assert any("data_dictionary.html" in label for label in download_labels)
     assert any("Cleaned CSV" in label for label in download_labels)
 
+    # Regression: clicking any download_button forces a Streamlit rerun on
+    # which "Apply approved changes" reads False again (it wasn't clicked
+    # THIS run). Before persisting the applied state in session_state, that
+    # rerun collapsed this whole section back to just the Apply button,
+    # so the other two downloads vanished the moment you clicked one.
+    # Calling .run() again with no new interaction simulates exactly that
+    # rerun -- the results must still be there.
+    at.run(timeout=30)
+    assert not at.exception
+    download_labels_after_rerun = [b.label for b in at.download_button]
+    assert any("audit_report.html" in label for label in download_labels_after_rerun)
+    assert any("data_dictionary.html" in label for label in download_labels_after_rerun)
+    assert any("Cleaned CSV" in label for label in download_labels_after_rerun)
+
 
 def test_birth_date_after_other_date_evidence_masks_pii_like_columns():
     # Regression test: the birth-date-after-other-date cross-column
