@@ -128,6 +128,15 @@ def build_investigation_findings(
     has no apply mechanism at all (this app never deletes rows, merges
     entities, or auto-corrects a range/format violation), so those are
     always fully unresolved by construction.
+
+    For a PII-masked column, `mutations` never records the real
+    original_value (only the placeholder mask, so a raw identifier never
+    lands in the audit trail) -- per-value resolution isn't possible
+    there, so resolution falls back to column-level: "this column had at
+    least one approved mapping applied." The same masking applies to
+    every value shown in a PII column's finding (title, evidence, and
+    suggested action alike) -- a name or email is still a personal
+    identifier even inside a "standardize onto X" recommendation.
     """
     mutated_pairs = {(m["column"], m["original_value"]) for m in mutations}
     findings: list[dict] = []
@@ -247,23 +256,46 @@ def build_investigation_findings(
         })
 
     for col, clusters in category_clusters.items():
+        pii = is_pii_like_column(col)
         for cluster in clusters:
-            values_str = " / ".join(f'"{v}"' for v in cluster["values"])
-            resolved = sum(1 for v in cluster["values"] if (col, v) in mutated_pairs)
             confidence_basis = (
                 "identical after trimming whitespace and lowercasing"
                 if cluster["confidence"] == "high"
                 else "85%+ similar by fuzzy string match"
             )
+            if pii:
+                # mutations never records a PII-masked column's real
+                # original_value (only the placeholder, so a raw
+                # identifier never lands in the audit trail) -- so
+                # per-value resolution isn't possible here. Fall back to
+                # the coarsest true statement this data supports: "this
+                # column had at least one approved category mapping
+                # applied." The canonical value and the individual
+                # variants are masked too, for the same reason the
+                # evidence line is -- this cluster's raw names are still
+                # personal identifiers even inside a "suggested action."
+                resolved = 1 if (col, PII_EVIDENCE_MASK) in mutated_pairs else 0
+                title = (
+                    f"{col}: {len(cluster['values'])} value(s) appear to represent the same "
+                    f"category ({PII_EVIDENCE_MASK})"
+                )
+                evidence = [PII_EVIDENCE_MASK]
+                suggested_action = "Standardize the masked variants onto their normalized form."
+            else:
+                resolved = 1 if any((col, v) in mutated_pairs for v in cluster["values"]) else 0
+                values_str = " / ".join(f'"{v}"' for v in cluster["values"])
+                title = f'{col}: {values_str} appear to represent the same category'
+                evidence = [f'"{v}"' for v in cluster["values"]]
+                suggested_action = f'Standardize onto "{cluster["suggested_canonical"]}".'
             findings.append({
                 "tier": "review",
-                "title": f'{col}: {values_str} appear to represent the same category',
-                "evidence": [f'"{v}"' for v in cluster["values"]],
+                "title": title,
+                "evidence": evidence,
                 "more": 0,
                 "detection": f"These values are {confidence_basis}.",
-                "suggested_action": f'Standardize onto "{cluster["suggested_canonical"]}".',
+                "suggested_action": suggested_action,
                 "confidence": "High" if cluster["confidence"] == "high" else "Medium",
-                "resolved": 1 if resolved else 0,
+                "resolved": resolved,
                 "total": 1,
             })
 
@@ -310,7 +342,19 @@ def build_investigation_findings(
 
     if sentinels:
         for col, values in sentinels.items():
-            resolved = sum(1 for v in values if (col, v) in mutated_pairs or v in approved_sentinels.get(col, {}))
+            if is_pii_like_column(col):
+                # Same tracking limitation as the category-cluster case
+                # above: mutations never records this column's real
+                # original_value, only the placeholder, so resolution
+                # can only be tracked at the column level. Unlike a
+                # category value (someone's actual name), a sentinel
+                # token ("99", "N/A", ...) is a generic shared convention,
+                # never real content, so it does NOT need masking here --
+                # the app's own approval checkboxes already show these
+                # values unmasked for the same reason.
+                resolved = len(values) if (col, PII_EVIDENCE_MASK) in mutated_pairs else 0
+            else:
+                resolved = sum(1 for v in values if (col, v) in mutated_pairs or v in approved_sentinels.get(col, {}))
             findings.append({
                 "tier": "info",
                 "title": f"{col}: {', '.join(repr(v) for v in values)} match a common missing-value convention",

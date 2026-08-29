@@ -43,6 +43,50 @@ def test_dictionary_zero_vs_null_kept_separate(tmp_path):
     assert d["cigs_per_day"]["null_count"] == 1
 
 
+def test_dictionary_unique_count_ignores_leading_trailing_whitespace(tmp_path):
+    # "Toronto" and "Toronto " (trailing space) are the same city, not two
+    # different ones -- a handful of whitespace-padded rows should not
+    # inflate unique_count past the real number of distinct values.
+    f = tmp_path / "city.csv"
+    f.write_text(
+        "id,city\n"
+        "1,Toronto\n"
+        "2, Toronto\n"
+        "3,Toronto \n"
+        "4,Berlin\n"
+        "5,Berlin\n"
+    )
+    d = build_data_dictionary(f)
+    assert d["city"]["unique_count"] == 2
+    assert set(d["city"]["levels"]) == {"Toronto", "Berlin"}
+
+
+def test_dictionary_whitespace_padding_does_not_hide_levels_past_cardinality_cap(tmp_path):
+    # Regression: a genuinely low-cardinality column (6 real cities across
+    # 200 rows, well under cardinality_cap(200) == 10) was being
+    # misclassified "free_text" (levels hidden) purely because whitespace
+    # padding on some rows inflated the raw unique count past the cap.
+    cities = ["Toronto", "Berlin", "Lisbon", "Nairobi", "Osaka", "Bangalore"]
+    lines = ["id,city"]
+    for i in range(200):
+        city = cities[i % len(cities)]
+        if i % 7 == 0:
+            city = city + " "  # trailing-whitespace variant of a real city
+        lines.append(f"{i + 1},{city}")
+    f = tmp_path / "cities200.csv"
+    f.write_text("\n".join(lines) + "\n")
+    d = build_data_dictionary(f)
+    assert d["city"]["category"] == "categorical"
+    assert set(d["city"]["levels"]) == set(cities)
+
+
+def test_dictionary_zero_count_ignores_whitespace_padding(tmp_path):
+    f = tmp_path / "smoking.csv"
+    f.write_text("id,cigs_per_day\n001, 0\n002,0 \n003,5\n")
+    d = build_data_dictionary(f)
+    assert d["cigs_per_day"]["zero_count"] == 2
+
+
 def test_dictionary_high_cardinality_is_free_text(tmp_path):
     rows = "\n".join(f"{i},note-{i}-unique" for i in range(60))
     f = tmp_path / "notes.csv"

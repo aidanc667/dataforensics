@@ -130,9 +130,21 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
         null_count = sum(1 for v in raw_values if v == "")
         non_null_values = [v for v in raw_values if v != ""]
         non_null_pct = round(100.0 * (n_rows - null_count) / n_rows, 4) if n_rows else 0.0
-        unique_values = set(non_null_values)
+        # Leading/trailing whitespace is noise, not a distinguishing feature
+        # of a value's identity -- "Toronto" and "Toronto " are the same
+        # city, not two different ones. Without normalizing here, a
+        # handful of whitespace-padded rows can inflate unique_count well
+        # past what a human would call "how many distinct values does this
+        # column take," and can even push a genuinely low-cardinality
+        # column (e.g. 6 real cities) over the categorical/free_text
+        # cardinality cap on whitespace noise alone, hiding its levels for
+        # no real reason. The raw whitespace inconsistency itself is still
+        # surfaced separately, as a category-cluster finding
+        # (detect_similar_categories) that recommends trimming -- this
+        # only fixes what gets *counted* here.
+        unique_values = {v.strip() for v in non_null_values}
         unique_count = len(unique_values)
-        zero_count = sum(1 for v in non_null_values if v == "0")
+        zero_count = sum(1 for v in non_null_values if v.strip() == "0")
 
         id_like = is_id_like_column(name) or preserves_leading_zero(non_null_values)
         pii_like = is_pii_like_column(name)

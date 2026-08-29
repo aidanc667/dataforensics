@@ -211,6 +211,79 @@ class TestBuildInvestigationFindings:
         assert PII_EVIDENCE_MASK in evidence_line
         assert "1980-01-01" not in evidence_line
 
+    def test_category_cluster_on_pii_like_column_masks_title_evidence_and_suggested_action(self):
+        # Regression: a category-cluster finding on a PII-like column
+        # (e.g. "name") was showing the real, unmasked values in its
+        # title, evidence, AND suggested-action text -- a real PII leak,
+        # inconsistent with every other finding type in this function,
+        # which all mask PII-like column values.
+        clusters = {
+            "name": [
+                {
+                    "values": [" Ada Lovelace", "Ada Lovelace"],
+                    "suggested_canonical": "Ada Lovelace",
+                    "confidence": "high",
+                }
+            ]
+        }
+        findings = build_investigation_findings(**_base_findings_kwargs(category_clusters=clusters))
+        assert len(findings) == 1
+        finding = findings[0]
+        assert "Ada Lovelace" not in finding["title"]
+        assert "Ada Lovelace" not in finding["suggested_action"]
+        assert all("Ada Lovelace" not in line for line in finding["evidence"])
+        assert PII_EVIDENCE_MASK in finding["title"]
+
+    def test_category_cluster_on_pii_like_column_resolved_tracks_column_level_mutation(self):
+        # Regression: mutations for a PII-masked column record the
+        # placeholder mask as original_value, never the real value (by
+        # design, to keep identifiers out of the audit trail) -- so
+        # comparing a cluster's real values against mutated_pairs could
+        # never match, and every PII-column category-cluster finding
+        # showed as permanently unresolved even after being applied.
+        clusters = {
+            "name": [
+                {
+                    "values": [" Ada Lovelace", "Ada Lovelace"],
+                    "suggested_canonical": "Ada Lovelace",
+                    "confidence": "high",
+                }
+            ]
+        }
+        unresolved = build_investigation_findings(**_base_findings_kwargs(category_clusters=clusters))
+        assert unresolved[0]["resolved"] == 0
+
+        mutations = [
+            {
+                "row_key": {"id": "1"},
+                "column": "name",
+                "original_value": PII_EVIDENCE_MASK,
+                "new_value": PII_EVIDENCE_MASK,
+                "transformation_rule": "category_mapping:name",
+                "reason": "Approved by user during interactive review",
+            }
+        ]
+        resolved = build_investigation_findings(
+            **_base_findings_kwargs(category_clusters=clusters, mutations=mutations)
+        )
+        assert resolved[0]["resolved"] == 1
+
+    def test_sentinel_on_pii_like_column_resolved_tracks_column_level_mutation(self):
+        mutations = [
+            {
+                "row_key": {"id": "1"},
+                "column": "ssn",
+                "original_value": PII_EVIDENCE_MASK,
+                "new_value": PII_EVIDENCE_MASK,
+                "transformation_rule": "missing_value_sentinel:ssn",
+                "reason": "Approved by user during interactive review",
+            }
+        ]
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(sentinels={"ssn": ["99"]}, mutations=mutations)
+        )
+        assert findings[0]["resolved"] == 1
+
 
 class TestBuildAuditReportHtml:
     def _build(self, **overrides):
@@ -321,4 +394,19 @@ class TestBuildAuditReportHtml:
         )
         html = self._build(rows=rows, transformed_rows=rows, findings=findings)
         assert "1980-01-01" not in html
+        assert PII_EVIDENCE_MASK in html
+
+    def test_category_cluster_pii_masking_survives_end_to_end_into_rendered_html(self):
+        clusters = {
+            "name": [
+                {
+                    "values": [" Ada Lovelace", "Ada Lovelace"],
+                    "suggested_canonical": "Ada Lovelace",
+                    "confidence": "high",
+                }
+            ]
+        }
+        findings = build_investigation_findings(**_base_findings_kwargs(category_clusters=clusters))
+        html = self._build(findings=findings)
+        assert "Ada Lovelace" not in html
         assert PII_EVIDENCE_MASK in html
