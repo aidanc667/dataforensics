@@ -72,6 +72,17 @@ def test_review_and_approve_apply_flow_runs_without_exception():
     assert not at.exception
     assert any("Done" in s.value for s in at.success)
 
+    # The three-file deliverable bundle (cleaned CSV, data dictionary, and
+    # the 10-section audit report) must actually render as download
+    # buttons -- confirms build_investigation_findings/
+    # build_audit_report_html ran to completion with the real fixture's
+    # data instead of raising inside a place AppTest wouldn't surface as
+    # at.exception (e.g. a rendering-only error swallowed by st.expander).
+    download_labels = [b.label for b in at.download_button]
+    assert any("audit_report.html" in label for label in download_labels)
+    assert any("data_dictionary.html" in label for label in download_labels)
+    assert any("Cleaned CSV" in label for label in download_labels)
+
 
 def test_birth_date_after_other_date_evidence_masks_pii_like_columns():
     # Regression test: the birth-date-after-other-date cross-column

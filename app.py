@@ -53,6 +53,11 @@ from dataforensics.investigate import (
     infer_semantic_role,
     match_clinical_range_rule,
 )
+from dataforensics.audit_report import (
+    build_audit_report_html,
+    build_investigation_findings,
+    format_bytes,
+)
 from dataforensics.quality_score import compute_quality_score
 from dataforensics.report import render_html
 from dataforensics.typing_guards import is_pii_like_column
@@ -266,15 +271,6 @@ def _evidence_panel(
         st.markdown(f"**What it does NOT know:**  \n{_esc(not_known)}")
         st.markdown(f"**Recommended action:**  \n{_esc(recommended_action)}")
         st.markdown("**Automatic modification:**  \nNONE — only applied if you approve it above and click *Apply approved changes*.")
-
-
-def _format_bytes(n: int) -> str:
-    size = float(n)
-    for unit in ("bytes", "KB", "MB"):
-        if size < 1024 or unit == "MB":
-            return f"{int(size)} {unit}" if unit == "bytes" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
 
 
 def _write_temp(name: str, content: bytes) -> Path:
@@ -587,7 +583,7 @@ with tab_analyze:
     data_size = len(st.session_state["dataforensics_data_bytes"])
     st.markdown(
         f'<div class="dataforensics-card" style="border-left:4px solid #4F46E5;">'
-        f'<div style="font-size:1.3rem; font-weight:700;">{len(rows):,} record(s) · {len(columns)} variable(s) · {_format_bytes(data_size)}</div>'
+        f'<div style="font-size:1.3rem; font-weight:700;">{len(rows):,} record(s) · {len(columns)} variable(s) · {format_bytes(data_size)}</div>'
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -1407,21 +1403,47 @@ with tab_analyze:
 
         st.success(f"Done — {len(mutations)} approved change(s) applied and logged.")
 
-        # DataForensics Audit Report data -- the same structure used both
-        # for the on-screen sections below and the downloadable
-        # audit_report.html, so what's shown here and what's downloaded
-        # never drift apart.
-        audit_data = {
-            "Dataset": {
-                "file": st.session_state["dataforensics_data_name"],
-                "rows": len(rows),
-                "columns": len(columns),
-            },
-            "Quality score": quality,
-            "Findings": findings_summary,
-            "Transformations approved": mutations,
-            "Safety checks": safety,
-        }
+        # DataForensics Audit Report: one canonical findings list (shared
+        # by Investigation Findings, Recommended Actions, Remaining
+        # Review, and Analysis Readiness, so they can't drift out of
+        # sync with each other), fed into the full 10-section report.
+        audit_findings = build_investigation_findings(
+            rows=rows,
+            dup_rows=dup_rows,
+            sentinels=sentinels,
+            approved_sentinels=approved_sentinels,
+            ambiguous_dates=ambiguous_dates,
+            category_clusters=category_clusters,
+            distribution_columns=distribution_columns,
+            dictionary=dictionary,
+            missingness_columns=missingness_columns,
+            clinical_range_findings=clinical_range_findings,
+            conflicting_id_findings=conflicting_id_findings,
+            invalid_fips_findings=invalid_fips_findings,
+            invalid_zip_findings=invalid_zip_findings,
+            survey_weight_columns=survey_weight_columns,
+            duplicate_entities=duplicate_entities,
+            birth_date_findings=birth_date_findings,
+            quasi_identifier_columns=quasi_identifier_columns,
+            id_like_defaults=id_like_defaults,
+            column_types=column_types,
+            mutations=mutations,
+        )
+        audit_report_html = build_audit_report_html(
+            file_name=st.session_state["dataforensics_data_name"],
+            file_size_bytes=data_size,
+            rows=rows,
+            transformed_rows=transformed_rows,
+            columns=columns,
+            column_types=column_types,
+            dictionary=dictionary,
+            findings=audit_findings,
+            mutations=mutations,
+            safety=safety,
+            validation_report=report,
+            applied_at=applied_at,
+            dataset_type=dataset_type,
+        )
 
         dl1, dl2, dl3 = st.columns(3)
         dl1.download_button(
@@ -1433,8 +1455,7 @@ with tab_analyze:
             file_name="data_dictionary.html", mime="text/html", width="stretch",
         )
         dl3.download_button(
-            "⬇ audit_report.html",
-            data=render_html("DataForensics Audit Report", audit_data | {"Validation Report": report}),
+            "⬇ audit_report.html", data=audit_report_html,
             file_name="audit_report.html", mime="text/html", width="stretch",
         )
 
