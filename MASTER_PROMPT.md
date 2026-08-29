@@ -29,7 +29,6 @@ Organize your mental model around these five clusters. They are constraints on e
 **Three-tier validation, never mixed**
 - Every check is one of: **Error** (objectively violates an explicit schema rule — e.g. `age < 0`, or a duplicate value in a declared primary key), **Warning** (suspicious but may be valid, and only fires if a schema rule defines the relevant bound — e.g. `age > 120` if `age.maximum: 120` is configured; with no schema rule, this is not evaluated at all), or **Suggestion** (a heuristic — IQR/MAD outlier, rare category, high-confidence string-similarity category merge candidate — never counted as an error, always labeled with the method used).
 - Every reported check has one of four states: PASSED, WARNING, FAILED, or **NOT EVALUATED**. Never omit a check silently or imply something was checked when no rule/metadata existed to check it against.
-- Never produce a single aggregate "quality score." Report counts by category instead (`Hard errors: 2, Warnings: 14, Suggestions: 6, Rules evaluated: 24, Rules passed: 22`).
 - A statistically unusual value is never automatically "wrong." IQR/MAD outlier flags, rare categories, and extreme-but-plausible values are always Suggestions, never Errors, and are never auto-deleted, winsorized, capped, or imputed.
 
 **Determinism, reproducibility, and versioning**

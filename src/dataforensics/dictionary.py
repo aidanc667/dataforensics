@@ -216,11 +216,40 @@ def detect_outliers(values: list[float]) -> dict:
     }
 
 
+def _row_to_dict(header: list[str], row: list[str]) -> dict[str, str]:
+    """Zips `header` with `row` into a dict, the way zip_longest(header,
+    row, fillvalue="") does for a row with FEWER fields than the header
+    (every header name becomes a key; a missing trailing value becomes
+    "") -- but handles a row with 2+ MORE fields than the header
+    correctly, which plain zip_longest does not.
+
+    Once `header` is exhausted, zip_longest's fillvalue ("") is reused as
+    the "name" for every remaining position, so a row with two or more
+    overflow fields produces multiple ("", value) pairs. dict() then
+    keeps only the LAST one -- every earlier overflow value is silently
+    discarded with zero indication anything vanished. This is a real,
+    observed failure mode: a free-text field with two unquoted/unescaped
+    delimiters in it (e.g. a comma-separated notes column containing
+    "Springfield, IL, USA") loses "Springfield, IL" and keeps only "USA".
+    Here, every overflow value is preserved instead -- joined into that
+    same "" column (matching this codebase's existing single-overflow
+    behavior, documented elsewhere as "the overflow content is preserved
+    under a column named \"\" rather than dropped") so nothing is ever
+    silently lost, even though it can no longer be cleanly attributed to
+    separate columns.
+    """
+    if len(row) <= len(header):
+        return dict(zip_longest(header, row, fillvalue=""))
+    result = dict(zip(header, row))
+    result[""] = " | ".join(row[len(header):])
+    return result
+
+
 def read_rows(path: Path, sheet: str | None = None) -> list[dict]:
     header, body_rows = _load_table(path, sheet=sheet)
     if not header:
         return []
-    return [dict(zip_longest(header, row, fillvalue="")) for row in body_rows]
+    return [_row_to_dict(header, row) for row in body_rows]
 
 
 def detect_top_code_spike(values: list[float]) -> dict | None:

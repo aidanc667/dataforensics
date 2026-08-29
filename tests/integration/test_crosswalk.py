@@ -302,3 +302,73 @@ def test_rules_map_entry_missing_equals_exits_2_not_crash(tmp_path):
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "--rules-map" in result.output
     assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_crosswalk_execute_refuses_cleanly_for_a_ragged_row_not_in_position_zero(tmp_path):
+    # A source file whose first row is clean but a LATER row has a stray
+    # extra field (an unescaped delimiter in free text) produces a ""
+    # overflow key on that later row only. This is caught -- and refused
+    # with a clear error, exit 3, not a crash -- by the per-source
+    # assert_row_and_column_integrity check upstream of the write pass
+    # (it anchors to the real on-disk header, which the "" overflow
+    # column was never part of). This test locks in that clean-refusal
+    # behavior; the write path's fieldnames derivation was separately
+    # hardened from harmonized_rows[0].keys() (row 0 alone) to
+    # column_union(harmonized_rows) (every row) as defense in depth, in
+    # case that upstream check is ever relaxed -- column_union's own
+    # "row 0 can miss a key a later row has" behavior is covered directly
+    # in tests/unit/test_harmonize_safety.py.
+    wonder = tmp_path / "wonder.csv"
+    wonder.write_text(
+        "county_fips,deaths,age_group,sex\n"
+        "06081,12,25-34,M\n"
+        "06001,5,35-44,F,stray_overflow_field\n"  # row index 1, NOT row 0, has the overflow
+    )
+    wonder_rules = tmp_path / "wonder_rules.yaml"
+    wonder_rules.write_text("version: 1\nprimary_key: [county_fips]\ncolumns: {}\n")
+
+    pums = tmp_path / "pums.csv"
+    pums.write_text("PUMA,AGEP,SEX,person_id\n0601,29,1,p1\n0602,41,2,p2\n")
+    pums_rules = tmp_path / "pums_rules.yaml"
+    pums_rules.write_text("version: 1\nprimary_key: [person_id]\ncolumns: {}\n")
+
+    crosswalk = tmp_path / "crosswalk.yaml"
+    crosswalk.write_text(
+        "version: 1\n"
+        "sources:\n"
+        "  wonder:\n"
+        "    column_map:\n"
+        "      county_fips: geography_fips\n"
+        "      age_group: age_band\n"
+        "      sex: sex\n"
+        "  pums:\n"
+        "    column_map:\n"
+        "      PUMA: geography_fips\n"
+        "      AGEP: age_band\n"
+        "      SEX: sex\n"
+        "    value_map:\n"
+        "      sex:\n"
+        "        \"1\": M\n"
+        "        \"2\": F\n"
+    )
+    output_dir = tmp_path / "harmonized"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "harmonize",
+            str(wonder),
+            str(pums),
+            "--rules-map",
+            f"{wonder}={wonder_rules},{pums}={pums_rules}",
+            "--crosswalk",
+            str(crosswalk),
+            "--output-dir",
+            str(output_dir),
+            "--execute",
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert "Refusing to write output" in result.output
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []

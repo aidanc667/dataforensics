@@ -15,6 +15,7 @@ from dataforensics.harmonize import (
     apply_crosswalk,
     apply_transformations,
     assert_row_and_column_integrity,
+    column_union,
     plan_transformations,
 )
 from dataforensics.ingest import (
@@ -377,10 +378,12 @@ def _harmonize_single_file(file, rules_path, output, execute, sheet):
         click.echo(f"Refusing to write output: {exc}", err=True)
         sys.exit(3)
 
-    if transformed_rows:
-        fieldnames = list(transformed_rows[0].keys())
-    else:
-        fieldnames = anchor_header
+    # column_union scans every row, not just row 0 -- a ragged input row
+    # (more fields than the header) can add a stray "" key to just THAT
+    # row, which row-0-only fieldnames would miss entirely and then crash
+    # csv.DictWriter.writerows() with "dict contains fields not in
+    # fieldnames" the moment it reached that row.
+    fieldnames = column_union(transformed_rows) if transformed_rows else anchor_header
 
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=fieldnames)
@@ -574,7 +577,11 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
     for source_name, file_path, source_crosswalk, harmonized_rows, mutations in computed:
         if execute:
             if harmonized_rows:
-                fieldnames = list(harmonized_rows[0].keys())
+                # column_union, not row 0 alone -- see the single-file
+                # harmonize write path above for why row 0 can miss a key
+                # (e.g. a ragged-row "" overflow column) that only shows
+                # up on a later row.
+                fieldnames = column_union(harmonized_rows)
             else:
                 column_map = source_crosswalk.get("column_map", {})
                 fieldnames = [column_map.get(col, col) for col in file_headers[str(file_path)]]

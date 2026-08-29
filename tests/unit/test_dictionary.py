@@ -82,6 +82,32 @@ def test_read_rows_ragged_row_fills_missing_trailing_field(tmp_path):
     assert rows[1] == {"participant_id": "2", "age": "41", "site": ""}
 
 
+def test_read_rows_row_with_one_overflow_field_preserves_it(tmp_path):
+    f = tmp_path / "overflow.csv"
+    f.write_text("id,name\n1,Ada,stray\n")  # an unquoted stray delimiter -- 3 raw fields against a 2-field header
+    rows = read_rows(f)
+    assert rows[0] == {"id": "1", "name": "Ada", "": "stray"}
+
+
+def test_read_rows_row_with_multiple_overflow_fields_preserves_all_of_them(tmp_path):
+    # Regression test for a real, serious bug: dict(zip_longest(header, row,
+    # fillvalue="")) pairs EVERY position past the header's length with the
+    # SAME key ("", since fillvalue is reused once header is exhausted) --
+    # dict() construction then keeps only the LAST such pair, silently
+    # discarding every earlier overflow value with zero indication anything
+    # vanished. A free-text field with two unquoted/unescaped delimiters
+    # (e.g. "Springfield, IL, USA" in an unquoted comma-delimited row) would
+    # have lost "Springfield, IL" and kept only "USA". Both overflow
+    # fragments must now survive, joined together rather than dropped.
+    f = tmp_path / "multi_overflow.csv"
+    f.write_text("id,name\n1,Ada,overflow1,overflow2\n")
+    rows = read_rows(f)
+    assert rows[0]["id"] == "1"
+    assert rows[0]["name"] == "Ada"
+    assert "overflow1" in rows[0][""]
+    assert "overflow2" in rows[0][""]
+
+
 def test_read_rows_empty_file_returns_empty_list(tmp_path):
     f = tmp_path / "empty.csv"
     f.write_text("")
