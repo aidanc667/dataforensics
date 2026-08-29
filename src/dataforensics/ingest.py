@@ -100,7 +100,21 @@ def read_source_lines(path: Path) -> tuple[list[str], str]:
     exposed to the blank-line bug above). Returns (data_lines, encoding).
     """
     encoding = detect_encoding(path)
-    raw_lines = path.read_text(encoding=encoding).splitlines()
+    try:
+        raw_lines = path.read_text(encoding=encoding).splitlines()
+    except UnicodeDecodeError as exc:
+        # detect_encoding's best guess (or its "utf-8" fallback when it
+        # couldn't guess at all) still failed to decode every byte -- this
+        # is not a CSV/TSV encoding quirk at that point, it's very likely
+        # a binary file (an image, a PDF, a genuinely corrupted upload)
+        # with a text-file extension. Fail cleanly here with a message the
+        # existing IngestFormatError handling already shows the user,
+        # instead of letting a raw UnicodeDecodeError traceback surface.
+        raise IngestFormatError(
+            f"{path.name} doesn't look like a text file (tried decoding as {encoding}: {exc}). "
+            "This is likely a binary file (e.g. an image or PDF) with a .csv/.tsv extension, "
+            "or a corrupted download -- re-export it as plain-text CSV/TSV and re-upload."
+        ) from exc
     return [line for line in raw_lines if line.strip() != ""], encoding
 
 

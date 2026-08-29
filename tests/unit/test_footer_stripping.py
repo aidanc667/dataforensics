@@ -1,3 +1,5 @@
+import pytest
+
 from dataforensics.ingest import join_delimited_line, read_source_lines, split_delimited_line, strip_footer
 
 
@@ -85,6 +87,20 @@ def test_read_source_lines_drops_blank_lines(tmp_path):
     lines, encoding = read_source_lines(f)
     assert lines == ["id,name", "1,Ada", "2,Bob", "3,Carol"]
     assert encoding
+
+
+def test_read_source_lines_raises_clean_error_for_undecodable_binary_file(tmp_path):
+    # Regression: uploading a binary file (an image, a corrupted download)
+    # with a .csv extension raised an unhandled UnicodeDecodeError straight
+    # out of path.read_text() -- a raw traceback shown to the user instead
+    # of the same clean "can't read this file" error every other
+    # malformed-input case in this module already produces.
+    from dataforensics.ingest import IngestFormatError
+
+    f = tmp_path / "fake.csv"
+    f.write_bytes(bytes([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x02, 0x03]))
+    with pytest.raises(IngestFormatError, match="doesn't look like a text file"):
+        read_source_lines(f)
 
 
 def test_split_delimited_line_respects_quoted_delimiter():
