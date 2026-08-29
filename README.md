@@ -73,9 +73,8 @@ Two tabs:
     prior one next time to see exactly what changed) round out the investigation.
   - Approve findings individually, then apply — DataForensics verifies row/column counts and
     primary-key uniqueness were preserved and that every unmodified column is provably
-    byte-identical before offering a full deliverable bundle: cleaned CSV, `provenance.json`,
-    `validation_results.json`, `data_dictionary.html`, `quality_report.html`, `audit_report.md`,
-    `audit_report.html`.
+    byte-identical before offering the deliverable bundle: the cleaned CSV, `data_dictionary.html`,
+    and `audit_report.html` (findings, transformations approved, and safety checks in one file).
 - **Multi-File Relationships** — upload 2+ files from the same study; it suggests shared key
   columns by name *and* real value overlap, and checks referential integrity across a pair you
   pick. Discovery only — nothing is ever joined or merged.

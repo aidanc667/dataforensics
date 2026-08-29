@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -52,9 +53,8 @@ from dataforensics.investigate import (
     infer_semantic_role,
     match_clinical_range_rule,
 )
-from dataforensics.manifest import build_manifest
 from dataforensics.quality_score import compute_quality_score
-from dataforensics.report import render_html, render_markdown
+from dataforensics.report import render_html
 from dataforensics.typing_guards import is_pii_like_column
 from dataforensics.validation import validate
 
@@ -1380,17 +1380,12 @@ with tab_analyze:
             )
             st.stop()
 
-        manifest = build_manifest([data_path], [])
         # Every mutation records the same timestamp -- the moment this
         # Apply click ran -- rather than a per-row clock read that would
         # imply an ordering precision this batch operation doesn't have.
+        applied_at = datetime.now(timezone.utc).isoformat()
         for mutation in mutations:
-            mutation["timestamp_utc"] = manifest["timestamp_utc"]
-        manifest["mutations"] = mutations
-        manifest["schema_sha256"] = []  # rules were assembled interactively, not from a file
-        manifest["provenance"] = {"source": "interactive review", "approved_by": "user"}
-        manifest["safety_checks"] = safety
-        manifest["findings_summary"] = findings_summary
+            mutation["timestamp_utc"] = applied_at
 
         buffer = io.StringIO()
         # column_union scans every row, not just row 0 -- a ragged input row
@@ -1414,8 +1409,8 @@ with tab_analyze:
 
         # DataForensics Audit Report data -- the same structure used both
         # for the on-screen sections below and the downloadable
-        # audit_report.md / quality_report.html, so what's shown here and
-        # what's downloaded never drift apart.
+        # audit_report.html, so what's shown here and what's downloaded
+        # never drift apart.
         audit_data = {
             "Dataset": {
                 "file": st.session_state["dataforensics_data_name"],
@@ -1434,29 +1429,11 @@ with tab_analyze:
             file_name=f"cleaned_{st.session_state['dataforensics_data_name']}", mime="text/csv", width="stretch",
         )
         dl2.download_button(
-            "⬇ provenance.json", data=json.dumps(manifest, indent=2),
-            file_name="provenance.json", mime="application/json", width="stretch",
-        )
-        dl3.download_button(
-            "⬇ validation_results.json", data=json.dumps(report, indent=2),
-            file_name="validation_results.json", mime="application/json", width="stretch",
-        )
-        dl4, dl5, dl6 = st.columns(3)
-        dl4.download_button(
             "⬇ data_dictionary.html", data=render_html("Data Dictionary", dictionary),
             file_name="data_dictionary.html", mime="text/html", width="stretch",
         )
-        dl5.download_button(
-            "⬇ quality_report.html", data=render_html("Quality Report", report),
-            file_name="quality_report.html", mime="text/html", width="stretch",
-        )
-        dl6.download_button(
-            "⬇ audit_report.md",
-            data=render_markdown("DataForensics Audit Report", audit_data) + "\n\n" + render_markdown("Validation Report", report),
-            file_name="audit_report.md", mime="text/markdown", width="stretch",
-        )
-        st.download_button(
-            "⬇ audit_report.html (same content, formatted for a browser)",
+        dl3.download_button(
+            "⬇ audit_report.html",
             data=render_html("DataForensics Audit Report", audit_data | {"Validation Report": report}),
             file_name="audit_report.html", mime="text/html", width="stretch",
         )
