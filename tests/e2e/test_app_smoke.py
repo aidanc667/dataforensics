@@ -121,3 +121,31 @@ def test_birth_date_after_other_date_evidence_masks_pii_like_columns():
     assert "[masked: potential identifier pattern detected]" in evidence_lines[0]
     # visit_date is not PII-like -- its value must still show through.
     assert "2024-01-01" in evidence_lines[0]
+
+
+def test_two_redundant_zip_columns_do_not_alone_trigger_duplicate_entity_finding():
+    # Regression test: a dataset with two zip-named columns (a common
+    # real-world shape -- an open-data export with both a live "Zipcode"
+    # column and a redundant legacy one) and no name/DOB/sex column had
+    # both zip columns counted as two SEPARATE quasi-identifier signals,
+    # satisfying the "2+ signals" bar on a single weak geographic fact
+    # recorded twice. On one real 48,880-row dataset this flagged 247
+    # groups covering 48,012 rows as "potential duplicate entities" purely
+    # because pairs of rows shared a zip code, which thousands of
+    # unrelated real-world entities legitimately do. A zip code alone --
+    # even spelled two ways -- must never be enough on its own.
+    lines = ["record_id,zip_code,ZIPCODE"]
+    # Every row shares one of two zip codes, with a different record_id
+    # each time -- exactly the shape that used to false-positive.
+    for i in range(1, 21):
+        zip_code = "94102" if i % 2 == 0 else "94103"
+        lines.append(f"R{i:03d},{zip_code},{zip_code}")
+    csv_bytes = ("\n".join(lines) + "\n").encode()
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["dataforensics_data_bytes"] = csv_bytes
+    at.session_state["dataforensics_data_name"] = "zip_test.csv"
+    at.run(timeout=30)
+    assert not at.exception
+
+    assert not any("potential duplicate entit" in md.value for md in at.markdown)

@@ -550,9 +550,24 @@ with tab_analyze:
                 birth_date_findings[(birth_col, other_col)] = evidence
 
     _QUASI_IDENTIFIER_ROLES = {"NAME", "DATE_OF_BIRTH", "SEX_OR_GENDER"}
-    quasi_identifier_columns = [
-        col for col, role in role_by_column.items() if role and role["role"] in _QUASI_IDENTIFIER_ROLES
-    ]
+    # Cap each quasi-identifier signal to at most ONE contributing column.
+    # Two columns that both represent the same underlying fact (e.g. a
+    # real-world export with both "Zipcode" and a redundant legacy
+    # "DELETE - Zip Codes" column) are not two independent pieces of
+    # evidence -- they're the same fact recorded twice. Without this cap,
+    # a dataset with two zip-named columns and nothing else satisfied the
+    # "2+ signals" bar entirely on a single, weak geographic signal (a
+    # ZIP code identifies a neighborhood, not a person) -- on one real
+    # citywide dataset this flagged 247 groups covering 48,012 of 48,880
+    # rows as "potential duplicate entities" purely because pairs of rows
+    # happened to share a zip code, which thousands of unrelated
+    # addresses do.
+    quasi_identifier_roles_seen: set[str] = set()
+    quasi_identifier_columns: list[str] = []
+    for col, role in role_by_column.items():
+        if role and role["role"] in _QUASI_IDENTIFIER_ROLES and role["role"] not in quasi_identifier_roles_seen:
+            quasi_identifier_columns.append(col)
+            quasi_identifier_roles_seen.add(role["role"])
     # ZIP specifically bypasses infer_semantic_role and uses the same
     # dedicated name-matcher the Geographic profile's format check uses --
     # a ZIP code column is very commonly classified "id" by dictionary.py
@@ -561,11 +576,17 @@ with tab_analyze:
     # an "id"-classified column. That's the right call for a role that's
     # redundant with "id" -- but "this is a ZIP code" is additional,
     # non-redundant information dictionary.py's "id" label doesn't carry,
-    # and quasi-identifier matching needs it.
-    quasi_identifier_columns += [c for c in find_zip_like_columns(columns) if c not in quasi_identifier_columns]
+    # and quasi-identifier matching needs it. Only the first matching
+    # column is used, for the same one-signal-per-fact reason as above.
+    if "ZIP_OR_POSTAL" not in quasi_identifier_roles_seen:
+        zip_like_columns = find_zip_like_columns(columns)
+        if zip_like_columns:
+            quasi_identifier_columns.append(zip_like_columns[0])
+            quasi_identifier_roles_seen.add("ZIP_OR_POSTAL")
     duplicate_entities: list[dict] = []
-    # Require 2+ matched roles -- a single weak signal (e.g. name alone)
-    # isn't enough evidence to suggest two IDs might be the same entity.
+    # Require 2+ DISTINCT signals -- a single weak signal (e.g. ZIP code
+    # alone) isn't enough evidence to suggest two IDs might be the same
+    # entity.
     if len(quasi_identifier_columns) >= 2 and id_like_defaults:
         duplicate_entities = detect_duplicate_entities(rows, quasi_identifier_columns, id_like_defaults[0])
 
