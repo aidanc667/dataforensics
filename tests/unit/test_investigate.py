@@ -1,10 +1,15 @@
 from dataforensics.investigate import (
+    analyze_key_cardinality,
+    build_missingness_overview,
     classify_column_types,
+    compute_key_coverage,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
     detect_conflicting_id_records,
     detect_duplicate_entities,
     detect_duplicate_rows,
+    detect_missingness_co_occurrence,
+    detect_missingness_concentration,
     detect_similar_categories,
     detect_survey_weight_columns,
     find_ambiguous_date_evidence,
@@ -160,6 +165,25 @@ def test_detect_similar_categories_trailing_whitespace_canonical_unaffected():
     clusters = detect_similar_categories(["Bangalore", "Bangalore "])
     assert len(clusters) == 1
     assert clusters[0]["suggested_canonical"] == "Bangalore"
+
+
+def test_detect_similar_categories_does_not_cluster_negation_pairs():
+    # Regression: rapidfuzz scores "employed"/"unemployed" at 88.9%,
+    # above the default 85% threshold, but they're opposite categories --
+    # merging them would silently corrupt the data. Same for other
+    # standard negation prefixes a researcher's survey data could contain.
+    assert detect_similar_categories(["employed", "unemployed"]) == []
+    assert detect_similar_categories(["consistent", "inconsistent"]) == []
+    assert detect_similar_categories(["legal", "illegal"]) == []
+    assert detect_similar_categories(["satisfied", "dissatisfied"]) == []
+
+
+def test_detect_similar_categories_negation_check_does_not_break_real_typo_clusters():
+    # Confirms the negation guard is narrowly scoped -- genuine typo
+    # clusters (no negation prefix relationship) must still work.
+    clusters = detect_similar_categories(["Male", "male", "MALE"])
+    assert len(clusters) == 1
+    assert set(clusters[0]["values"]) == {"Male", "male", "MALE"}
 
 
 def test_detect_similar_categories_falls_back_to_alphabetical_when_no_member_trimmed():
@@ -370,3 +394,122 @@ def test_detect_duplicate_entities_empty_quasi_identifier_list_flags_nothing():
     # silently flag the entire dataset as one giant "duplicate entity."
     rows = [{"id": "1", "age": "10"}, {"id": "2", "age": "20"}, {"id": "3", "age": "30"}]
     assert detect_duplicate_entities(rows, [], "id") == []
+
+
+def test_analyze_key_cardinality_one_to_one():
+    child_values_all = ["P1", "P2", "P3"]
+    result = analyze_key_cardinality(child_values_all, {"P1", "P2", "P3"})
+    assert result["relationship"] == "one_to_one"
+    assert result["max_children_per_parent"] == 1
+    assert result["parents_with_multiple_children"] == 0
+
+
+def test_analyze_key_cardinality_one_to_many():
+    # P1 has 3 visit rows, P2 has 1 -- classic participants -> visits shape.
+    child_values_all = ["P1", "P1", "P1", "P2"]
+    result = analyze_key_cardinality(child_values_all, {"P1", "P2"})
+    assert result["relationship"] == "one_to_many"
+    assert result["max_children_per_parent"] == 3
+    assert result["parents_with_multiple_children"] == 1
+
+
+def test_analyze_key_cardinality_ignores_orphans():
+    # "P9" isn't a real parent -- orphan analysis is check_referential_integrity's
+    # job, cardinality should only count matched rows.
+    child_values_all = ["P1", "P1", "P9"]
+    result = analyze_key_cardinality(child_values_all, {"P1"})
+    assert result["max_children_per_parent"] == 2
+    assert result["relationship"] == "one_to_many"
+
+
+def test_analyze_key_cardinality_no_matches():
+    assert analyze_key_cardinality(["P9"], {"P1"})["relationship"] == "no_matches"
+
+
+def test_compute_key_coverage_full_and_partial():
+    full = compute_key_coverage({"P1", "P2"}, {"P1", "P2", "P3"})
+    assert full["coverage_fraction"] == 1.0
+    assert full["covered_count"] == 2
+
+    partial = compute_key_coverage({"P1", "P2", "P3", "P4"}, {"P1", "P2", "P3"})
+    assert partial["parent_count"] == 4
+    assert partial["covered_count"] == 3
+    assert partial["coverage_fraction"] == 0.75
+
+
+def test_compute_key_coverage_empty_parents():
+    assert compute_key_coverage(set(), {"P1"}) == {"parent_count": 0, "covered_count": 0, "coverage_fraction": 0.0}
+
+
+def test_build_missingness_overview_includes_every_column_sorted_worst_first():
+    dictionary = {
+        "age": {"non_null_pct": 100.0},
+        "bmi": {"non_null_pct": 91.6},
+        "income": {"non_null_pct": 87.9},
+    }
+    overview = build_missingness_overview(dictionary)
+    assert [row["column"] for row in overview] == ["income", "bmi", "age"]
+    assert overview[0]["missing_pct"] == 12.1
+    assert overview[-1]["missing_pct"] == 0.0
+
+
+def test_detect_missingness_concentration_finds_age_gap():
+    # BMI is missing specifically for the older participants (age ~80),
+    # present for the younger ones (age ~30) -- a clear concentration.
+    rows = []
+    for i in range(10):
+        rows.append({"bmi": "", "age": str(78 + i)})
+    for i in range(10):
+        rows.append({"bmi": "24.5", "age": str(28 + i)})
+    results = detect_missingness_concentration(rows, "bmi", ["age"])
+    assert len(results) == 1
+    assert results[0]["column"] == "age"
+    assert results[0]["direction"] == "higher"
+    assert results[0]["missing_group_size"] == 10
+    assert results[0]["present_group_size"] == 10
+
+
+def test_detect_missingness_concentration_no_pattern_when_groups_similar():
+    rows = []
+    for i in range(10):
+        rows.append({"bmi": "", "age": str(40 + (i % 5))})
+    for i in range(10):
+        rows.append({"bmi": "24.5", "age": str(40 + (i % 5))})
+    assert detect_missingness_concentration(rows, "bmi", ["age"]) == []
+
+
+def test_detect_missingness_concentration_requires_minimum_group_size():
+    # Only 3 rows missing bmi -- below the minimum sample size to say
+    # anything meaningful, even though the ages look very different.
+    rows = [{"bmi": "", "age": "90"}, {"bmi": "", "age": "91"}, {"bmi": "", "age": "92"}]
+    rows += [{"bmi": "24.5", "age": str(20 + i)} for i in range(10)]
+    assert detect_missingness_concentration(rows, "bmi", ["age"]) == []
+
+
+def test_detect_missingness_co_occurrence_finds_shared_gap():
+    rows = []
+    # 10 rows where income AND employment_status are both blank.
+    for _ in range(10):
+        rows.append({"income": "", "employment_status": "", "id": "x"})
+    # 10 rows where both are present.
+    for _ in range(10):
+        rows.append({"income": "50000", "employment_status": "employed", "id": "x"})
+    results = detect_missingness_co_occurrence(rows, ["income", "employment_status", "id"])
+    assert len(results) == 1
+    assert {results[0]["column_a"], results[0]["column_b"]} == {"income", "employment_status"}
+    assert results[0]["both_missing_count"] == 10
+    assert results[0]["overlap_fraction"] == 1.0
+
+
+def test_detect_missingness_co_occurrence_no_pattern_for_independent_gaps():
+    # income and employment_status are each missing on 10 DIFFERENT rows
+    # (no overlap) -- independent gaps, not a shared cause.
+    rows = []
+    for i in range(20):
+        rows.append(
+            {
+                "income": "" if i < 10 else "50000",
+                "employment_status": "" if i >= 10 else "employed",
+            }
+        )
+    assert detect_missingness_co_occurrence(rows, ["income", "employment_status"]) == []

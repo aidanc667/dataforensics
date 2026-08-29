@@ -29,15 +29,20 @@ from dataforensics.ingest import (
 from dataforensics.investigate import (
     COMMON_SENTINEL_STRINGS,
     DATASET_PROFILES,
+    analyze_key_cardinality,
+    build_missingness_overview,
     check_referential_integrity,
     classify_column_types,
     compare_fingerprints,
     compute_dataset_fingerprint,
+    compute_key_coverage,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
     detect_conflicting_id_records,
     detect_duplicate_entities,
     detect_duplicate_rows,
+    detect_missingness_co_occurrence,
+    detect_missingness_concentration,
     detect_similar_categories,
     detect_survey_weight_columns,
     discover_shared_key_columns,
@@ -644,6 +649,20 @@ with tab_analyze:
     # (e.g. income is normally right-skewed), so that finding is phrased
     # as "warrants review," never "is incorrect."
     missingness_columns = [c for c, f in dictionary.items() if f.get("non_null_pct", 100) < 90]
+    missingness_overview = build_missingness_overview(dictionary)
+    # Candidate columns for concentration comparison: excludes id-shaped
+    # columns (a primary key's "median" is meaningless) and PII-like ones
+    # (comparing a masked column's values would either compare nothing or
+    # require unmasking real identifiers just to compute a statistic).
+    numeric_concentration_candidates = [
+        c for c in columns if dictionary[c]["category"] != "id" and not is_pii_like_column(c)
+    ]
+    missingness_concentration: dict[str, list[dict]] = {}
+    for col in missingness_columns:
+        found = detect_missingness_concentration(rows, col, numeric_concentration_candidates)
+        if found:
+            missingness_concentration[col] = found
+    missingness_co_occurrence = detect_missingness_co_occurrence(rows, missingness_columns)
     distribution_columns = sorted(set(outlier_cols_preview) | set(top_code_cols_preview))
     total_conflicting_records = sum(len(v) for v in conflicting_id_findings.values())
     total_birth_date_rows = sum(len(v) for v in birth_date_findings.values())
@@ -730,9 +749,38 @@ with tab_analyze:
     if missingness_columns:
         any_attention_items = True
         n = len(missingness_columns)
-        with st.expander(f"🟠 {n} variable{'s' if n != 1 else ''} with substantial missingness"):
-            for c in missingness_columns:
-                st.markdown(f"- {c}: {dictionary[c]['non_null_pct']:.1f}% non-null")
+        n_patterns = len(missingness_concentration) + len(missingness_co_occurrence)
+        pattern_suffix = f" — {n_patterns} pattern(s) detected" if n_patterns else ""
+        with st.expander(f"🟠 {n} variable{'s' if n != 1 else ''} with substantial missingness{pattern_suffix}"):
+            st.markdown("**Missingness overview** (every column, not just these)")
+            overview_rows = [
+                {"Variable": r["column"], "Missing %": f"{r['missing_pct']:.1f}%", "Non-null %": f"{r['non_null_pct']:.1f}%"}
+                for r in missingness_overview
+            ]
+            st.dataframe(overview_rows, width="stretch", hide_index=True)
+            if missingness_concentration or missingness_co_occurrence:
+                st.markdown("**Patterns detected**")
+                for col, findings in missingness_concentration.items():
+                    for f in findings[:3]:
+                        st.markdown(
+                            f"- **{col}** missingness is concentrated where **{f['column']}** is {f['direction']} "
+                            f"(median {f['median_when_missing']:,.2f} when {col} is missing vs. "
+                            f"{f['median_when_present']:,.2f} when present)"
+                        )
+                for f in missingness_co_occurrence[:5]:
+                    st.markdown(
+                        f"- **{f['column_a']}** and **{f['column_b']}** are frequently missing together "
+                        f"({f['both_missing_count']} of {min(f['column_a_missing_count'], f['column_b_missing_count'])} "
+                        f"of the smaller gap's rows, {f['overlap_fraction']:.0%})"
+                    )
+                st.caption(
+                    "These are plain comparisons, not a statistical significance test. Missingness pattern "
+                    "detected; statistical handling (e.g. multiple imputation) requires analyst judgment — "
+                    "DataForensics never imputes. Full evidence in **Review & Approve** below."
+                )
+            else:
+                for c in missingness_columns:
+                    st.markdown(f"- {c}: {dictionary[c]['non_null_pct']:.1f}% non-null")
 
     if total_domain_findings:
         any_attention_items = True
@@ -995,6 +1043,71 @@ with tab_analyze:
             )
             if checked:
                 approved_date_formats[col] = "%m/%d/%Y" if fmt_label == "MM/DD/YYYY" else "%d/%m/%Y"
+
+    if missingness_concentration or missingness_co_occurrence:
+        st.markdown('<div class="dataforensics-bucket-header">🕳️ Missingness patterns</div>', unsafe_allow_html=True)
+        st.caption("Informational only — nothing to approve here. DataForensics never imputes; these are plain comparisons, not a significance test.")
+        for col, findings in missingness_concentration.items():
+            for f in findings:
+                st.markdown(
+                    f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Concentration</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)} missingness is concentrated where {_esc(f["column"])} is {f["direction"]}</div>'
+                    f'<div class="dataforensics-card-evidence">median {f["column"]} {f["median_when_missing"]:,.2f} when {col} is missing '
+                    f'vs. {f["median_when_present"]:,.2f} when present</div></div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        f"**Rule:**  \nAmong rows where {_esc(col)} is missing ({f['missing_group_size']} row(s) "
+                        f"with a parseable {_esc(f['column'])} value) vs. rows where it's present "
+                        f"({f['present_group_size']} row(s)), {_esc(f['column'])}'s median differs by "
+                        f"{f['relative_gap']:.0%} — at or above the 20% relative-gap threshold used to surface this."
+                    )
+                    st.markdown(
+                        f"**What the system knows:**  \nWhen {_esc(col)} is missing, {_esc(f['column'])}'s median "
+                        f"is {f['median_when_missing']:,.2f}; when {_esc(col)} is present, it's "
+                        f"{f['median_when_present']:,.2f}."
+                    )
+                    st.markdown(
+                        "**What it does NOT know:**  \nWhether this reflects a real cause (e.g. a measurement "
+                        "that becomes harder to collect for one group), a coincidence in this sample, or a "
+                        "confound with a third variable — this is a median comparison, not a statistical test."
+                    )
+                    st.markdown(
+                        "**Recommended action:**  \nMissingness pattern detected; statistical handling (e.g. "
+                        "multiple imputation, a missing-data mechanism analysis) requires analyst judgment. "
+                        "DataForensics never imputes."
+                    )
+                    st.markdown("**Automatic modification:**  \nNONE.")
+        for f in missingness_co_occurrence:
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Co-occurrence</span>'
+                f'<div class="dataforensics-card-title">{_esc(f["column_a"])} and {_esc(f["column_b"])} are frequently missing together</div>'
+                f'<div class="dataforensics-card-evidence">{f["both_missing_count"]} row(s) missing both — '
+                f'{f["overlap_fraction"]:.0%} of the smaller gap</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    f"**Rule:**  \n{_esc(f['column_a'])} is missing on {f['column_a_missing_count']} row(s), "
+                    f"{_esc(f['column_b'])} on {f['column_b_missing_count']} row(s); {f['both_missing_count']} "
+                    "row(s) are missing both — that's at or above the 50% overlap-of-the-smaller-gap threshold "
+                    "used to surface this."
+                )
+                st.markdown(
+                    f"**What the system knows:**  \n{_esc(f['column_a'])} and {_esc(f['column_b'])} are blank on "
+                    "the same records far more often than the smaller gap's size alone would suggest."
+                )
+                st.markdown(
+                    "**What it does NOT know:**  \nWhether these gaps share a real cause (e.g. the same survey "
+                    "section skipped, the same non-response), or are coincidentally correlated in this sample — "
+                    "this is a raw overlap count, not an independence test."
+                )
+                st.markdown(
+                    "**Recommended action:**  \nMissingness pattern detected; statistical handling requires "
+                    "analyst judgment. DataForensics never imputes."
+                )
+                st.markdown("**Automatic modification:**  \nNONE.")
 
     if category_clusters:
         st.markdown('<div class="dataforensics-bucket-header">🏷️ Inconsistent categories</div>', unsafe_allow_html=True)
@@ -1558,6 +1671,39 @@ with tab_multifile:
                     st.write("Examples:", integrity["orphan_examples"])
                 else:
                     st.success(f"Every {cand['column_b']} value in {cand['file_b']} is present in {cand['file_a']}.")
+
+                st.subheader("Relationship shape")
+                st.caption(
+                    f"How {cand['file_a']}.{cand['column_a']} and {cand['file_b']}.{cand['column_b']} relate — "
+                    "discovery only, DataForensics never joins or merges these files."
+                )
+                child_values_all = [
+                    str(r[cand["column_b"]]) for r in file_rows[cand["file_b"]] if r.get(cand["column_b"]) not in (None, "")
+                ]
+                cardinality = analyze_key_cardinality(child_values_all, parent_values)
+                coverage = compute_key_coverage(parent_values, child_values)
+                c3, c4, c5 = st.columns(3)
+                relationship_label = {
+                    "one_to_many": "One-to-many",
+                    "one_to_one": "One-to-one",
+                    "no_matches": "No matches",
+                }[cardinality["relationship"]]
+                c3.metric("Cardinality", relationship_label)
+                c4.metric(f"Max {cand['file_b']} rows per {cand['column_a']}", cardinality["max_children_per_parent"])
+                c5.metric(f"{cand['file_a']} rows with 1+ match", f"{coverage['coverage_fraction']:.1%}")
+                if cardinality["relationship"] == "one_to_many":
+                    st.caption(
+                        f"{cardinality['parents_with_multiple_children']} {cand['column_a']} value(s) have "
+                        f"2+ matching rows in {cand['file_b']} (up to {cardinality['max_children_per_parent']}) — "
+                        f"consistent with a {cand['file_a']} → {cand['file_b']} one-to-many relationship "
+                        "(e.g. one participant, several visits)."
+                    )
+                st.caption(
+                    f"{coverage['covered_count']} of {coverage['parent_count']} {cand['column_a']} value(s) in "
+                    f"{cand['file_a']} ({coverage['coverage_fraction']:.1%}) have at least one matching record "
+                    f"in {cand['file_b']}. The remainder may be expected (e.g. a participant not yet visited) "
+                    "or may indicate incomplete data — DataForensics doesn't assume either."
+                )
     elif multi_files:
         st.info("Upload at least 2 files to discover relationships between them.")
     else:

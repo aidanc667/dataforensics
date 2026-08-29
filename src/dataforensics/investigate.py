@@ -146,6 +146,23 @@ def find_category_value_evidence(rows: list[dict], column: str, value: str) -> l
     return [i for i, row in enumerate(rows) if row.get(column) == value]
 
 
+# A negation prefix can make two strings look like a near-identical typo
+# pair by character-level similarity while meaning the exact opposite --
+# rapidfuzz scores "employed"/"unemployed" at 88.9%, well above the
+# default 85% clustering threshold, and a researcher who trusted the
+# suggestion would silently merge two opposite survey categories into
+# one. Checked on the ALREADY-normalized (trimmed/casefolded) strings, so
+# it catches "Employed" vs "unemployed" too, not just an exact-case match.
+_NEGATION_PREFIXES = ("un", "non", "in", "dis", "im", "ir", "il")
+
+
+def _is_negation_pair(normalized_a: str, normalized_b: str) -> bool:
+    shorter, longer = (normalized_a, normalized_b) if len(normalized_a) <= len(normalized_b) else (normalized_b, normalized_a)
+    if not shorter:
+        return False
+    return any(longer == prefix + shorter for prefix in _NEGATION_PREFIXES)
+
+
 def detect_similar_categories(values: list[str], threshold: int = 85) -> list[dict]:
     """Cluster near-duplicate category values within one column (e.g.
     "Male" / "male" / "MALE") using rapidfuzz string similarity.
@@ -186,7 +203,7 @@ def detect_similar_categories(values: list[str], threshold: int = 85) -> list[di
         if normalized[a] == normalized[b]:
             union(a, b)
             exact_after_normalize.add(frozenset((a, b)))
-        elif fuzz.ratio(normalized[a], normalized[b]) >= threshold:
+        elif fuzz.ratio(normalized[a], normalized[b]) >= threshold and not _is_negation_pair(normalized[a], normalized[b]):
             union(a, b)
 
     groups: dict[str, list[str]] = {}
@@ -679,3 +696,167 @@ def check_referential_integrity(parent_values: set, child_values: set) -> dict:
         "orphan_count": len(orphans),
         "orphan_examples": orphans[:10],
     }
+
+
+def analyze_key_cardinality(child_values_all: list[str], parent_values: set) -> dict:
+    """How many child ROWS reference each parent key -- e.g. participants
+    -> visits is "one-to-many" if any participant_id appears on 2+ visit
+    rows, "one-to-one" if every matched parent has at most one child row.
+
+    Unlike check_referential_integrity (which operates on deduplicated
+    sets and so can't see repetition), this takes the child column's full,
+    non-deduplicated value list -- repetition IS the signal here. Orphan
+    values (not in parent_values) are excluded, matching
+    check_referential_integrity's scope: that's a separate concern.
+    """
+    counts = Counter(v for v in child_values_all if v in parent_values)
+    if not counts:
+        return {"relationship": "no_matches", "max_children_per_parent": 0, "parents_with_multiple_children": 0}
+    max_count = max(counts.values())
+    return {
+        "relationship": "one_to_many" if max_count > 1 else "one_to_one",
+        "max_children_per_parent": max_count,
+        "parents_with_multiple_children": sum(1 for c in counts.values() if c > 1),
+    }
+
+
+def compute_key_coverage(parent_values: set, child_values: set) -> dict:
+    """What fraction of parent_values have at least one matching record in
+    child_values -- e.g. "94.7% of participants have at least one visit."
+    The complement of orphan analysis: that asks whether every CHILD has a
+    parent, this asks whether every PARENT has a child.
+    """
+    if not parent_values:
+        return {"parent_count": 0, "covered_count": 0, "coverage_fraction": 0.0}
+    covered_count = len(parent_values & child_values)
+    return {
+        "parent_count": len(parent_values),
+        "covered_count": covered_count,
+        "coverage_fraction": covered_count / len(parent_values),
+    }
+
+
+def build_missingness_overview(dictionary: dict) -> list[dict]:
+    """Every column's missingness, not just the ones crossing a
+    "substantial missingness" threshold -- the full picture a researcher
+    needs to plan analysis-dataset construction, sorted worst-first."""
+    return sorted(
+        (
+            {
+                "column": col,
+                "missing_pct": round(100.0 - info["non_null_pct"], 4),
+                "non_null_pct": info["non_null_pct"],
+            }
+            for col, info in dictionary.items()
+        ),
+        key=lambda row: row["missing_pct"],
+        reverse=True,
+    )
+
+
+_MISSINGNESS_PATTERN_MIN_GROUP = 5
+_MISSINGNESS_CONCENTRATION_MIN_RELATIVE_GAP = 0.2
+_MISSINGNESS_CO_OCCURRENCE_MIN_OVERLAP = 0.5
+
+
+def _median(values: list[float]) -> float:
+    n = len(values)
+    mid = n // 2
+    return values[mid] if n % 2 else (values[mid - 1] + values[mid]) / 2
+
+
+def detect_missingness_concentration(
+    rows: list[dict], target_column: str, numeric_columns: list[str]
+) -> list[dict]:
+    """For target_column's missing values, compare each candidate numeric
+    column's median between rows where target_column IS missing and rows
+    where it's present -- e.g. a much higher median age in the
+    BMI-missing group surfaces as "BMI missingness is concentrated in
+    participants over age 75."
+
+    This is a plain median comparison, not a hypothesis test -- it
+    reports the two medians and both group sizes so a human can judge
+    whether the gap is meaningful, rather than asserting statistical
+    significance this simple a check can't actually establish. Requires
+    at least _MISSINGNESS_PATTERN_MIN_GROUP rows on both sides (missing
+    and present, and enough numeric-parseable values in each) before
+    comparing anything -- a pattern computed from a handful of rows isn't
+    evidence of anything.
+    """
+    missing_idx = [i for i, row in enumerate(rows) if row.get(target_column, "") == ""]
+    present_idx = [i for i, row in enumerate(rows) if row.get(target_column, "") != ""]
+    if len(missing_idx) < _MISSINGNESS_PATTERN_MIN_GROUP or len(present_idx) < _MISSINGNESS_PATTERN_MIN_GROUP:
+        return []
+
+    results = []
+    for col in numeric_columns:
+        if col == target_column:
+            continue
+        missing_vals = sorted(
+            v for i in missing_idx if (v := parse_finite_float(rows[i].get(col, ""))) is not None
+        )
+        present_vals = sorted(
+            v for i in present_idx if (v := parse_finite_float(rows[i].get(col, ""))) is not None
+        )
+        if len(missing_vals) < _MISSINGNESS_PATTERN_MIN_GROUP or len(present_vals) < _MISSINGNESS_PATTERN_MIN_GROUP:
+            continue
+        median_missing = _median(missing_vals)
+        median_present = _median(present_vals)
+        if median_present == 0:
+            continue
+        relative_gap = abs(median_missing - median_present) / abs(median_present)
+        if relative_gap >= _MISSINGNESS_CONCENTRATION_MIN_RELATIVE_GAP:
+            results.append(
+                {
+                    "column": col,
+                    "median_when_missing": median_missing,
+                    "median_when_present": median_present,
+                    "missing_group_size": len(missing_vals),
+                    "present_group_size": len(present_vals),
+                    "relative_gap": relative_gap,
+                    "direction": "higher" if median_missing > median_present else "lower",
+                }
+            )
+    return sorted(results, key=lambda r: r["relative_gap"], reverse=True)
+
+
+def detect_missingness_co_occurrence(rows: list[dict], columns: list[str]) -> list[dict]:
+    """Column pairs whose missingness co-occurs far more than a handful of
+    coincidental blanks would -- e.g. Income and Employment Status often
+    blank on the same records, suggesting a shared cause (the same
+    survey section skipped, the same non-response) rather than
+    independent data entry gaps.
+
+    Reports raw counts and the overlap fraction only -- like
+    detect_missingness_concentration, this is not a statistical
+    independence test, just evidence for a human to weigh. Both columns
+    need at least _MISSINGNESS_PATTERN_MIN_GROUP missing rows before
+    being considered.
+    """
+    missing_sets: dict[str, set[int]] = {}
+    for col in columns:
+        idx = {i for i, row in enumerate(rows) if row.get(col, "") == ""}
+        if len(idx) >= _MISSINGNESS_PATTERN_MIN_GROUP:
+            missing_sets[col] = idx
+
+    results = []
+    cols = list(missing_sets.keys())
+    for i, col_a in enumerate(cols):
+        for col_b in cols[i + 1 :]:
+            both = missing_sets[col_a] & missing_sets[col_b]
+            smaller = min(len(missing_sets[col_a]), len(missing_sets[col_b]))
+            if smaller == 0 or len(both) < _MISSINGNESS_PATTERN_MIN_GROUP:
+                continue
+            overlap_fraction = len(both) / smaller
+            if overlap_fraction >= _MISSINGNESS_CO_OCCURRENCE_MIN_OVERLAP:
+                results.append(
+                    {
+                        "column_a": col_a,
+                        "column_b": col_b,
+                        "both_missing_count": len(both),
+                        "column_a_missing_count": len(missing_sets[col_a]),
+                        "column_b_missing_count": len(missing_sets[col_b]),
+                        "overlap_fraction": overlap_fraction,
+                    }
+                )
+    return sorted(results, key=lambda r: r["overlap_fraction"], reverse=True)
