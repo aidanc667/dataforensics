@@ -15,11 +15,12 @@ detection, mutation correctness, idempotency-chain rejection, etc.) is
 already covered by the dictionary/validation/harmonize/config_schema unit
 tests app.py itself calls into.
 
-There's no "Use bundled example" button in the app itself (removed --
-these tests are the only thing that ever needed one); instead, each test
-seeds session_state with the fixture's bytes directly before the first
-run, the same state app.py reads regardless of whether it got there via
-the file uploader or otherwise.
+Most tests seed session_state with a fixture's bytes directly before the
+first run, the same state app.py reads regardless of whether it got there
+via the file uploader, the "Or try a real public dataset" example-loader
+buttons, or otherwise -- except test_example_dataset_buttons_load_without_exception,
+which exercises those buttons for real (a real click, not session_state
+seeding), since that's the one path an upload-bytes fixture can't cover.
 """
 
 from pathlib import Path
@@ -149,3 +150,28 @@ def test_two_redundant_zip_columns_do_not_alone_trigger_duplicate_entity_finding
     assert not at.exception
 
     assert not any("potential duplicate entit" in md.value for md in at.markdown)
+
+
+def test_example_dataset_buttons_load_without_exception():
+    # Regression coverage for the "Or try a real public dataset" picker --
+    # the one loading path that can't be exercised by seeding
+    # session_state directly, since it's app.py's own button-click
+    # handler (_load_example_dataset) that reads the bundled fixture
+    # bytes, not the test.
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    assert not at.exception
+
+    load_buttons = [b for b in at.button if b.label == "Load this dataset"]
+    assert len(load_buttons) == 3, "expected one button per example dataset"
+
+    for i in range(3):
+        at = AppTest.from_file(str(APP_PATH))
+        at.run(timeout=30)
+        load_buttons = [b for b in at.button if b.label == "Load this dataset"]
+        at = load_buttons[i].click().run(timeout=30)
+        assert not at.exception
+        # Each example dataset genuinely has findings (that's why these
+        # three were chosen) -- confirms real data loaded and was
+        # actually investigated, not just an empty/blank state.
+        assert any("record(s)" in md.value and "variable(s)" in md.value for md in at.markdown)

@@ -319,6 +319,52 @@ def _rewrite_with_deduplicated_header(path: Path) -> Path:
 
 tab_analyze, tab_multifile = st.tabs(["Analyze & Clean", "Multi-File Relationships"])
 
+# Real, unmodified extracts from public U.S. government microdata -- each
+# subsampled from a much larger official release to a demo-appropriate
+# size (a few hundred rows), but every value is a genuine survey/exam
+# response, not synthetic data. Chosen specifically because each one
+# carries a well-documented, real messiness pattern this tool is built to
+# catch (see fixtures/demos/README.md for exact provenance and columns).
+_EXAMPLE_DATASETS = {
+    "ACS PUMS (Census)": {
+        "file": "acs_pums_person_dc.csv",
+        "caption": (
+            "U.S. Census Bureau, 2023 American Community Survey 1-Year PUMS — "
+            "person records, Washington D.C. Real household/income microdata with "
+            "genuine Census top-coding (income-to-poverty ratio capped at 501) and "
+            "skip-pattern missingness (education not asked of children under 3)."
+        ),
+    },
+    "BRFSS (CDC)": {
+        "file": "brfss_survey_sample.csv",
+        "caption": (
+            "CDC, 2023 Behavioral Risk Factor Surveillance System — survey respondent "
+            "sample. Real self-reported health survey data with textbook missing-value "
+            "sentinel codes (7/9/9999 = don't know/refused) and age top-coded at 80."
+        ),
+    },
+    "NHANES (CDC/NCHS)": {
+        "file": "nhanes_health_exam.csv",
+        "caption": (
+            "CDC/NCHS, National Health and Nutrition Examination Survey, August "
+            "2021–August 2023 — combined demographic, body measurement, and smoking "
+            "questionnaire data. Real clinical exam data with genuine skip-pattern "
+            "missingness and an income-to-poverty ratio topped out at 5.00."
+        ),
+    },
+}
+_EXAMPLES_DIR = Path(__file__).parent / "fixtures" / "demos"
+
+
+def _load_example_dataset(label: str) -> None:
+    info = _EXAMPLE_DATASETS[label]
+    st.session_state["dataforensics_data_bytes"] = (_EXAMPLES_DIR / info["file"]).read_bytes()
+    st.session_state["dataforensics_data_name"] = info["file"]
+    st.session_state.pop("dataforensics_dedup_choice_made", None)
+    st.session_state.pop("dataforensics_applied", None)
+    st.session_state.pop("dataforensics_applied_at", None)
+
+
 with tab_analyze:
     # ------------------------------------------------------------------ #
     # Step 1: Upload
@@ -333,6 +379,20 @@ with tab_analyze:
         st.session_state.pop("dataforensics_dedup_choice_made", None)
         st.session_state.pop("dataforensics_applied", None)
         st.session_state.pop("dataforensics_applied_at", None)
+
+    with st.expander("Or try a real public dataset — no upload needed"):
+        st.caption(
+            "Each is a real, unmodified extract from a public U.S. government release, "
+            "subsampled to a demo-appropriate size — not synthetic data."
+        )
+        ex_cols = st.columns(3)
+        for ex_col, (label, info) in zip(ex_cols, _EXAMPLE_DATASETS.items()):
+            with ex_col:
+                st.markdown(f"**{label}**")
+                st.caption(info["caption"])
+                if st.button("Load this dataset", key=f"load_example_{label}", width="stretch"):
+                    _load_example_dataset(label)
+                    st.rerun()
 
     if not st.session_state.get("dataforensics_data_bytes"):
         _step_bar(1)

@@ -132,6 +132,8 @@ Upload a CSV, TSV, JSON, or Excel file and DataForensics produces a dataset inve
 
 After reviewing the findings, approve individual transformations and export the cleaned dataset together with its audit documentation.
 
+No file on hand? The app includes three real example datasets, no upload needed — genuine, unmodified subsamples of public U.S. government microdata, each chosen for a specific, well-documented real-world messiness pattern: [ACS PUMS](https://www.census.gov/programs-surveys/acs/microdata.html) (Census — genuine income top-coding, skip-pattern missingness), [BRFSS](https://www.cdc.gov/brfss/annual_data/annual_2023.html) (CDC — textbook missing-value sentinel codes, age top-coding), and [NHANES](https://wwwn.cdc.gov/nchs/nhanes/continuousnhanes/default.aspx?Cycle=2021-2023) (CDC/NCHS — clinical exam data with real skip-pattern missingness). See [`fixtures/demos/README.md`](fixtures/demos/README.md) for exact provenance and column mappings.
+
 ## Quickstart
 
 Clone the repository and install the package:
