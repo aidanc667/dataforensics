@@ -1,7 +1,13 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 *.egg-info/
+# Claude Code agent-workflow scratch (implementation plans, design specs
+# written for an AI coding session) -- dev-process artifacts, not project
+# documentation; never belongs in the published repo.
+docs/superpowers/
 # data/raw and data/cleaned are ignored by default (this is where a user's
 # own, possibly large or sensitive, input files land), except the small
 # real-dataset benchmark committed for WRITEUP.md (see that file) -- all

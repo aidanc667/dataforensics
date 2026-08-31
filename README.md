@@ -1,5 +1,9 @@
 # DataForensics
 
+[![CI](https://github.com/aidanc667/dataforensics/actions/workflows/ci.yml/badge.svg)](https://github.com/aidanc667/dataforensics/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
 **Understand → Investigate → Decide → Clean → Verify → Document**
 
 DataForensics is a research-data quality and investigation tool for analysts working with unfamiliar or messy datasets. It helps answer a simple question before analysis begins:
@@ -8,7 +12,7 @@ DataForensics is a research-data quality and investigation tool for analysts wor
 
 Rather than automatically changing anything it considers unusual, DataForensics investigates the data first. It profiles the dataset, identifies potential problems, shows the evidence behind each finding, and lets the analyst decide what should change. Approved transformations are then applied and verified, with every change recorded in an audit trail.
 
-**[Live app](https://dataforensics.streamlit.app/)** · **[Real-data benchmark & findings](WRITEUP.md)** · **[Architecture & design decisions](MASTER_PROMPT.md)**
+**[Live app](https://dataforensics.streamlit.app/)** · **[Real-data benchmark & findings](WRITEUP.md)** · **[Architecture & design decisions](ARCHITECTURE.md)**
 
 ## What it does
 
@@ -225,6 +229,6 @@ Its job is narrower:
 
 ## Documentation
 
-For the detailed architecture, safety invariants, data schemas, transformation rules, and implementation decisions, see [`MASTER_PROMPT.md`](MASTER_PROMPT.md).
+For the detailed architecture, safety invariants, data schemas, transformation rules, and implementation decisions, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 For the real-dataset benchmark and findings, see [`WRITEUP.md`](WRITEUP.md).
