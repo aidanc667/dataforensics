@@ -929,6 +929,21 @@ with tab_analyze:
         for cluster in clusters
         for v in cluster["values"]
     )
+    # Outlier/top-code detection only ever runs on "free_text"-classified
+    # columns (dictionary.py's own numeric-eligible category), and
+    # category-inconsistency clustering only ever runs on "categorical"-
+    # classified columns -- these counts tell compute_quality_score how
+    # many cells were actually eligible for each check, so a severely
+    # affected numeric or categorical column isn't diluted by columns
+    # neither check could ever have touched. Non-null counts, not raw row
+    # counts: a null cell was never a candidate to be flagged as an
+    # outlier or a miscapitalized category either.
+    numeric_eligible_cell_count = sum(
+        len(rows) - f["null_count"] for f in dictionary.values() if f["category"] == "free_text"
+    )
+    categorical_eligible_cell_count = sum(
+        len(rows) - f["null_count"] for f in dictionary.values() if f["category"] == "categorical"
+    )
 
     quality = compute_quality_score(
         row_count=len(rows),
@@ -942,6 +957,8 @@ with tab_analyze:
         top_code_flagged_cell_count=top_code_flagged_cell_count,
         ambiguous_date_cell_count=ambiguous_date_cell_count,
         category_inconsistent_cell_count=category_inconsistent_cell_count,
+        numeric_eligible_cell_count=numeric_eligible_cell_count,
+        categorical_eligible_cell_count=categorical_eligible_cell_count,
     )
 
     # Findings summary table -- reused by the downloadable audit report in
