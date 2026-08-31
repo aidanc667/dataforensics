@@ -2,7 +2,7 @@ import os
 import platform
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -30,7 +30,7 @@ def build_manifest(input_paths: list[Path], schema_paths: list[Path], provenance
         "input_sha256": [sha256_file(p) for p in input_paths],
         "schema_sha256": [sha256_file(p) for p in schema_paths],
         "run_id": str(uuid.uuid4()),
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "timestamp_utc": datetime.now(UTC).isoformat(),
         "provenance": provenance,
         "mutations": [],
     }

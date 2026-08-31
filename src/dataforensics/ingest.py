@@ -1,10 +1,27 @@
-from pathlib import Path
 import csv
 import datetime
 import io
 import json
+import sys
+from pathlib import Path
 
 from charset_normalizer import from_path
+
+# The stdlib csv module defaults to a 128KB per-field cap, meant to protect
+# a streaming reader from a pathological input. We already hold the whole
+# line in memory before handing it to csv.reader (see split_delimited_line),
+# so the cap only serves to crash on legitimate long free-text/notes fields
+# (clinical notes, "other, please specify" survey responses) with an
+# unhandled _csv.Error instead of a real ingest error message. sys.maxsize
+# can overflow the C long the limit is stored in on some platforms, so back
+# off until it's accepted.
+_field_size_limit = sys.maxsize
+while True:
+    try:
+        csv.field_size_limit(_field_size_limit)
+        break
+    except OverflowError:
+        _field_size_limit //= 2
 
 _CANDIDATE_DELIMITERS = [",", "\t", ";", "|"]
 _FOOTER_MISMATCH_RUN = 2
@@ -101,7 +118,14 @@ def read_source_lines(path: Path) -> tuple[list[str], str]:
     """
     encoding = detect_encoding(path)
     try:
-        raw_lines = path.read_text(encoding=encoding).splitlines()
+        # A leading U+FEFF byte-order mark decodes as a literal character
+        # under a plain "utf-8"/"utf-16" codec (only the "-sig" codec variants
+        # strip it automatically), and detect_encoding can report the plain
+        # name even when the file carries a BOM (e.g. Excel's "CSV UTF-8"
+        # export always writes one). Left in place it silently prefixes the
+        # first header's name, breaking every rules-file column match against
+        # that column with no visible error.
+        raw_lines = path.read_text(encoding=encoding).lstrip("\ufeff").splitlines()
     except UnicodeDecodeError as exc:
         # detect_encoding's best guess (or its "utf-8" fallback when it
         # couldn't guess at all) still failed to decode every byte -- this
@@ -365,9 +389,12 @@ def _xlsx_backend(path: Path):
                 # render every Excel date cell as an ISO datetime string
                 # ("2024-01-15T00:00:00") instead of a plain date
                 # ("2024-01-15"), unlike the equivalent CSV/JSON value.
-                if isinstance(value, datetime.datetime) and cell.is_date:
-                    if _format_is_date_only(cell.number_format):
-                        value = value.date()
+                if (
+                    isinstance(value, datetime.datetime)
+                    and cell.is_date
+                    and _format_is_date_only(cell.number_format)
+                ):
+                    value = value.date()
                 values.append(value)
             grid.append(tuple(values))
         return grid

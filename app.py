@@ -4,11 +4,16 @@ import io
 import json
 import tempfile
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import streamlit as st
 
+from dataforensics.audit_report import (
+    build_audit_report_html,
+    build_investigation_findings,
+    format_bytes,
+)
 from dataforensics.config_schema import find_chained_keys
 from dataforensics.dictionary import (
     build_data_dictionary,
@@ -17,7 +22,11 @@ from dataforensics.dictionary import (
     find_top_code_evidence,
     read_rows,
 )
-from dataforensics.harmonize import apply_transformations, column_union, compute_safety_report
+from dataforensics.harmonize import (
+    apply_transformations,
+    column_union,
+    compute_safety_report,
+)
 from dataforensics.ingest import (
     DuplicateHeaderError,
     IngestFormatError,
@@ -57,11 +66,6 @@ from dataforensics.investigate import (
     find_zip_like_columns,
     infer_semantic_role,
     match_clinical_range_rule,
-)
-from dataforensics.audit_report import (
-    build_audit_report_html,
-    build_investigation_findings,
-    format_bytes,
 )
 from dataforensics.quality_score import compute_quality_score
 from dataforensics.report import render_html
@@ -267,7 +271,7 @@ def _evidence_panel(
         st.markdown("**Evidence:**")
         shown_lines = lines[:max_shown]
         st.markdown(
-            f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in shown_lines)}</div>',
+            f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in shown_lines)}</div>',
             unsafe_allow_html=True,
         )
         if len(lines) > max_shown:
@@ -286,7 +290,14 @@ def _write_temp(name: str, content: bytes) -> Path:
 
 
 def _sniff_header(path: Path, sheet: str | None = None) -> list[str]:
-    from dataforensics.ingest import detect_delimiter, read_excel_rows, read_json_rows, read_source_lines, split_delimited_line, strip_footer
+    from dataforensics.ingest import (
+        detect_delimiter,
+        read_excel_rows,
+        read_json_rows,
+        read_source_lines,
+        split_delimited_line,
+        strip_footer,
+    )
 
     fmt = detect_file_format(path)
     if fmt == "json":
@@ -303,7 +314,13 @@ def _sniff_header(path: Path, sheet: str | None = None) -> list[str]:
 
 
 def _rewrite_with_deduplicated_header(path: Path) -> Path:
-    from dataforensics.ingest import detect_delimiter, join_delimited_line, read_source_lines, split_delimited_line, strip_footer
+    from dataforensics.ingest import (
+        detect_delimiter,
+        join_delimited_line,
+        read_source_lines,
+        split_delimited_line,
+        strip_footer,
+    )
 
     raw_lines, _encoding = read_source_lines(path)
     delimiter = detect_delimiter(raw_lines[:10])
@@ -1304,7 +1321,7 @@ with tab_analyze:
                     for d in dup_rows[:10]
                 ]
                 st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in dup_lines)}</div>',
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in dup_lines)}</div>',
                     unsafe_allow_html=True,
                 )
                 if len(dup_rows) > 10:
@@ -1352,7 +1369,7 @@ with tab_analyze:
                     for c in conflicts[:10]
                 ]
                 st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in conflict_lines)}</div>',
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in conflict_lines)}</div>',
                     unsafe_allow_html=True,
                 )
                 if len(conflicts) > 10:
@@ -1449,7 +1466,7 @@ with tab_analyze:
                     for i, b, o in evidence[:10]
                 ]
                 st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in birth_lines)}</div>',
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in birth_lines)}</div>',
                     unsafe_allow_html=True,
                 )
                 if len(evidence) > 10:
@@ -1489,7 +1506,7 @@ with tab_analyze:
                         f"(rows {', '.join(str(i + 1) for i in d['row_indices'])})"
                     )
                 st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(l) for l in entity_lines)}</div>',
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in entity_lines)}</div>',
                     unsafe_allow_html=True,
                 )
                 if len(duplicate_entities) > 10:
@@ -1556,7 +1573,7 @@ with tab_analyze:
     else:
         if st.button("✅ Apply approved changes", type="primary"):
             st.session_state["dataforensics_applied"] = True
-            st.session_state["dataforensics_applied_at"] = datetime.now(timezone.utc).isoformat()
+            st.session_state["dataforensics_applied_at"] = datetime.now(UTC).isoformat()
 
     # ------------------------------------------------------------------ #
     # Step 4: Cleaned dataset + audit report

@@ -9,4 +9,6 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev,viewer]"
+      - run: ruff check src/ app.py
+      - run: mypy
       - run: pytest

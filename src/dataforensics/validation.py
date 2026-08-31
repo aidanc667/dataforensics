@@ -2,7 +2,12 @@ import re
 from datetime import datetime
 
 from dataforensics import dictionary
-from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, parse_finite_float, preserves_leading_zero
+from dataforensics.typing_guards import (
+    is_id_like_column,
+    is_pii_like_column,
+    parse_finite_float,
+    preserves_leading_zero,
+)
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SLASH_DATE_PATTERN = re.compile(r"^(\d{1,2})/(\d{1,2})/\d{4}$")
@@ -151,7 +156,9 @@ def validate(rows: list[dict], rules: dict) -> dict:
                 declared_format = col_rules.get("format")
                 if declared_format:
                     try:
-                        datetime.strptime(raw_value, declared_format)
+                        # Format-match check only -- the parsed value is discarded,
+                        # so naive-datetime timezone safety does not apply here.
+                        datetime.strptime(raw_value, declared_format)  # noqa: DTZ007
                     except ValueError:
                         errors.append(
                             {

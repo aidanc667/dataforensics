@@ -1,4 +1,30 @@
-from dataforensics.ingest import detect_delimiter, detect_encoding
+from dataforensics.ingest import (
+    detect_delimiter,
+    detect_encoding,
+    read_source_lines,
+    split_delimited_line,
+)
+
+
+def test_read_source_lines_strips_leading_utf8_bom(tmp_path):
+    # Excel's "CSV UTF-8" export always prepends a BOM. Left in place, it
+    # decodes as a literal U+FEFF character glued to the first header name
+    # (e.g. "﻿id"), silently breaking every rules-file column match
+    # against that column.
+    f = tmp_path / "bom.csv"
+    f.write_bytes(b"\xef\xbb\xbfid,name\n1,Alice\n")
+    lines, _ = read_source_lines(f)
+    assert lines[0] == "id,name"
+
+
+def test_split_delimited_line_handles_field_over_stdlib_csv_default_limit():
+    # The stdlib csv module's default 128KB per-field cap previously crashed
+    # any scan of a file with a longer free-text cell (a clinical note, an
+    # "other, please specify" survey response) with an unhandled _csv.Error,
+    # since split_delimited_line parses each line through csv.reader.
+    long_value = "x" * 200_000
+    line = f"1,{long_value}"
+    assert split_delimited_line(line, ",") == ["1", long_value]
 
 
 def test_detect_delimiter_comma():

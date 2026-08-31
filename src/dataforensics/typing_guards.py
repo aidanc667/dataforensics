@@ -71,7 +71,7 @@ def preserves_leading_zero(values: list[str]) -> bool:
     return False
 
 
-def classify_sentinel(value: str, sentinel_map: dict) -> str | None:
+def classify_sentinel(value: object, sentinel_map: dict) -> str | None:
     return sentinel_map.get(str(value))
 
 

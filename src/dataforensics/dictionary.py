@@ -11,7 +11,12 @@ from dataforensics.ingest import (
     split_delimited_line,
     strip_footer,
 )
-from dataforensics.typing_guards import is_id_like_column, is_pii_like_column, parse_finite_float, preserves_leading_zero
+from dataforensics.typing_guards import (
+    is_id_like_column,
+    is_pii_like_column,
+    parse_finite_float,
+    preserves_leading_zero,
+)
 
 # Never claim "PII-safe" or "HIPAA-compliant" here — the honest phrasing is
 # "potential identifier pattern detected," which is a naming-convention
@@ -150,6 +155,7 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
         pii_like = is_pii_like_column(name)
         mask_pii = pii_like and not include_raw_samples
 
+        levels: list[str] | str | None
         if id_like:
             category = "id"
             levels = None
@@ -160,7 +166,7 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
             category = "free_text"
             levels = None
 
-        numeric_values = []
+        numeric_values: list[float] = []
         # Only run outlier/top-code detection for "free_text" (i.e.
         # high-enough-cardinality-to-look-continuous) numeric columns --
         # never for "id" (obviously) or "categorical". A low-cardinality
@@ -301,9 +307,12 @@ def find_outlier_evidence(rows: list[dict], column: str) -> list[tuple[int, str]
     column the dictionary didn't actually treat as numeric.
     """
     non_null = [(i, row.get(column, "")) for i, row in enumerate(rows) if row.get(column, "") != ""]
-    values_only = [parse_finite_float(v) for _, v in non_null]
-    if not values_only or any(v is None for v in values_only):
-        return []
+    values_only: list[float] = []
+    for _, v in non_null:
+        parsed = parse_finite_float(v)
+        if parsed is None:
+            return []
+        values_only.append(parsed)
     result = detect_outliers(values_only)
     return [non_null[pos] for pos in result["outlier_indices"]]
 

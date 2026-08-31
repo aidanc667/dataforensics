@@ -400,9 +400,11 @@ def build_investigation_findings(
                 "tier": "info",
                 "title": f"{col} missingness is concentrated where {p['column']} is {p['direction']}",
                 "evidence": [
-                    f"median {p['column']} {p['median_when_missing']:,.2f} when {col} is missing "
-                    f"({p['missing_group_size']} row(s)) vs. {p['median_when_present']:,.2f} when present "
-                    f"({p['present_group_size']} row(s))"
+                    (
+                        f"median {p['column']} {p['median_when_missing']:,.2f} when {col} is missing "
+                        f"({p['missing_group_size']} row(s)) vs. {p['median_when_present']:,.2f} when present "
+                        f"({p['present_group_size']} row(s))"
+                    )
                 ],
                 "more": 0,
                 "detection": (
@@ -423,8 +425,10 @@ def build_investigation_findings(
             "tier": "info",
             "title": f"{p['column_a']} and {p['column_b']} are frequently missing together",
             "evidence": [
-                f"{p['both_missing_count']} row(s) missing both -- {p['overlap_fraction']:.0%} of the smaller gap "
-                f"({p['column_a']}: {p['column_a_missing_count']} missing, {p['column_b']}: {p['column_b_missing_count']} missing)"
+                (
+                    f"{p['both_missing_count']} row(s) missing both -- {p['overlap_fraction']:.0%} of the smaller gap "
+                    f"({p['column_a']}: {p['column_a_missing_count']} missing, {p['column_b']}: {p['column_b_missing_count']} missing)"
+                )
             ],
             "more": 0,
             "detection": (
