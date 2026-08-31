@@ -388,11 +388,24 @@ with tab_analyze:
         ex_cols = st.columns(3)
         for ex_col, (label, info) in zip(ex_cols, _EXAMPLE_DATASETS.items()):
             with ex_col:
-                st.markdown(f"**{label}**")
-                st.caption(info["caption"])
+                # Fixed-height text block so all three "Load this dataset"
+                # buttons land on the same row regardless of how long each
+                # dataset's caption is (BRFSS's is noticeably shorter than
+                # the other two).
+                with st.container(height=190, border=False):
+                    st.markdown(f"**{label}**")
+                    st.caption(info["caption"])
                 if st.button("Load this dataset", key=f"load_example_{label}", width="stretch"):
                     _load_example_dataset(label)
                     st.rerun()
+                st.download_button(
+                    f"⬇ Download {info['file']}",
+                    data=(_EXAMPLES_DIR / info["file"]).read_bytes(),
+                    file_name=info["file"],
+                    mime="text/csv",
+                    width="stretch",
+                    key=f"download_example_{label}",
+                )
 
     if not st.session_state.get("dataforensics_data_bytes"):
         _step_bar(1)
