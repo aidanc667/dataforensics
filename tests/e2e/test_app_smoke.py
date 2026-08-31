@@ -175,3 +175,44 @@ def test_example_dataset_buttons_load_without_exception():
         # three were chosen) -- confirms real data loaded and was
         # actually investigated, not just an empty/blank state.
         assert any("record(s)" in md.value and "variable(s)" in md.value for md in at.markdown)
+
+
+def test_missingness_concentration_never_compares_against_a_categorical_column():
+    # Regression test: the candidate columns for missingness-concentration
+    # comparison used to include any non-id, non-PII column -- including
+    # "categorical"-classified ones like a binary sex code (1/2) or a
+    # 4-value smoking code (1/2/7/9). Computing and reporting a "median"
+    # for a NOMINAL category and framing it as "concentrated where sex is
+    # higher" implies an ordinal relationship that doesn't exist for a
+    # code where 1-vs-2 is arbitrary. Real BRFSS/PUMS/NHANES data hit this
+    # exact case. Candidates are now restricted to "free_text"-classified
+    # (genuinely continuous-shaped) columns only.
+    #
+    # This dataset is built so BOTH a spurious categorical correlation
+    # (sex) AND a genuine continuous one (age) exist for the same missing
+    # column, confirming the fix removes the former while keeping the
+    # latter -- not just suppressing the section outright.
+    lines = ["id,sex,age,bmi"]
+    row_id = 1
+    for i in range(20):
+        # bmi missing, concentrated in older ages; sex alternates so it
+        # would ALSO look "concentrated" under the old, unrestricted
+        # candidate list if it weren't excluded by category now.
+        sex = "1" if i % 2 == 0 else "2"
+        lines.append(f"{row_id},{sex},{78 + i},")
+        row_id += 1
+    for i in range(20):
+        sex = "1" if i % 2 == 0 else "2"
+        lines.append(f"{row_id},{sex},{25 + i},{22.0 + i * 0.1}")
+        row_id += 1
+    csv_bytes = ("\n".join(lines) + "\n").encode()
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["dataforensics_data_bytes"] = csv_bytes
+    at.session_state["dataforensics_data_name"] = "concentration_test.csv"
+    at.run(timeout=30)
+    assert not at.exception
+
+    all_text = " ".join(md.value for md in at.markdown)
+    assert "concentrated where sex" not in all_text
+    assert "concentrated where age is higher" in all_text

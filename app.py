@@ -723,13 +723,19 @@ with tab_analyze:
     # as "warrants review," never "is incorrect."
     missingness_columns = [c for c, f in dictionary.items() if f.get("non_null_pct", 100) < 90]
     missingness_overview = build_missingness_overview(dictionary)
-    # Candidate columns for concentration comparison: excludes id-shaped
-    # columns (a primary key's "median" is meaningless) and PII-like ones
-    # (comparing a masked column's values would either compare nothing or
-    # require unmasking real identifiers just to compute a statistic).
-    numeric_concentration_candidates = [
-        c for c in columns if dictionary[c]["category"] != "id" and not is_pii_like_column(c)
-    ]
+    # Candidate columns for concentration comparison: restricted to
+    # "free_text"-classified columns -- the same "high-enough-cardinality-
+    # to-look-continuous, numeric" eligibility rule already used for
+    # outlier/top-code detection and the quality score, applied here for
+    # the same reason. A "categorical"-classified column (sex, a 1/2
+    # code; smoked_100_cigarettes, a 1/2/7/9 code) is a small set of
+    # NOMINAL labels, not a continuum -- computing its "median" and
+    # reporting missingness as "concentrated where sex is higher" implies
+    # an ordinal relationship that doesn't exist for a nominal code.
+    # Regression: this used to allow any non-id, non-PII column, and
+    # produced exactly that nonsensical framing on real BRFSS/PUMS/NHANES
+    # data ("concentrated where sex is higher", median 2.00 vs 1.00).
+    numeric_concentration_candidates = [c for c in columns if dictionary[c]["category"] == "free_text"]
     missingness_concentration: dict[str, list[dict]] = {}
     for col in missingness_columns:
         found = detect_missingness_concentration(rows, col, numeric_concentration_candidates)
@@ -1664,6 +1670,8 @@ with tab_analyze:
             id_like_defaults=id_like_defaults,
             column_types=column_types,
             mutations=mutations,
+            missingness_concentration=missingness_concentration,
+            missingness_co_occurrence=missingness_co_occurrence,
         )
         audit_report_html = build_audit_report_html(
             file_name=st.session_state["dataforensics_data_name"],

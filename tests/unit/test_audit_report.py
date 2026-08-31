@@ -193,6 +193,59 @@ class TestBuildInvestigationFindings:
         assert findings[0]["tier"] == "info"
         assert findings[0]["confidence"] == "N/A"
 
+    def test_missingness_concentration_finding_reflects_the_real_pattern(self):
+        concentration = {
+            "bmi": [
+                {
+                    "column": "age",
+                    "median_when_missing": 80.0,
+                    "median_when_present": 54.5,
+                    "missing_group_size": 12,
+                    "present_group_size": 48,
+                    "relative_gap": 0.4679,
+                    "direction": "higher",
+                }
+            ]
+        }
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(missingness_concentration=concentration)
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "info"
+        assert f["confidence"] == "N/A"
+        assert f["resolved"] == 0 and f["total"] == 1
+        assert "bmi missingness is concentrated where age is higher" in f["title"]
+        assert "80.00" in f["evidence"][0] and "54.50" in f["evidence"][0]
+
+    def test_missingness_co_occurrence_finding_reflects_the_real_pattern(self):
+        co_occurrence = [
+            {
+                "column_a": "income",
+                "column_b": "employment_status",
+                "both_missing_count": 27,
+                "column_a_missing_count": 27,
+                "column_b_missing_count": 27,
+                "overlap_fraction": 1.0,
+            }
+        ]
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(missingness_co_occurrence=co_occurrence)
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "info"
+        assert f["confidence"] == "N/A"
+        assert "income and employment_status are frequently missing together" in f["title"]
+        assert "27 row(s) missing both" in f["evidence"][0]
+
+    def test_missingness_patterns_default_to_no_findings_when_omitted(self):
+        # Confirms the new parameters are backward-compatible: omitting
+        # them entirely (as every pre-existing call site does) must not
+        # raise and must not fabricate findings.
+        findings = build_investigation_findings(**_base_findings_kwargs())
+        assert findings == []
+
     def test_duplicate_entities_finding_masks_quasi_identifier_pii(self):
         rows = [
             {"id": "1", "dob": "1980-01-01", "zip": "10001"},

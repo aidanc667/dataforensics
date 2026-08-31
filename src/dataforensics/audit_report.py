@@ -110,6 +110,8 @@ def build_investigation_findings(
     id_like_defaults: list[str],
     column_types: dict,
     mutations: list[dict],
+    missingness_concentration: dict[str, list[dict]] | None = None,
+    missingness_co_occurrence: list[dict] | None = None,
 ) -> list[dict]:
     """One canonical list of findings -- tier (high/review/info), a
     title, real evidence lines (PII-masked where the column warrants it),
@@ -120,6 +122,17 @@ def build_investigation_findings(
     Readiness sections of the audit report, so they can never drift out
     of sync with each other the way four independently-written sections
     could.
+
+    `missingness_concentration` and `missingness_co_occurrence` (both
+    optional, default None/empty) are the outputs of
+    investigate.detect_missingness_concentration and
+    detect_missingness_co_occurrence respectively -- the same live-app
+    "Missingness patterns" section, threaded into the exported report so
+    it isn't missing from the one document a user actually keeps. Always
+    tier "info" and confidence "N/A": these are plain comparisons, never
+    framed as a significance test, and there is no apply mechanism for
+    them (DataForensics never imputes), so they're always fully
+    unresolved by construction, same as an outlier or top-coding finding.
 
     "resolved" is determined from `mutations` (what was ACTUALLY applied,
     the ground truth), not from checkbox state -- a sentinel/category
@@ -380,6 +393,52 @@ def build_investigation_findings(
                 "resolved": 0,
                 "total": 1,
             })
+
+    for col, pattern_list in (missingness_concentration or {}).items():
+        for p in pattern_list:
+            findings.append({
+                "tier": "info",
+                "title": f"{col} missingness is concentrated where {p['column']} is {p['direction']}",
+                "evidence": [
+                    f"median {p['column']} {p['median_when_missing']:,.2f} when {col} is missing "
+                    f"({p['missing_group_size']} row(s)) vs. {p['median_when_present']:,.2f} when present "
+                    f"({p['present_group_size']} row(s))"
+                ],
+                "more": 0,
+                "detection": (
+                    f"Among rows where {col} is missing vs. present, {p['column']}'s median differs "
+                    f"by {p['relative_gap']:.0%} -- a plain comparison, not a significance test."
+                ),
+                "suggested_action": (
+                    "Missingness pattern detected; statistical handling (e.g. multiple imputation) "
+                    "requires analyst judgment. DataForensics never imputes."
+                ),
+                "confidence": "N/A",
+                "resolved": 0,
+                "total": 1,
+            })
+
+    for p in missingness_co_occurrence or []:
+        findings.append({
+            "tier": "info",
+            "title": f"{p['column_a']} and {p['column_b']} are frequently missing together",
+            "evidence": [
+                f"{p['both_missing_count']} row(s) missing both -- {p['overlap_fraction']:.0%} of the smaller gap "
+                f"({p['column_a']}: {p['column_a_missing_count']} missing, {p['column_b']}: {p['column_b_missing_count']} missing)"
+            ],
+            "more": 0,
+            "detection": (
+                f"{p['column_a']} and {p['column_b']} are blank on the same records far more often than "
+                "the smaller gap's size alone would suggest -- a raw overlap count, not an independence test."
+            ),
+            "suggested_action": (
+                "Missingness pattern detected; statistical handling requires analyst judgment. "
+                "DataForensics never imputes."
+            ),
+            "confidence": "N/A",
+            "resolved": 0,
+            "total": 1,
+        })
 
     if survey_weight_columns:
         findings.append({
