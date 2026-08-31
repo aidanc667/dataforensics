@@ -8,6 +8,8 @@ DataForensics is a research-data quality and investigation tool for analysts wor
 
 Rather than automatically changing anything it considers unusual, DataForensics investigates the data first. It profiles the dataset, identifies potential problems, shows the evidence behind each finding, and lets the analyst decide what should change. Approved transformations are then applied and verified, with every change recorded in an audit trail.
 
+**[Live app](https://dataforensics.streamlit.app/)** · **[Real-data benchmark & findings](WRITEUP.md)** · **[Architecture & design decisions](MASTER_PROMPT.md)**
+
 ## What it does
 
 DataForensics takes a raw research export and works through six stages:

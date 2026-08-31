@@ -2,6 +2,7 @@
 name = "dataforensics"
 version = "0.1.0"
 description = "Auditable profiling, validation, and rules-driven harmonization for messy research tabular exports."
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",
