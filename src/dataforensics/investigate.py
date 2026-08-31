@@ -264,6 +264,15 @@ _ROLE_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
     ("DATE", re.compile(r"(^|_)(date|dt|visit_?date)(_|$)", re.IGNORECASE)),
     ("WEIGHT", re.compile(r"(^|_)weight(_kg|_lb|_lbs)?(_|$)", re.IGNORECASE)),
     ("HEIGHT", re.compile(r"(^|_)height(_cm|_in)?(_|$)", re.IGNORECASE)),
+    # Checked before the generic INCOME pattern below, for the same reason
+    # DATE_OF_BIRTH is checked before DATE: "income_to_poverty_ratio"
+    # contains "income" as a substring but is a normalized RATIO (income
+    # relative to a poverty threshold), not a dollar figure -- treating it
+    # as the same role as a raw wage/earnings column is actively
+    # misleading (a ratio and a currency amount aren't comparable or
+    # interchangeable the way two dollar figures are), not just a loss of
+    # detail.
+    ("INCOME_TO_POVERTY_RATIO", re.compile(r"(^|_)poverty(_|$)", re.IGNORECASE)),
     ("INCOME", re.compile(r"(^|_)(income|salary|earnings)(_|$)", re.IGNORECASE)),
     ("RACE_OR_ETHNICITY", re.compile(r"(^|_)(race|ethnicity)(_|$)", re.IGNORECASE)),
     ("NAME", re.compile(r"(^|_)(name|full_?name|patient_?name|participant_?name)(_|$)", re.IGNORECASE)),

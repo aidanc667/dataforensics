@@ -302,6 +302,20 @@ def test_infer_semantic_role_matches_name_and_zip():
     assert infer_semantic_role("zip_code", {"category": "categorical"})["role"] == "ZIP_OR_POSTAL"
 
 
+def test_infer_semantic_role_distinguishes_poverty_ratio_from_raw_income():
+    # Regression: "income_to_poverty_ratio" contains "income" as a
+    # substring but is a normalized ratio, not a dollar figure -- lumping
+    # it under the same "INCOME" role as wages/salary/earnings columns
+    # made it look like a directly comparable dollar amount, which it
+    # isn't. Two genuinely comparable raw income columns should still
+    # share the INCOME role; only the ratio gets its own.
+    assert infer_semantic_role("wages_income", {"category": "free_text"})["role"] == "INCOME"
+    assert infer_semantic_role("total_personal_income", {"category": "free_text"})["role"] == "INCOME"
+    assert infer_semantic_role("salary", {"category": "free_text"})["role"] == "INCOME"
+    assert infer_semantic_role("income_to_poverty_ratio", {"category": "free_text"})["role"] == "INCOME_TO_POVERTY_RATIO"
+    assert infer_semantic_role("poverty_ratio", {"category": "free_text"})["role"] == "INCOME_TO_POVERTY_RATIO"
+
+
 def test_classify_column_types_identifier_from_dictionary_category():
     d = {"id": {"category": "id"}}
     rows = [{"id": "1"}, {"id": "2"}]
