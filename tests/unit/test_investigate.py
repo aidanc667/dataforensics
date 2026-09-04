@@ -3,25 +3,38 @@ from dataforensics.investigate import (
     build_missingness_overview,
     classify_column_types,
     compute_key_coverage,
+    detect_age_columns_that_look_like_years,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
+    detect_column_order_violations,
     detect_conflicting_id_records,
     detect_duplicate_entities,
     detect_duplicate_rows,
+    detect_encoding_corruption,
+    detect_invisible_characters,
     detect_missingness_co_occurrence,
     detect_missingness_concentration,
+    detect_numeric_representation_inconsistency,
     detect_similar_categories,
     detect_survey_weight_columns,
     detect_value_shape_outliers,
+    detect_whitespace_anomalies,
     find_ambiguous_date_evidence,
     find_birth_date_after_other_date_evidence,
     find_category_value_evidence,
+    find_column_order_violation_evidence,
+    find_encoding_corruption_evidence,
     find_fips_like_columns,
     find_implausible_value_evidence,
     find_invalid_fips_evidence,
     find_invalid_zip_evidence,
+    find_invisible_character_evidence,
+    find_numeric_representation_evidence,
+    find_ordered_column_pairs,
     find_sentinel_evidence,
     find_value_shape_outlier_evidence,
+    find_whitespace_anomaly_evidence,
+    find_year_like_value_evidence,
     find_zip_like_columns,
     infer_semantic_role,
     match_clinical_range_rule,
@@ -598,3 +611,137 @@ def test_find_value_shape_outlier_evidence_ignores_blank_values():
     ]
     evidence = find_value_shape_outlier_evidence(rows, "phone", "D-D-D")
     assert evidence == [(2, "5551000002")]
+
+
+def test_detect_whitespace_anomalies_flags_leading_trailing_and_doubled_spaces():
+    rows = [
+        {"city": "California"},
+        {"city": " California"},
+        {"city": "California "},
+        {"city": "New  York"},
+        {"city": "Texas"},
+    ]
+    counts = detect_whitespace_anomalies(rows, ["city"])
+    assert counts == {"city": 3}
+    evidence = find_whitespace_anomaly_evidence(rows, "city")
+    assert evidence == [(1, " California"), (2, "California "), (3, "New  York")]
+
+
+def test_detect_whitespace_anomalies_ignores_clean_values():
+    rows = [{"city": "California"}, {"city": "Texas"}]
+    assert detect_whitespace_anomalies(rows, ["city"]) == {}
+
+
+def test_detect_invisible_characters_flags_zero_width_and_nbsp():
+    # Built via explicit \u escapes, not typed literals -- a zero-width
+    # space and a non-breaking space are visually indistinguishable from a
+    # normal space (or nothing at all) in an editor, so typing them
+    # directly risks silently testing the wrong character entirely.
+    zwsp_name = "Jane" + "\u200b" + "Doe"
+    nbsp_name = "Bob" + "\xa0" + "Miller"
+    rows = [
+        {"name": "John Smith"},
+        {"name": zwsp_name},
+        {"name": nbsp_name},
+    ]
+    counts = detect_invisible_characters(rows, ["name"])
+    assert counts == {"name": 2}
+    evidence = find_invisible_character_evidence(rows, "name")
+    assert evidence == [(1, zwsp_name), (2, nbsp_name)]
+
+
+def test_detect_invisible_characters_does_not_flag_legitimate_tab_or_newline():
+    rows = [{"note": "line one\nline two"}, {"note": "col1\tcol2"}]
+    assert detect_invisible_characters(rows, ["note"]) == {}
+
+
+def test_detect_encoding_corruption_flags_real_mojibake():
+    # Derive the corrupted string the same way it actually happens in the
+    # wild -- encode as UTF-8, then decode those bytes as if they were
+    # Windows-1252 -- rather than hand-typing a mojibake literal, which is
+    # too easy to get subtly wrong.
+    corrupted = "José".encode().decode("cp1252")
+    rows = [{"name": "John Smith"}, {"name": corrupted}]
+    counts = detect_encoding_corruption(rows, ["name"])
+    assert counts == {"name": 1}
+    evidence = find_encoding_corruption_evidence(rows, "name")
+    assert evidence == [(1, corrupted)]
+
+
+def test_detect_encoding_corruption_ignores_clean_ascii_and_clean_unicode():
+    rows = [{"name": "John Smith"}, {"name": "José"}]
+    assert detect_encoding_corruption(rows, ["name"]) == {}
+
+
+def test_detect_numeric_representation_inconsistency_flags_currency_and_suffix():
+    rows = [{"income": str(v)} for v in range(10000, 10050, 5)]  # 10 clean numbers
+    rows += [{"income": "$50,000"}, {"income": "50k"}]
+    dictionary = {"income": {"category": "free_text"}}
+    result = detect_numeric_representation_inconsistency(rows, ["income"], dictionary)
+    assert result["income"]["clean_count"] == 10
+    assert result["income"]["decorated_count"] == 2
+    evidence = find_numeric_representation_evidence(rows, "income")
+    assert evidence == [(10, "$50,000"), (11, "50k")]
+
+
+def test_detect_numeric_representation_inconsistency_skips_when_decorated_form_is_the_norm():
+    # Every value is "$"-prefixed -- there's no plain-number convention
+    # for these to be inconsistent with.
+    rows = [{"income": f"${v}"} for v in range(10000, 10050, 5)]
+    dictionary = {"income": {"category": "free_text"}}
+    assert detect_numeric_representation_inconsistency(rows, ["income"], dictionary) == {}
+
+
+def test_detect_age_columns_that_look_like_years():
+    rows = [{"age": str(v)} for v in [1978, 1990, 2001, 1985, 1999]]
+    role_by_column = {"age": {"role": "AGE"}}
+    result = detect_age_columns_that_look_like_years(rows, role_by_column)
+    assert result["age"]["year_like_count"] == 5
+    evidence = find_year_like_value_evidence(rows, "age")
+    assert len(evidence) == 5
+
+
+def test_detect_age_columns_that_look_like_years_ignores_genuine_ages():
+    rows = [{"age": str(v)} for v in [25, 30, 45, 62, 8]]
+    role_by_column = {"age": {"role": "AGE"}}
+    assert detect_age_columns_that_look_like_years(rows, role_by_column) == {}
+
+
+def test_detect_age_columns_that_look_like_years_ignores_non_age_roles():
+    rows = [{"year_built": str(v)} for v in [1978, 1990, 2001, 1985, 1999]]
+    role_by_column = {"year_built": {"role": "DATE"}}
+    assert detect_age_columns_that_look_like_years(rows, role_by_column) == {}
+
+
+def test_find_ordered_column_pairs_matches_start_end_and_min_max():
+    columns = ["start_date", "end_date", "min_reading", "max_reading", "unrelated_col"]
+    pairs = find_ordered_column_pairs(columns)
+    assert ("start_date", "end_date") in pairs
+    assert ("min_reading", "max_reading") in pairs
+    assert len(pairs) == 2
+
+
+def test_detect_column_order_violations_flags_start_after_end_date():
+    rows = [
+        {"start_date": "2024-01-01", "end_date": "2024-01-10"},
+        {"start_date": "2024-02-15", "end_date": "2024-02-01"},  # violation
+    ]
+    result = detect_column_order_violations(rows, ["start_date", "end_date"])
+    assert result[("start_date", "end_date")] == [(1, "2024-02-15", "2024-02-01")]
+
+
+def test_detect_column_order_violations_flags_numeric_min_above_max():
+    rows = [
+        {"min_reading": "10", "max_reading": "20"},
+        {"min_reading": "30", "max_reading": "25"},  # violation
+    ]
+    result = detect_column_order_violations(rows, ["min_reading", "max_reading"])
+    assert result[("min_reading", "max_reading")] == [(1, "30", "25")]
+
+
+def test_find_column_order_violation_evidence_skips_ambiguous_or_blank_rows():
+    rows = [
+        {"start_date": "", "end_date": "2024-01-10"},
+        {"start_date": "not-a-date", "end_date": "also-not-a-date"},
+    ]
+    assert find_column_order_violation_evidence(rows, "start_date", "end_date") == []

@@ -237,6 +237,81 @@ class TestBuildInvestigationFindings:
         assert "phone: 4 of 100 value(s) don't match the column's dominant format" in f["title"]
         assert "96 of 100" in f["evidence"][0] and "96%" in f["evidence"][0]
 
+    def test_column_order_finding_reflects_the_real_violation(self):
+        order_findings = {
+            ("start_date", "end_date"): [(4, "2024-02-15", "2024-02-01")],
+        }
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(column_order_findings=order_findings)
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "high"
+        assert f["total"] == 1
+        assert "1 record(s) where start_date is after end_date" in f["title"]
+        assert "row 5" in f["evidence"][0]
+        assert "2024-02-15" in f["evidence"][0] and "2024-02-01" in f["evidence"][0]
+
+    def test_whitespace_anomaly_finding_is_review_tier(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(whitespace_anomaly_counts={"city": 3})
+        )
+        assert len(findings) == 1
+        assert findings[0]["tier"] == "review"
+        assert "city: 3 value(s)" in findings[0]["title"]
+
+    def test_invisible_character_finding_is_review_tier(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(invisible_char_counts={"name": 2})
+        )
+        assert len(findings) == 1
+        assert findings[0]["tier"] == "review"
+        assert "name: 2 value(s)" in findings[0]["title"]
+
+    def test_encoding_corruption_finding_is_review_tier(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(encoding_corruption_counts={"name": 1})
+        )
+        assert len(findings) == 1
+        assert findings[0]["tier"] == "review"
+        assert "name: 1 value(s)" in findings[0]["title"]
+
+    def test_numeric_representation_finding_reflects_the_real_counts(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(
+                numeric_representation_findings={
+                    "income": {"clean_count": 40, "decorated_count": 2}
+                }
+            )
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "review"
+        assert "income: 2 value(s)" in f["title"]
+        assert "40 plain number(s)" in f["evidence"][0]
+
+    def test_age_year_finding_reflects_the_real_counts(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(
+                age_year_findings={"age": {"year_like_count": 18, "total_count": 20}}
+            )
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "review"
+        assert "age: 18 of 20 value(s)" in f["title"]
+
+    def test_column_order_finding_on_pii_like_column_masks_evidence(self):
+        order_findings = {
+            ("dob_start", "dob_end"): [(0, "1980-02-15", "1980-02-01")],
+        }
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(column_order_findings=order_findings)
+        )
+        evidence_line = findings[0]["evidence"][0]
+        assert PII_EVIDENCE_MASK in evidence_line
+        assert "1980-02-15" not in evidence_line and "1980-02-01" not in evidence_line
+
     def test_missingness_co_occurrence_finding_reflects_the_real_pattern(self):
         co_occurrence = [
             {

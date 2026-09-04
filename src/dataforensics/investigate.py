@@ -21,6 +21,7 @@ import hashlib
 import json
 import re
 from collections import Counter
+from datetime import UTC, datetime
 from itertools import combinations
 
 from dataforensics.typing_guards import parse_finite_float
@@ -766,6 +767,314 @@ def find_value_shape_outlier_evidence(rows: list[dict], column: str, dominant_sh
         if _value_shape(raw) != dominant_shape:
             evidence.append((i, raw))
     return evidence
+
+
+_WHITESPACE_ANOMALY_PATTERN = re.compile(r"^\s|\s$|\s{2,}")
+
+
+def detect_whitespace_anomalies(rows: list[dict], columns: list[str]) -> dict[str, int]:
+    """Column -> count of non-null values with leading/trailing whitespace
+    or 2+ consecutive internal spaces. "California", " California", and
+    "California  Ave" look identical or near-identical at a glance but are
+    different strings -- this silently breaks exact-match joins, category
+    counts, and lookups without ever showing up as a visible typo.
+    """
+    counts: dict[str, int] = {}
+    for column in columns:
+        n = 0
+        for row in rows:
+            raw = str(row.get(column, ""))
+            if raw == "":
+                continue
+            if _WHITESPACE_ANOMALY_PATTERN.search(raw):
+                n += 1
+        if n:
+            counts[column] = n
+    return counts
+
+
+def find_whitespace_anomaly_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for values with leading/trailing
+    or doubled-internal whitespace in `column`."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, ""))
+        if raw == "":
+            continue
+        if _WHITESPACE_ANOMALY_PATTERN.search(raw):
+            evidence.append((i, raw))
+    return evidence
+
+
+# Zero-width space/joiner/non-joiner, left-to-right/right-to-left marks,
+# non-breaking space, byte-order mark, word joiner, and C0 control
+# characters other than tab/newline/carriage-return (which are legitimate
+# inside a quoted multi-line CSV field). Any of these render invisibly or
+# near-invisibly but are real, distinct characters that silently break
+# exact-match comparisons, lookups, and joins.
+_INVISIBLE_CHAR_PATTERN = re.compile(
+    "[\u200b\u200c\u200d\u200e\u200f\xa0\ufeff\u2060\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+)
+
+
+def detect_invisible_characters(rows: list[dict], columns: list[str]) -> dict[str, int]:
+    """Column -> count of non-null values containing a zero-width space,
+    non-breaking space, embedded byte-order mark, or other invisible/
+    control character -- these look identical (or nearly so) to a normal
+    value when displayed but are different underlying strings."""
+    counts: dict[str, int] = {}
+    for column in columns:
+        n = 0
+        for row in rows:
+            raw = str(row.get(column, ""))
+            if raw == "":
+                continue
+            if _INVISIBLE_CHAR_PATTERN.search(raw):
+                n += 1
+        if n:
+            counts[column] = n
+    return counts
+
+
+def find_invisible_character_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for values containing an
+    invisible/control character in `column`."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, ""))
+        if raw == "":
+            continue
+        if _INVISIBLE_CHAR_PATTERN.search(raw):
+            evidence.append((i, raw))
+    return evidence
+
+
+def _looks_like_mojibake(value: str) -> bool:
+    """True if `value` round-trips cleanly through "encode as Windows-1252,
+    decode as UTF-8" into a DIFFERENT string containing a non-ASCII
+    character -- the standard signature of text that was genuinely UTF-8
+    but got decoded as Windows-1252/Latin-1 somewhere in its history (e.g.
+    "JosÃ©" round-trips back to "José"; "itâ€™s" round-trips back to
+    "it's"). This tests the actual corruption mechanism directly rather
+    than pattern-matching a fixed list of known-bad substrings, so it
+    catches any such corruption, not just the handful of examples above.
+    """
+    try:
+        candidate = value.encode("cp1252").decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return False
+    return candidate != value and any(ord(ch) > 127 for ch in candidate)
+
+
+def detect_encoding_corruption(rows: list[dict], columns: list[str]) -> dict[str, int]:
+    """Column -> count of non-null values that look like UTF-8 text
+    mis-decoded as Windows-1252/Latin-1 (mojibake) -- see
+    `_looks_like_mojibake`."""
+    counts: dict[str, int] = {}
+    for column in columns:
+        n = 0
+        for row in rows:
+            raw = str(row.get(column, ""))
+            if raw == "":
+                continue
+            if _looks_like_mojibake(raw):
+                n += 1
+        if n:
+            counts[column] = n
+    return counts
+
+
+def find_encoding_corruption_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for values that look like
+    mojibake in `column`."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, ""))
+        if raw == "":
+            continue
+        if _looks_like_mojibake(raw):
+            evidence.append((i, raw))
+    return evidence
+
+
+# A currency symbol, thousands separators, a decimal, and an optional
+# magnitude/percent suffix -- "$50,000", "50k", "1,234.56", "45%". Deliberately
+# does NOT match a plain "50000" (parse_finite_float already handles that)
+# or non-numeric text (requires at least one digit).
+_DECORATED_NUMBER_PATTERN = re.compile(r"^[\$€£]?\s*-?[\d,]*\.?\d+\s*[kKmMbB%]?$")
+
+
+def detect_numeric_representation_inconsistency(rows: list[dict], columns: list[str], dictionary: dict) -> dict[str, dict]:
+    """For free_text columns where plain numbers (parseable by
+    `parse_finite_float`) are the clear norm, flag values that are
+    numeric in every meaningful sense but use a different representation
+    -- a currency symbol, thousands separators, or a k/m/b magnitude
+    suffix ("$50,000", "50k") -- that a strict numeric parser silently
+    treats as non-numeric instead of recognizing as an inconsistent
+    format.
+
+    Only fires when plain numbers cover >= 80% of the values that are
+    numeric in either sense -- a column that's mostly "$"-prefixed to
+    begin with has no plain-number convention to be inconsistent with.
+    """
+    results: dict[str, dict] = {}
+    for column in columns:
+        if dictionary.get(column, {}).get("category") != "free_text":
+            continue
+        values = [str(row.get(column, "")).strip() for row in rows]
+        values = [v for v in values if v != ""]
+        if len(values) < _SHAPE_MIN_VALUES:
+            continue
+        clean_count = sum(1 for v in values if parse_finite_float(v) is not None)
+        decorated_count = sum(
+            1 for v in values if parse_finite_float(v) is None and _DECORATED_NUMBER_PATTERN.match(v)
+        )
+        if clean_count == 0 or decorated_count == 0:
+            continue
+        if clean_count / (clean_count + decorated_count) < _SHAPE_DOMINANT_MIN_FRACTION:
+            continue
+        results[column] = {"clean_count": clean_count, "decorated_count": decorated_count}
+    return results
+
+
+def find_numeric_representation_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for values in `column` that are
+    numeric in a decorated form (currency/comma/k-m-b-suffix/percent) but
+    don't parse as a plain number."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, "")).strip()
+        if raw == "":
+            continue
+        if parse_finite_float(raw) is None and _DECORATED_NUMBER_PATTERN.match(raw):
+            evidence.append((i, raw))
+    return evidence
+
+
+_YEAR_LIKE_MIN = 1900
+
+
+def _is_year_like(raw: str) -> bool:
+    # Computed per-call, not cached at import time, so a long-running
+    # server process doesn't silently use a stale "current year" after
+    # running across a New Year boundary.
+    current_year = datetime.now(UTC).year
+    return raw.isdigit() and len(raw) == 4 and _YEAR_LIKE_MIN <= int(raw) <= current_year
+
+
+def detect_age_columns_that_look_like_years(rows: list[dict], role_by_column: dict) -> dict[str, dict]:
+    """For a column whose inferred semantic role is AGE, check whether
+    most of its values actually look like calendar years (a 4-digit
+    number between 1900 and the current year) rather than ages -- e.g. an
+    "age" column that's actually full of birth years (1978, 1990, 2001).
+
+    A column is only flagged if the MAJORITY of its non-null values fit
+    the year-like pattern; a handful of stray 4-digit typos in a genuine
+    age column (an unusually old age recorded as e.g. "1985" by mistake)
+    is not evidence the whole column is mislabeled.
+    """
+    results: dict[str, dict] = {}
+    for column, role in role_by_column.items():
+        if not role or role.get("role") != "AGE":
+            continue
+        values = [str(row.get(column, "")).strip() for row in rows]
+        values = [v for v in values if v != ""]
+        if len(values) < _SHAPE_MIN_VALUES:
+            continue
+        year_like_count = sum(1 for v in values if _is_year_like(v))
+        if year_like_count / len(values) >= 0.5:
+            results[column] = {"year_like_count": year_like_count, "total_count": len(values)}
+    return results
+
+
+def find_year_like_value_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for values in `column` that look
+    like a calendar year (4-digit, 1900-current) rather than an age."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, "")).strip()
+        if raw == "":
+            continue
+        if _is_year_like(raw):
+            evidence.append((i, raw))
+    return evidence
+
+
+_ORDERED_KEYWORD_PAIRS = [
+    ("start", "end"),
+    ("begin", "end"),
+    ("min", "max"),
+    ("minimum", "maximum"),
+    ("admission", "discharge"),
+    ("admit", "discharge"),
+    ("enrollment", "completion"),
+    ("first", "last"),
+]
+
+
+def find_ordered_column_pairs(columns: list[str]) -> list[tuple[str, str]]:
+    """Column pairs whose names differ by exactly one "before" keyword
+    swapped for its "after" counterpart (start/end, min/max,
+    admission/discharge, ...) with everything else in the name identical
+    -- "start_date"/"end_date" matches; "start_date"/"discharge_summary"
+    does not, since only the keyword differs, not the rest of the name.
+    A name-pattern suggestion only -- the actual ordering (if any) is
+    checked against real values by `find_column_order_violation_evidence`.
+    """
+    lowered = {c: c.lower() for c in columns}
+    pairs = []
+    for before_kw, after_kw in _ORDERED_KEYWORD_PAIRS:
+        for col_a in columns:
+            name_a = lowered[col_a]
+            if before_kw not in name_a:
+                continue
+            expected_b_name = name_a.replace(before_kw, after_kw)
+            for col_b in columns:
+                if col_b != col_a and lowered[col_b] == expected_b_name:
+                    pairs.append((col_a, col_b))
+    return pairs
+
+
+def find_column_order_violation_evidence(
+    rows: list[dict], before_column: str, after_column: str
+) -> list[tuple[int, str, str]]:
+    """Real (row_index, before_value, after_value) triples where
+    `before_column`'s value is greater than `after_column`'s value in the
+    same row -- e.g. a start date after its own end date, or a minimum
+    reading above its maximum. Compares as ISO dates when both values
+    parse as one (YYYY-MM-DD), else as numbers when both parse
+    numerically; a row where either side is neither (or blank) is skipped
+    rather than guessed at.
+    """
+    evidence = []
+    for i, row in enumerate(rows):
+        before_raw = str(row.get(before_column, "")).strip()
+        after_raw = str(row.get(after_column, "")).strip()
+        if before_raw == "" or after_raw == "":
+            continue
+        if is_iso_date(before_raw) and is_iso_date(after_raw):
+            if before_raw > after_raw:
+                evidence.append((i, before_raw, after_raw))
+            continue
+        before_num = parse_finite_float(before_raw)
+        after_num = parse_finite_float(after_raw)
+        if before_num is not None and after_num is not None and before_num > after_num:
+            evidence.append((i, before_raw, after_raw))
+    return evidence
+
+
+def detect_column_order_violations(
+    rows: list[dict], columns: list[str]
+) -> dict[tuple[str, str], list[tuple[int, str, str]]]:
+    """{(before_column, after_column): evidence} for every name-matched
+    ordered column pair (see `find_ordered_column_pairs`) that has at
+    least one row violating that order."""
+    results: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+    for before_col, after_col in find_ordered_column_pairs(columns):
+        evidence = find_column_order_violation_evidence(rows, before_col, after_col)
+        if evidence:
+            results[(before_col, after_col)] = evidence
+    return results
 
 
 def detect_survey_weight_columns(columns: list[str]) -> list[str]:

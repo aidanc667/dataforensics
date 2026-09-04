@@ -113,6 +113,12 @@ def build_investigation_findings(
     missingness_concentration: dict[str, list[dict]] | None = None,
     missingness_co_occurrence: list[dict] | None = None,
     shape_outlier_findings: dict[str, dict] | None = None,
+    whitespace_anomaly_counts: dict[str, int] | None = None,
+    invisible_char_counts: dict[str, int] | None = None,
+    encoding_corruption_counts: dict[str, int] | None = None,
+    numeric_representation_findings: dict[str, dict] | None = None,
+    age_year_findings: dict[str, dict] | None = None,
+    column_order_findings: dict[tuple[str, str], list] | None = None,
 ) -> list[dict]:
     """One canonical list of findings -- tier (high/review/info), a
     title, real evidence lines (PII-masked where the column warrants it),
@@ -225,6 +231,88 @@ def build_investigation_findings(
             "confidence": "Medium",
             "resolved": 0,
             "total": total,
+        })
+
+    for (before_col, after_col), items in (column_order_findings or {}).items():
+        evidence = [
+            f"row {i + 1:,} → {before_col} = {_mask(before_col, b)} is after {after_col} = {_mask(after_col, a)}"
+            for i, b, a in items
+        ]
+        findings.append({
+            "tier": "high",
+            "title": f"{len(items)} record(s) where {before_col} is after {after_col}",
+            "evidence": evidence[:10],
+            "more": max(0, len(items) - 10),
+            "detection": f"{before_col} and {after_col} differ only by a before/after naming keyword (start/end, min/max, admission/discharge, ...); {before_col}'s value should never exceed {after_col}'s.",
+            "suggested_action": "Review manually — one of the two values (or the column mapping) is likely wrong.",
+            "confidence": "Medium",
+            "resolved": 0,
+            "total": len(items),
+        })
+
+    for col, count in (whitespace_anomaly_counts or {}).items():
+        findings.append({
+            "tier": "review",
+            "title": f"{col}: {count} value(s) with leading/trailing or doubled whitespace",
+            "evidence": [],
+            "more": 0,
+            "detection": "This column has values with leading/trailing whitespace or 2+ consecutive internal spaces.",
+            "suggested_action": "Review manually — could silently break exact-match joins or category counts.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": 1,
+        })
+
+    for col, count in (invisible_char_counts or {}).items():
+        findings.append({
+            "tier": "review",
+            "title": f"{col}: {count} value(s) with a hidden/invisible character",
+            "evidence": [],
+            "more": 0,
+            "detection": "This column has values containing a zero-width space, non-breaking space, or other invisible/control character.",
+            "suggested_action": "Review manually — could silently break exact-match comparisons or lookups.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": 1,
+        })
+
+    for col, count in (encoding_corruption_counts or {}).items():
+        findings.append({
+            "tier": "review",
+            "title": f"{col}: {count} value(s) that look like encoding corruption",
+            "evidence": [],
+            "more": 0,
+            "detection": "This column has values matching the classic signature of UTF-8 text mis-decoded as Windows-1252/Latin-1 (mojibake).",
+            "suggested_action": "Review manually — could indicate a real character-encoding problem earlier in this file's history.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": 1,
+        })
+
+    for col, f in (numeric_representation_findings or {}).items():
+        findings.append({
+            "tier": "review",
+            "title": f"{col}: {f['decorated_count']} value(s) formatted differently than the rest of the column",
+            "evidence": [f"{f['clean_count']} plain number(s) vs. {f['decorated_count']} decorated (currency/comma/suffix) value(s)"],
+            "more": 0,
+            "detection": "Most numeric-looking values in this column parse as a plain number; the rest use a currency symbol, thousands separator, or k/m/b suffix instead.",
+            "suggested_action": "Review manually — could reflect a different data source or entry method.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": 1,
+        })
+
+    for col, f in (age_year_findings or {}).items():
+        findings.append({
+            "tier": "review",
+            "title": f"{col}: {f['year_like_count']} of {f['total_count']} value(s) look like a calendar year, not an age",
+            "evidence": [],
+            "more": 0,
+            "detection": "This column's name matches the 'age' convention, but most values are 4-digit numbers in a plausible birth-year range.",
+            "suggested_action": "Review manually — confirm what this column actually represents before analyzing it as age.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": 1,
         })
 
     for col, finding in clinical_range_findings.items():

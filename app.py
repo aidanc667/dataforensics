@@ -45,26 +45,37 @@ from dataforensics.investigate import (
     compare_fingerprints,
     compute_dataset_fingerprint,
     compute_key_coverage,
+    detect_age_columns_that_look_like_years,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
+    detect_column_order_violations,
     detect_conflicting_id_records,
     detect_duplicate_entities,
     detect_duplicate_rows,
+    detect_encoding_corruption,
+    detect_invisible_characters,
     detect_missingness_co_occurrence,
     detect_missingness_concentration,
+    detect_numeric_representation_inconsistency,
     detect_similar_categories,
     detect_survey_weight_columns,
     detect_value_shape_outliers,
+    detect_whitespace_anomalies,
     discover_shared_key_columns,
     find_ambiguous_date_evidence,
     find_birth_date_after_other_date_evidence,
     find_category_value_evidence,
+    find_encoding_corruption_evidence,
     find_fips_like_columns,
     find_implausible_value_evidence,
     find_invalid_fips_evidence,
     find_invalid_zip_evidence,
+    find_invisible_character_evidence,
+    find_numeric_representation_evidence,
     find_sentinel_evidence,
     find_value_shape_outlier_evidence,
+    find_whitespace_anomaly_evidence,
+    find_year_like_value_evidence,
     find_zip_like_columns,
     infer_semantic_role,
     match_clinical_range_rule,
@@ -240,6 +251,44 @@ def _evidence_lines(column: str, evidence: list[tuple[int, str]]) -> list[str]:
     lines = []
     for row_index, value in evidence:
         shown = _PII_EVIDENCE_MASK if pii else value
+        lines.append(f"row {row_index + 1:,} → {column} = {shown}")
+    return lines
+
+
+_INVISIBLE_CHAR_DISPLAY_NAMES = {
+    "\u200b": "[ZWSP]",
+    "\u200c": "[ZWNJ]",
+    "\u200d": "[ZWJ]",
+    "\u200e": "[LRM]",
+    "\u200f": "[RLM]",
+    "\xa0": "[NBSP]",
+    "\ufeff": "[BOM]",
+    "\u2060": "[WJ]",
+}
+
+
+def _make_invisible_characters_visible(value: str) -> str:
+    """Replace known invisible/control characters with a bracketed label
+    ("[ZWSP]", "[NBSP]", ...) so an evidence line actually shows what's
+    wrong -- the raw character itself renders as nothing or as an
+    ordinary-looking space, which would make the very evidence meant to
+    prove this finding indistinguishable from a clean value."""
+    result = value
+    for ch, label in _INVISIBLE_CHAR_DISPLAY_NAMES.items():
+        result = result.replace(ch, label)
+    return "".join(
+        f"[U+{ord(c):04X}]" if (ord(c) < 0x20 and c not in "\t\n\r") or ord(c) == 0x7F else c for c in result
+    )
+
+
+def _invisible_char_evidence_lines(column: str, evidence: list[tuple[int, str]]) -> list[str]:
+    """Same as `_evidence_lines`, but also makes invisible/control
+    characters in an unmasked value visible (see
+    `_make_invisible_characters_visible`)."""
+    pii = is_pii_like_column(column)
+    lines = []
+    for row_index, value in evidence:
+        shown = _PII_EVIDENCE_MASK if pii else _make_invisible_characters_visible(value)
         lines.append(f"row {row_index + 1:,} → {column} = {shown}")
     return lines
 
@@ -642,6 +691,27 @@ with tab_analyze:
     # doesn't apply to.
     shape_outlier_findings = detect_value_shape_outliers(rows, columns, dictionary)
 
+    # Always on -- format-integrity checks that apply to any column,
+    # regardless of dataset profile. Each is a distinct, independent
+    # signal from the shape-outlier check above: whitespace padding,
+    # invisible/control characters, and mojibake can all coexist with (or
+    # without) a value-shape problem.
+    whitespace_anomaly_counts = detect_whitespace_anomalies(rows, columns)
+    invisible_char_counts = detect_invisible_characters(rows, columns)
+    encoding_corruption_counts = detect_encoding_corruption(rows, columns)
+    numeric_representation_findings = detect_numeric_representation_inconsistency(rows, columns, dictionary)
+
+    # Always on -- flags an AGE-role column whose values look like
+    # calendar years rather than ages (e.g. full of 1978, 1990, 2001).
+    age_year_findings = detect_age_columns_that_look_like_years(rows, role_by_column)
+
+    # Always on -- general "does column A ever exceed column B where their
+    # names suggest A should never exceed B" check (start/end, min/max,
+    # admission/discharge, ...). Complements (does not replace) the
+    # birth-date-specific check below, which is driven by inferred
+    # semantic role rather than naming convention.
+    column_order_findings = detect_column_order_violations(rows, columns)
+
     # --- Cross-column reasoning: relationships BETWEEN columns, not just
     # one column in isolation. Always on (not gated behind a dataset
     # profile) -- both checks only fire when the relevant column roles
@@ -810,6 +880,14 @@ with tab_analyze:
                 st.markdown(f"- {birth_col} is after {other_col} in {len(evidence)} row(s)")
             st.caption("A birth date cannot come after another recorded date for the same person. Full evidence in **Review & Approve** below.")
 
+    if column_order_findings:
+        any_attention_items = True
+        total_order_violation_rows = sum(len(v) for v in column_order_findings.values())
+        with st.expander(f"🔴 {total_order_violation_rows} record(s) with an impossible column ordering"):
+            for (before_col, after_col), evidence in column_order_findings.items():
+                st.markdown(f"- {before_col} is after {after_col} in {len(evidence)} row(s)")
+            st.caption("The column names suggest one value should never exceed the other (start/end, min/max, admission/discharge, ...). Full evidence in **Review & Approve** below.")
+
     if shape_outlier_findings:
         any_attention_items = True
         total_shape_outlier_rows = sum(f["outlier_count"] for f in shape_outlier_findings.values())
@@ -818,6 +896,45 @@ with tab_analyze:
             for col, f in shape_outlier_findings.items():
                 st.markdown(f"- **{col}**: {f['outlier_count']} of {f['total_count']} value(s) don't match the dominant format")
             st.caption("Most values in each column share one consistent shape (e.g. every phone number formatted the same way) — these don't. Full evidence in **Review & Approve** below.")
+
+    if whitespace_anomaly_counts:
+        any_attention_items = True
+        n = sum(whitespace_anomaly_counts.values())
+        with st.expander(f"🟠 {n} value(s) with leading/trailing or doubled whitespace"):
+            for col, count in whitespace_anomaly_counts.items():
+                st.markdown(f"- **{col}**: {count} value(s)")
+            st.caption('"California" and " California " look identical but are different strings — this silently breaks exact-match joins and category counts. Full evidence in **Review & Approve** below.')
+
+    if invisible_char_counts:
+        any_attention_items = True
+        n = sum(invisible_char_counts.values())
+        with st.expander(f"🟠 {n} value(s) with a hidden/invisible character"):
+            for col, count in invisible_char_counts.items():
+                st.markdown(f"- **{col}**: {count} value(s)")
+            st.caption("A zero-width space, non-breaking space, or control character that renders invisibly but is a real, different character. Full evidence in **Review & Approve** below.")
+
+    if encoding_corruption_counts:
+        any_attention_items = True
+        n = sum(encoding_corruption_counts.values())
+        with st.expander(f"🟠 {n} value(s) that look like encoding corruption (mojibake)"):
+            for col, count in encoding_corruption_counts.items():
+                st.markdown(f"- **{col}**: {count} value(s)")
+            st.caption('Text that looks like it was UTF-8 but got decoded as Windows-1252/Latin-1 somewhere (e.g. "JosÃ©" instead of "José"). Full evidence in **Review & Approve** below.')
+
+    if numeric_representation_findings:
+        any_attention_items = True
+        n = sum(f["decorated_count"] for f in numeric_representation_findings.values())
+        with st.expander(f"🟠 {n} value(s) that are numbers written in a different format than the rest of their column"):
+            for col, f in numeric_representation_findings.items():
+                st.markdown(f"- **{col}**: {f['decorated_count']} value(s) (vs. {f['clean_count']} plain numbers)")
+            st.caption('A currency symbol, thousands separator, or k/m/b suffix ("$50,000", "50k") on an otherwise plain-number column. Full evidence in **Review & Approve** below.')
+
+    if age_year_findings:
+        any_attention_items = True
+        with st.expander(f"🟠 {len(age_year_findings)} column(s) labeled as age but shaped like calendar years"):
+            for col, f in age_year_findings.items():
+                st.markdown(f"- **{col}**: {f['year_like_count']} of {f['total_count']} value(s) look like a year (e.g. 1978, 1990), not an age")
+            st.caption("Most of this column's values are 4-digit numbers in a plausible birth-year range — possibly a birth-year column labeled as age. Full evidence in **Review & Approve** below.")
 
     if distribution_columns:
         any_attention_items = True
@@ -914,6 +1031,7 @@ with tab_analyze:
         + len(conflicting_id_findings)
         + (1 if duplicate_entities else 0)
         + len(birth_date_findings)
+        + len(column_order_findings)
     )
     n_worth_reviewing = (
         sum(len(v) for v in sentinels.values())
@@ -922,6 +1040,11 @@ with tab_analyze:
         + len(distribution_columns)
         + len(missingness_columns)
         + len(shape_outlier_findings)
+        + len(whitespace_anomaly_counts)
+        + len(invisible_char_counts)
+        + len(encoding_corruption_counts)
+        + len(numeric_representation_findings)
+        + len(age_year_findings)
         + total_domain_findings
     )
     st.markdown("**Overall**")
@@ -1289,8 +1412,12 @@ with tab_analyze:
         clinical_range_findings or conflicting_id_findings or invalid_fips_findings
         or invalid_zip_findings or survey_weight_columns
     )
-    any_cross_column_findings = bool(birth_date_findings or duplicate_entities)
-    if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings or shape_outlier_findings:
+    any_cross_column_findings = bool(birth_date_findings or duplicate_entities or column_order_findings)
+    any_format_integrity_findings = bool(
+        shape_outlier_findings or whitespace_anomaly_counts or invisible_char_counts
+        or encoding_corruption_counts or numeric_representation_findings or age_year_findings
+    )
+    if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings or any_format_integrity_findings:
         st.markdown('<div class="dataforensics-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
         st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
         for c, f in outlier_cols.items():
@@ -1344,6 +1471,89 @@ with tab_analyze:
                 known="This value's character pattern (digits, letters, spacing, punctuation) doesn't match the format most other values in this column share.",
                 not_known="Whether this is a genuine formatting error, a legitimately different but valid format (e.g. an international phone number), or the correct value for an edge case.",
                 recommended_action="Review manually — DataForensics never reformats or corrects a value automatically.",
+            )
+        for col, count in whitespace_anomaly_counts.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {count} value(s) with leading/trailing or doubled whitespace</div>'
+                f'<div class="dataforensics-card-evidence">e.g. "California" vs " California " — different strings, same apparent value</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=f"{_esc(col)} has a value with leading/trailing whitespace or 2+ consecutive internal spaces.",
+                lines=_evidence_lines(col, find_whitespace_anomaly_evidence(rows, col)),
+                known="This value has whitespace padding or doubled internal spacing that a visually identical value elsewhere may lack.",
+                not_known="Whether this whitespace was intentional, or an export/copy-paste artifact.",
+                recommended_action="Review manually — DataForensics never trims or reformats a value automatically.",
+            )
+        for col, count in invisible_char_counts.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {count} value(s) with a hidden/invisible character</div>'
+                f'<div class="dataforensics-card-evidence">a zero-width space, non-breaking space, or control character that renders invisibly</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=f"{_esc(col)} has a value containing a zero-width space, non-breaking space, embedded byte-order mark, or other invisible/control character.",
+                lines=_invisible_char_evidence_lines(col, find_invisible_character_evidence(rows, col)),
+                known="This value contains a character that renders invisibly (or nearly so) but is a real, different character from a normal space or nothing at all.",
+                not_known="Whether this was introduced by a copy-paste from a web page/PDF, an export tool, or is otherwise intentional.",
+                recommended_action="Review manually — DataForensics never strips or replaces a character automatically.",
+            )
+        for col, count in encoding_corruption_counts.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {count} value(s) that look like encoding corruption</div>'
+                f'<div class="dataforensics-card-evidence">e.g. "JosÃ©" instead of "José" — a UTF-8/Windows-1252 mismatch</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=(
+                    f"{_esc(col)} has a value that round-trips cleanly through \"encode as Windows-1252, decode "
+                    "as UTF-8\" into a different string containing a non-ASCII character — the standard "
+                    "signature of text that was genuinely UTF-8 but got decoded as Windows-1252/Latin-1 "
+                    "somewhere in its history."
+                ),
+                lines=_evidence_lines(col, find_encoding_corruption_evidence(rows, col)),
+                known="This value's byte pattern matches the classic signature of UTF-8 text that was mis-decoded as a different encoding.",
+                not_known="The exact tool/step in this file's history that introduced the mis-decoding, or whether re-decoding it would perfectly recover the original text in every case.",
+                recommended_action="Review manually — DataForensics never re-encodes or corrects a value automatically.",
+            )
+        for col, f in numeric_representation_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {f["decorated_count"]} value(s) formatted differently than the rest of the column</div>'
+                f'<div class="dataforensics-card-evidence">{f["clean_count"]} plain number(s) vs. {f["decorated_count"]} decorated (currency/comma/suffix) value(s)</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=(
+                    f"{f['clean_count']} of {f['clean_count'] + f['decorated_count']} numeric-looking values in "
+                    f"{_esc(col)} parse as a plain number; the rest use a currency symbol, thousands separator, "
+                    "or k/m/b magnitude suffix instead."
+                ),
+                lines=_evidence_lines(col, find_numeric_representation_evidence(rows, col)),
+                known="This value represents a number but in a different textual format than most of this column's other values.",
+                not_known="Whether this formatting difference reflects a different data source/entry method, or was simply typed differently by mistake.",
+                recommended_action="Review manually — DataForensics never reformats or reparses a value automatically.",
+            )
+        for col, f in age_year_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {f["year_like_count"]} of {f["total_count"]} value(s) look like a calendar year, not an age</div>'
+                f'<div class="dataforensics-card-evidence">column name matches the "age" convention, but most values are 4-digit numbers in a plausible birth-year range</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=(
+                    f"{f['year_like_count']} of {f['total_count']} non-null values in {_esc(col)} "
+                    f"({f['year_like_count'] / f['total_count']:.0%}) are 4-digit numbers between 1900 and the "
+                    "current year — implausible as ages, but exactly the shape of a birth year."
+                ),
+                lines=_evidence_lines(col, find_year_like_value_evidence(rows, col)),
+                known="Most of this column's values fall in a plausible calendar-year range rather than a plausible age range.",
+                not_known="Whether this column is actually a birth year mislabeled as age, or a genuine age column with an unrelated data issue.",
+                recommended_action="Review manually — confirm what this column actually represents before analyzing it as age.",
             )
         if dup_rows:
             st.markdown(
@@ -1517,6 +1727,41 @@ with tab_analyze:
                     "were mislabeled/swapped) — only that both cannot be correct as recorded."
                 )
                 st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which date is correct.")
+                st.markdown("**Automatic modification:**  \nNONE.")
+
+        for (before_col, after_col), evidence in column_order_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Ordering inconsistency</span>'
+                f'<div class="dataforensics-card-title">{len(evidence)} row(s) where {_esc(before_col)} is AFTER {_esc(after_col)}</div>'
+                f'<div class="dataforensics-card-evidence">column names suggest {_esc(before_col)} should never exceed {_esc(after_col)}</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    f"**Rule:**  \n{_esc(before_col)} and {_esc(after_col)} differ only by a \"before\"/\"after\" "
+                    "naming keyword (start/end, min/max, admission/discharge, ...); compared as ISO dates or as "
+                    f"numbers, {_esc(before_col)}'s value should never exceed {_esc(after_col)}'s in the same row."
+                )
+                st.markdown("**Evidence:**")
+                before_pii = is_pii_like_column(before_col)
+                after_pii = is_pii_like_column(after_col)
+                order_lines = [
+                    f"row {i + 1:,} → {before_col} = {_PII_EVIDENCE_MASK if before_pii else b} is after "
+                    f"{after_col} = {_PII_EVIDENCE_MASK if after_pii else a}"
+                    for i, b, a in evidence[:10]
+                ]
+                st.markdown(
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in order_lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if len(evidence) > 10:
+                    st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
+                st.markdown(f"**What the system knows:**  \nIn these rows, {_esc(before_col)}'s value is greater than {_esc(after_col)}'s.")
+                st.markdown(
+                    "**What it does NOT know:**  \nWhich value is wrong (or whether the columns were "
+                    "mislabeled/swapped) — only that both cannot be correct as recorded given their names."
+                )
+                st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which value is correct.")
                 st.markdown("**Automatic modification:**  \nNONE.")
 
         if duplicate_entities:
@@ -1730,6 +1975,12 @@ with tab_analyze:
             missingness_concentration=missingness_concentration,
             missingness_co_occurrence=missingness_co_occurrence,
             shape_outlier_findings=shape_outlier_findings,
+            whitespace_anomaly_counts=whitespace_anomaly_counts,
+            invisible_char_counts=invisible_char_counts,
+            encoding_corruption_counts=encoding_corruption_counts,
+            numeric_representation_findings=numeric_representation_findings,
+            age_year_findings=age_year_findings,
+            column_order_findings=column_order_findings,
         )
         audit_report_html = build_audit_report_html(
             file_name=st.session_state["dataforensics_data_name"],
