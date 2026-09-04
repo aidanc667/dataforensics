@@ -19,6 +19,7 @@ def _base_kwargs(**overrides) -> dict:
         # fix behave as if every column were numeric/categorical-eligible.
         numeric_eligible_cell_count=1000,
         categorical_eligible_cell_count=1000,
+        format_integrity_flagged_cell_count=0,
     )
     kwargs.update(overrides)
     return kwargs
@@ -56,14 +57,25 @@ def test_outliers_sentinels_and_top_code_affect_validity():
     # sentinel is scored against the full 1000-cell grid (any column can
     # carry a literal "-99"); outlier + top-code are scored against the
     # eligible cells only, defaulted to 1000 here too, so this reduces to
-    # the same two-cell-pool math validity always uses:
+    # the same cell-pool math validity always uses; format-integrity is
+    # untouched here (defaults to 0 flagged -> a perfect 100):
     #   sentinel_score = _score(30, 1000) = 94
     #   numeric_check_score = _score(50+20, 1000) = _score(70, 1000) = 86
-    #   validity = worst_weighted([94, 86]) = round(0.4*86 + 0.6*90) = 88
+    #   format_integrity_score = _score(0, 1000) = 100
+    #   validity = worst_weighted([94, 86, 100]) = round(0.4*86 + 0.6*(280/3)) = 90
     score = compute_quality_score(
         **_base_kwargs(outlier_flagged_cell_count=50, sentinel_flagged_cell_count=30, top_code_flagged_cell_count=20)
     )
-    assert score["validity"] == 88
+    assert score["validity"] == 90
+    assert score["consistency"] == 100
+
+
+def test_format_integrity_problems_affect_validity():
+    # format_integrity_score = _score(40, 1000) = 92; sentinel and numeric
+    # checks stay clean at 100 each:
+    #   validity = worst_weighted([100, 100, 92]) = round(0.4*92 + 0.6*(292/3)) = 95
+    score = compute_quality_score(**_base_kwargs(format_integrity_flagged_cell_count=40))
+    assert score["validity"] == 95
     assert score["consistency"] == 100
 
 
@@ -118,12 +130,15 @@ def test_overall_weights_the_worst_subscore_more_than_a_plain_average():
 def test_one_badly_failing_dimension_pulls_overall_down_substantially():
     # A single dimension crashing to 0 must drag overall well below what
     # a plain 5-way average would produce (80) -- a dataset is only as
-    # trustworthy as its weakest documented dimension.
+    # trustworthy as its weakest documented dimension. All three validity
+    # components (sentinel, numeric, format-integrity) are maxed out here
+    # so validity genuinely bottoms out at 0, not just mostly.
     score = compute_quality_score(
         **_base_kwargs(
             row_count=10, column_count=1,  # total_cells = 10
             outlier_flagged_cell_count=10, sentinel_flagged_cell_count=10,
             numeric_eligible_cell_count=10, categorical_eligible_cell_count=10,
+            format_integrity_flagged_cell_count=10,
         )
     )
     assert score["validity"] == 0
@@ -137,12 +152,14 @@ def test_empty_dataset_scores_100_not_a_crash():
 
 
 def test_score_never_goes_below_zero():
-    # every cell flagged twice over (sentinel + outlier both covering all cells)
+    # every cell flagged three times over (sentinel + outlier + format-
+    # integrity all covering all cells)
     score = compute_quality_score(
         **_base_kwargs(
             row_count=10, column_count=1,
             outlier_flagged_cell_count=10, sentinel_flagged_cell_count=10,
             numeric_eligible_cell_count=10, categorical_eligible_cell_count=10,
+            format_integrity_flagged_cell_count=10,
         )
     )
     assert score["validity"] == 0

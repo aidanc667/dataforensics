@@ -57,6 +57,7 @@ def compute_quality_score(
     category_inconsistent_cell_count: int,
     numeric_eligible_cell_count: int,
     categorical_eligible_cell_count: int,
+    format_integrity_flagged_cell_count: int,
 ) -> dict:
     """Five sub-scores (0-100) plus a worst-dimension-weighted `overall`.
 
@@ -65,10 +66,10 @@ def compute_quality_score(
         right denominator here -- no dilution concern.
       - uniqueness: share of rows that are NOT an exact duplicate of an
         earlier row.
-      - validity: combines two checks with DIFFERENT eligibility scopes,
-        so each is scored against its own eligible cells, then combined
-        with the same worst-weighted formula `overall` uses (see below
-        for why) rather than pooling both flagged-counts over one
+      - validity: combines three checks. Two have DIFFERENT eligibility
+        scopes, so each is scored against its own eligible cells, then
+        combined with the same worst-weighted formula `overall` uses (see
+        below for why) rather than pooling flagged-counts over one
         denominator:
           * candidate missing-value sentinels (e.g. "-99" written
             literally into the data) can appear in any non-null cell of
@@ -87,6 +88,18 @@ def compute_quality_score(
             denominator. Scored against `numeric_eligible_cell_count`
             instead, a genuinely 65%-top-coded income column reads as the
             genuine problem it is instead of a rounding error.
+          * format-integrity problems (whitespace padding, invisible/
+            control characters, encoding corruption/mojibake) can appear
+            in any non-null cell of any column, the same as sentinels, so
+            this is scored against the full cell grid too. Deliberately
+            excludes the OTHER format-related suggestions this codebase
+            surfaces (value-shape outliers, unit-mixing, an age column
+            shaped like birth years, ...) -- those are explicitly
+            "Low confidence" heuristics that can fire on a coincidence,
+            not a fact about the value the way a literal invisible
+            character or a demonstrable encoding round-trip is. Folding a
+            coincidence-based suggestion into a hard 0-100 score would
+            overstate its certainty.
       - consistency: same reasoning, split the same way -- inconsistent
         category spellings only ever get computed for "categorical"-
         classified columns (scored against `categorical_eligible_cell_count`),
@@ -125,7 +138,8 @@ def compute_quality_score(
     numeric_check_score = _score(
         outlier_flagged_cell_count + top_code_flagged_cell_count, numeric_eligible_cell_count
     )
-    validity = _worst_weighted([sentinel_score, numeric_check_score])
+    format_integrity_score = _score(format_integrity_flagged_cell_count, total_cells)
+    validity = _worst_weighted([sentinel_score, numeric_check_score, format_integrity_score])
 
     category_score = _score(category_inconsistent_cell_count, categorical_eligible_cell_count)
     ambiguous_date_score = _score(ambiguous_date_cell_count, total_cells)

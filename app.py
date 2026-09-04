@@ -1182,6 +1182,19 @@ with tab_analyze:
     categorical_eligible_cell_count = sum(
         len(rows) - f["null_count"] for f in dictionary.values() if f["category"] == "categorical"
     )
+    # Only the three format-integrity checks that are objectively true or
+    # false about a value (whitespace padding, an invisible/control
+    # character, a demonstrable encoding round-trip) feed the score.
+    # value-shape outliers, unit-mixing, and an age column shaped like
+    # birth years are deliberately excluded -- those are "Low confidence"
+    # heuristics that can fire on a coincidence, and folding a
+    # coincidence-based suggestion into a hard 0-100 score would overstate
+    # its certainty.
+    format_integrity_flagged_cell_count = (
+        sum(whitespace_anomaly_counts.values())
+        + sum(invisible_char_counts.values())
+        + sum(encoding_corruption_counts.values())
+    )
 
     quality = compute_quality_score(
         row_count=len(rows),
@@ -1197,6 +1210,7 @@ with tab_analyze:
         category_inconsistent_cell_count=category_inconsistent_cell_count,
         numeric_eligible_cell_count=numeric_eligible_cell_count,
         categorical_eligible_cell_count=categorical_eligible_cell_count,
+        format_integrity_flagged_cell_count=format_integrity_flagged_cell_count,
     )
 
     # Findings summary table -- reused by the downloadable audit report in
