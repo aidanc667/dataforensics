@@ -39,6 +39,7 @@ from dataforensics.investigate import (
     COMMON_SENTINEL_STRINGS,
     DATASET_PROFILES,
     analyze_key_cardinality,
+    analyze_temporal_freshness,
     build_missingness_overview,
     check_referential_integrity,
     classify_column_types,
@@ -59,6 +60,7 @@ from dataforensics.investigate import (
     detect_numeric_representation_inconsistency,
     detect_similar_categories,
     detect_survey_weight_columns,
+    detect_temporal_gaps,
     detect_unit_inconsistency,
     detect_value_shape_outliers,
     detect_whitespace_anomalies,
@@ -68,6 +70,7 @@ from dataforensics.investigate import (
     find_category_value_evidence,
     find_encoding_corruption_evidence,
     find_fips_like_columns,
+    find_future_date_evidence,
     find_implausible_value_evidence,
     find_invalid_fips_evidence,
     find_invalid_zip_evidence,
@@ -81,6 +84,7 @@ from dataforensics.investigate import (
     find_zip_like_columns,
     infer_semantic_role,
     match_clinical_range_rule,
+    reconcile_shared_records,
 )
 from dataforensics.quality_score import compute_quality_score
 from dataforensics.report import render_html
@@ -722,6 +726,23 @@ with tab_analyze:
     # semantic role rather than naming convention.
     column_order_findings = detect_column_order_violations(rows, columns)
 
+    # Always on -- freshness/timeliness of every date-shaped column (by
+    # actual value shape via classify_column_types, not just a
+    # name-pattern role), plus future-dated values and irregular gaps in
+    # coverage. Uses the column's OWN observed gap cadence rather than
+    # assuming a specific calendar frequency nobody declared.
+    date_typed_columns = [col for col, t in column_types.items() if t == "date"]
+    temporal_freshness = analyze_temporal_freshness(rows, date_typed_columns)
+    future_date_findings: dict[str, list[tuple[int, str]]] = {}
+    temporal_gap_findings: dict[str, dict] = {}
+    for col in date_typed_columns:
+        future_evidence = find_future_date_evidence(rows, col)
+        if future_evidence:
+            future_date_findings[col] = future_evidence
+        gap_result = detect_temporal_gaps(rows, col)
+        if gap_result:
+            temporal_gap_findings[col] = gap_result
+
     # --- Cross-column reasoning: relationships BETWEEN columns, not just
     # one column in isolation. Always on (not gated behind a dataset
     # profile) -- both checks only fire when the relevant column roles
@@ -818,6 +839,16 @@ with tab_analyze:
     for line in structure_lines:
         st.markdown(f"- {line}")
 
+    if temporal_freshness:
+        st.markdown("**Freshness**")
+        for col, f in temporal_freshness.items():
+            days = f["days_since_latest"]
+            if days < 0:
+                recency = f"most recent value is {abs(days):,} day{'s' if days != -1 else ''} in the future"
+            else:
+                recency = f"{days:,} day{'s' if days != 1 else ''} since the most recent value"
+            st.markdown(f"- **{col}**: {f['earliest']} to {f['latest']} ({recency}, {f['valid_date_count']:,} valid date value(s))")
+
     # --- Requires attention: every finding itemized by TYPE (never
     # collapsed into one opaque count), each expandable for real
     # evidence -- not just "2 things worth reviewing," but which two
@@ -897,6 +928,22 @@ with tab_analyze:
             for (before_col, after_col), evidence in column_order_findings.items():
                 st.markdown(f"- {before_col} is after {after_col} in {len(evidence)} row(s)")
             st.caption("The column names suggest one value should never exceed the other (start/end, min/max, admission/discharge, ...). Full evidence in **Review & Approve** below.")
+
+    if future_date_findings:
+        any_attention_items = True
+        total_future_dates = sum(len(v) for v in future_date_findings.values())
+        with st.expander(f"🔴 {total_future_dates} value(s) dated in the future"):
+            for col, evidence in future_date_findings.items():
+                st.markdown(f"- **{col}**: {len(evidence)} value(s) after today")
+            st.caption("A date after today in this kind of column is almost always a data-entry error (wrong year, wrong century). Full evidence in **Review & Approve** below.")
+
+    if temporal_gap_findings:
+        any_attention_items = True
+        n = len(temporal_gap_findings)
+        with st.expander(f"🟠 {n} date column{'s' if n != 1 else ''} with an irregular coverage gap"):
+            for col, g in temporal_gap_findings.items():
+                st.markdown(f"- **{col}**: {len(g['gaps'])} gap(s) at least 2x this column's own median spacing ({g['median_gap_days']:,.0f} day(s))")
+            st.caption("A gap much larger than this column's typical spacing between observations — could be a real reporting gap or expected (e.g. a facility closure). Full evidence in **Review & Approve** below.")
 
     if shape_outlier_findings:
         any_attention_items = True
@@ -1053,6 +1100,7 @@ with tab_analyze:
         + (1 if duplicate_entities else 0)
         + len(birth_date_findings)
         + len(column_order_findings)
+        + len(future_date_findings)
     )
     n_worth_reviewing = (
         sum(len(v) for v in sentinels.values())
@@ -1065,6 +1113,7 @@ with tab_analyze:
         + len(invisible_char_counts)
         + len(encoding_corruption_counts)
         + len(numeric_representation_findings)
+        + len(temporal_gap_findings)
         + len(age_year_findings)
         + len(unit_inconsistency_findings)
         + total_domain_findings
@@ -1225,6 +1274,9 @@ with tab_analyze:
                 else:
                     st.warning("⚠ This dataset has changed since the uploaded fingerprint.")
                     diff = compare_fingerprints(prev_fp, fingerprint, prev_dict, dictionary)
+                    if diff["possible_renames"]:
+                        for r in diff["possible_renames"]:
+                            st.caption(f"↔ {r['removed']} and {r['added']} have identical dtype, category, cardinality, and missingness — possibly the same column renamed, not truly added/removed.")
                     if diff["columns_added"]:
                         st.write(f"**+{len(diff['columns_added'])} column(s):** {', '.join(diff['columns_added'])}")
                     if diff["columns_removed"]:
@@ -1236,6 +1288,19 @@ with tab_analyze:
                             [{"column": c["column"], **{f"{k} (before → after)": f"{v['before']} → {v['after']}" for k, v in c["changes"].items()}} for c in diff["changed_columns"]],
                             use_container_width=True,
                         )
+                    if diff["distribution_drift"]:
+                        st.write("**Distribution drift:**")
+                        for d in diff["distribution_drift"]:
+                            if d["kind"] == "numeric_median":
+                                st.markdown(f"- **{d['column']}**: median {d['before']:,.2f} → {d['after']:,.2f} ({d['relative_change']:+.0%})")
+                            else:
+                                bits = []
+                                if d["values_added"]:
+                                    bits.append(f"+{', '.join(d['values_added'])}")
+                                if d["values_removed"]:
+                                    bits.append(f"-{', '.join(d['values_removed'])}")
+                                st.markdown(f"- **{d['column']}**: category values changed ({'; '.join(bits)})")
+                        st.caption("A change worth investigating, not automatically an error — a median or category set can legitimately shift between real dataset versions.")
 
     # ------------------------------------------------------------------ #
     # Step 3: Review & Approve
@@ -1440,7 +1505,8 @@ with tab_analyze:
         or encoding_corruption_counts or numeric_representation_findings or age_year_findings
         or unit_inconsistency_findings
     )
-    if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings or any_format_integrity_findings:
+    any_temporal_findings = bool(future_date_findings or temporal_gap_findings)
+    if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings or any_format_integrity_findings or any_temporal_findings:
         st.markdown('<div class="dataforensics-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
         st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
         for c, f in outlier_cols.items():
@@ -1808,6 +1874,50 @@ with tab_analyze:
                 st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which value is correct.")
                 st.markdown("**Automatic modification:**  \nNONE.")
 
+        for col, evidence in future_date_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Future date</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {len(evidence)} value(s) dated after today</div>'
+                f'<div class="dataforensics-card-evidence">a date this far in the future is almost always a data-entry error</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=f"{_esc(col)} has an ISO date value later than today's date.",
+                lines=_evidence_lines(col, evidence),
+                known="This date is chronologically after today.",
+                not_known="Whether this is a mistyped year/century, a genuinely scheduled future date (e.g. a planned follow-up visit), or a placeholder value.",
+                recommended_action="Review manually — confirm whether a future date is expected for this column.",
+            )
+
+        for col, g in temporal_gap_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {len(g["gaps"])} coverage gap(s) well beyond this column\'s typical spacing</div>'
+                f'<div class="dataforensics-card-evidence">median spacing between observations is {g["median_gap_days"]:,.0f} day(s)</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    f"**Rule:**  \nThe median gap between consecutive distinct dates in {_esc(col)} is "
+                    f"{g['median_gap_days']:,.0f} day(s); a gap at least 2x that is flagged as irregular, "
+                    "adapting to this column's own observed cadence rather than assuming a fixed calendar frequency."
+                )
+                st.markdown("**Evidence:**")
+                gap_lines = [f"{gap['after']} → {gap['before']} ({gap['gap_days']:,} day(s))" for gap in g["gaps"][:10]]
+                st.markdown(
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in gap_lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if len(g["gaps"]) > 10:
+                    st.caption(f"...and {len(g['gaps']) - 10} more gap(s) not shown.")
+                st.markdown(f"**What the system knows:**  \nThis gap is at least twice {_esc(col)}'s own median spacing between observations.")
+                st.markdown(
+                    "**What it does NOT know:**  \nWhether this reflects a real reporting gap, an expected pause "
+                    "(e.g. a facility closure, a seasonal program), or simply a naturally uneven observation schedule."
+                )
+                st.markdown("**Recommended action:**  \nReview manually — confirm whether this gap is expected.")
+                st.markdown("**Automatic modification:**  \nNONE.")
+
         if duplicate_entities:
             total_flagged_rows = sum(len(d["row_indices"]) for d in duplicate_entities)
             st.markdown(
@@ -2025,6 +2135,8 @@ with tab_analyze:
             numeric_representation_findings=numeric_representation_findings,
             age_year_findings=age_year_findings,
             unit_inconsistency_findings=unit_inconsistency_findings,
+            future_date_findings=future_date_findings,
+            temporal_gap_findings=temporal_gap_findings,
             column_order_findings=column_order_findings,
         )
         audit_report_html = build_audit_report_html(
@@ -2156,6 +2268,54 @@ with tab_multifile:
                     f"in {cand['file_b']}. The remainder may be expected (e.g. a participant not yet visited) "
                     "or may indicate incomplete data — DataForensics doesn't assume either."
                 )
+
+                if cardinality["relationship"] == "one_to_one":
+                    st.subheader("Value reconciliation")
+                    st.caption(
+                        f"For records present in both files, do the other shared columns actually agree? "
+                        f"This is the closest DataForensics comes to an accuracy check — it can't independently "
+                        f"verify which file (if either) holds the true value, only where {cand['file_a']} and "
+                        f"{cand['file_b']} disagree. Only offered for a one-to-one key relationship, where each "
+                        "record has exactly one counterpart to compare against."
+                    )
+                    shared_compare_columns = sorted(
+                        (set(file_rows[cand["file_a"]][0]) & set(file_rows[cand["file_b"]][0]))
+                        - {cand["column_a"], cand["column_b"]}
+                    ) if file_rows[cand["file_a"]] and file_rows[cand["file_b"]] else []
+                    if not shared_compare_columns:
+                        st.info(f"{cand['file_a']} and {cand['file_b']} have no other columns in common to compare.")
+                    else:
+                        reconciliation = reconcile_shared_records(
+                            file_rows[cand["file_a"]], file_rows[cand["file_b"]],
+                            cand["column_a"], cand["column_b"], shared_compare_columns,
+                        )
+                        rc1, rc2, rc3, rc4 = st.columns(4)
+                        rc1.metric("Records compared", f"{reconciliation['records_compared']:,}")
+                        rc2.metric("Matched", f"{reconciliation['records_matched']:,}")
+                        rc3.metric("With discrepancy", f"{reconciliation['records_with_discrepancy']:,}")
+                        rc4.metric("Discrepancy rate", f"{reconciliation['record_discrepancy_rate']:.1%}")
+                        discrepant_columns = {
+                            col: v for col, v in reconciliation["per_column"].items() if v["discrepancy"]
+                        }
+                        if discrepant_columns:
+                            st.write("**Columns with discrepancies:**")
+                            for col, v in discrepant_columns.items():
+                                pii = is_pii_like_column(col)
+                                with st.expander(f"{col}: {v['discrepancy']} discrepancy/discrepancies"):
+                                    example_lines = [
+                                        f"key {ex['key']} → {cand['file_a']} = "
+                                        f"{_PII_EVIDENCE_MASK if pii else ex['value_a']}, {cand['file_b']} = "
+                                        f"{_PII_EVIDENCE_MASK if pii else ex['value_b']}"
+                                        for ex in v["examples"]
+                                    ]
+                                    st.markdown(
+                                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in example_lines)}</div>',
+                                        unsafe_allow_html=True,
+                                    )
+                                    if v["discrepancy"] > len(v["examples"]):
+                                        st.caption(f"...and {v['discrepancy'] - len(v['examples'])} more not shown.")
+                        else:
+                            st.success(f"Every shared column agrees for all {reconciliation['records_compared']:,} record(s) present in both files.")
     elif multi_files:
         st.info("Upload at least 2 files to discover relationships between them.")
     else:

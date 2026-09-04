@@ -1,8 +1,13 @@
+from datetime import UTC, datetime, timedelta
+
 from dataforensics.investigate import (
     analyze_key_cardinality,
+    analyze_temporal_freshness,
     build_missingness_overview,
     classify_column_types,
     compute_key_coverage,
+    detect_temporal_gaps,
+    find_future_date_evidence,
     detect_age_columns_that_look_like_years,
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
@@ -825,3 +830,51 @@ def test_find_unit_inconsistency_evidence_returns_only_minority_cluster():
     assert f["minority_side"] == "high"
     evidence = find_unit_inconsistency_evidence(rows, "weight", f["boundary"], f["minority_side"])
     assert len(evidence) == 3
+
+
+def test_analyze_temporal_freshness_reports_earliest_latest_and_days_since():
+    today = datetime.now(UTC).date()
+    ten_days_ago = (today - timedelta(days=10)).isoformat()
+    forty_days_ago = (today - timedelta(days=40)).isoformat()
+    rows = [{"visit_date": forty_days_ago}, {"visit_date": ten_days_ago}]
+    result = analyze_temporal_freshness(rows, ["visit_date"])
+    assert result["visit_date"]["earliest"] == forty_days_ago
+    assert result["visit_date"]["latest"] == ten_days_ago
+    assert result["visit_date"]["days_since_latest"] == 10
+    assert result["visit_date"]["valid_date_count"] == 2
+
+
+def test_analyze_temporal_freshness_skips_column_with_no_valid_dates():
+    rows = [{"visit_date": "not-a-date"}, {"visit_date": ""}]
+    assert analyze_temporal_freshness(rows, ["visit_date"]) == {}
+
+
+def test_find_future_date_evidence_flags_dates_after_today():
+    today = datetime.now(UTC).date()
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    rows = [{"visit_date": yesterday}, {"visit_date": tomorrow}]
+    assert find_future_date_evidence(rows, "visit_date") == [(1, tomorrow)]
+
+
+def test_detect_temporal_gaps_flags_gap_at_least_double_the_median():
+    today = datetime.now(UTC).date()
+    dates = sorted(today - timedelta(days=d) for d in [180, 150, 120, 30, 0])
+    rows = [{"visit_date": d.isoformat()} for d in dates]
+    result = detect_temporal_gaps(rows, "visit_date")
+    assert result is not None
+    assert result["median_gap_days"] == 30
+    assert len(result["gaps"]) == 1
+    assert result["gaps"][0]["gap_days"] == 90
+
+
+def test_detect_temporal_gaps_no_finding_for_regular_intervals():
+    today = datetime.now(UTC).date()
+    dates = sorted(today - timedelta(days=d) for d in [0, 30, 60, 90, 120])
+    rows = [{"visit_date": d.isoformat()} for d in dates]
+    assert detect_temporal_gaps(rows, "visit_date") is None
+
+
+def test_detect_temporal_gaps_none_with_too_few_distinct_dates():
+    rows = [{"visit_date": "2024-01-01"}, {"visit_date": "2024-06-01"}]
+    assert detect_temporal_gaps(rows, "visit_date") is None

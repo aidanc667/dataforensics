@@ -119,6 +119,8 @@ def build_investigation_findings(
     numeric_representation_findings: dict[str, dict] | None = None,
     age_year_findings: dict[str, dict] | None = None,
     unit_inconsistency_findings: dict[str, dict] | None = None,
+    future_date_findings: dict[str, list] | None = None,
+    temporal_gap_findings: dict[str, dict] | None = None,
     column_order_findings: dict[tuple[str, str], list] | None = None,
 ) -> list[dict]:
     """One canonical list of findings -- tier (high/review/info), a
@@ -333,6 +335,33 @@ def build_investigation_findings(
             "confidence": "Low",
             "resolved": 0,
             "total": 1,
+        })
+
+    for col, items in (future_date_findings or {}).items():
+        evidence = [f"row {i + 1:,} → {col} = {_mask(col, v)}" for i, v in items]
+        findings.append({
+            "tier": "high",
+            "title": f"{col}: {len(items)} value(s) dated after today",
+            "evidence": evidence[:10],
+            "more": max(0, len(items) - 10),
+            "detection": "This column has a date value later than today's date.",
+            "suggested_action": "Review manually — confirm whether a future date is expected for this column.",
+            "confidence": "Medium",
+            "resolved": 0,
+            "total": len(items),
+        })
+
+    for col, g in (temporal_gap_findings or {}).items():
+        findings.append({
+            "tier": "review",
+            "title": f"{col}: {len(g['gaps'])} coverage gap(s) well beyond this column's typical spacing",
+            "evidence": [f"{gap['after']} → {gap['before']} ({gap['gap_days']:,} day(s))" for gap in g["gaps"][:10]],
+            "more": max(0, len(g["gaps"]) - 10),
+            "detection": f"The median gap between consecutive distinct dates in this column is {g['median_gap_days']:,.0f} day(s); these gaps are at least twice that.",
+            "suggested_action": "Review manually — confirm whether this gap is expected.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": len(g["gaps"]),
         })
 
     for col, finding in clinical_range_findings.items():

@@ -465,20 +465,35 @@ def compute_dataset_fingerprint(dictionary: dict, row_count: int) -> dict:
     }
 
 
+_DISTRIBUTION_DRIFT_MIN_RELATIVE_CHANGE = 0.15
+
+
 def compare_fingerprints(previous: dict, current: dict, prev_dictionary: dict, curr_dictionary: dict) -> dict:
     """Structured diff between two fingerprints of (presumably) the same
     dataset at different points in time: columns added/removed, row-count
-    delta, and per-column missingness/cardinality drift for columns present
-    in both.
+    delta, per-column schema/missingness/cardinality drift for columns
+    present in both, a separate value-DISTRIBUTION drift list (numeric
+    median shifts, categorical value-set changes), and a "possible rename"
+    heuristic for a removed+added column pair with matching stats.
+
+    Every finding here is reported as a change requiring investigation,
+    never automatically as an error -- a dataset legitimately grows,
+    shrinks, and shifts over time; this only says what changed, not
+    whether that's good or bad.
     """
     prev_cols = set(previous.get("columns", []))
     curr_cols = set(current.get("columns", []))
+    columns_added = sorted(curr_cols - prev_cols)
+    columns_removed = sorted(prev_cols - curr_cols)
 
     changed_columns = []
+    distribution_drift = []
     for col in sorted(prev_cols & curr_cols):
         prev_field = prev_dictionary.get(col, {})
         curr_field = curr_dictionary.get(col, {})
         deltas = {}
+        if prev_field.get("dtype") != curr_field.get("dtype"):
+            deltas["dtype"] = {"before": prev_field.get("dtype"), "after": curr_field.get("dtype")}
         if prev_field.get("non_null_pct") != curr_field.get("non_null_pct"):
             deltas["non_null_pct"] = {"before": prev_field.get("non_null_pct"), "after": curr_field.get("non_null_pct")}
         if prev_field.get("unique_count") != curr_field.get("unique_count"):
@@ -488,12 +503,53 @@ def compare_fingerprints(previous: dict, current: dict, prev_dictionary: dict, c
         if deltas:
             changed_columns.append({"column": col, "changes": deltas})
 
+        prev_median = (prev_field.get("outliers") or {}).get("median")
+        curr_median = (curr_field.get("outliers") or {}).get("median")
+        if prev_median is not None and curr_median is not None and prev_median != 0:
+            relative_change = abs(curr_median - prev_median) / abs(prev_median)
+            if relative_change >= _DISTRIBUTION_DRIFT_MIN_RELATIVE_CHANGE:
+                distribution_drift.append({
+                    "column": col,
+                    "kind": "numeric_median",
+                    "before": prev_median,
+                    "after": curr_median,
+                    "relative_change": relative_change,
+                })
+
+        prev_levels = prev_field.get("levels")
+        curr_levels = curr_field.get("levels")
+        if isinstance(prev_levels, list) and isinstance(curr_levels, list):
+            levels_added = sorted(set(curr_levels) - set(prev_levels))
+            levels_removed = sorted(set(prev_levels) - set(curr_levels))
+            if levels_added or levels_removed:
+                distribution_drift.append({
+                    "column": col,
+                    "kind": "category_values",
+                    "values_added": levels_added,
+                    "values_removed": levels_removed,
+                })
+
+    possible_renames = []
+    for removed_col in columns_removed:
+        removed_field = prev_dictionary.get(removed_col, {})
+        for added_col in columns_added:
+            added_field = curr_dictionary.get(added_col, {})
+            if (
+                removed_field.get("dtype") == added_field.get("dtype")
+                and removed_field.get("category") == added_field.get("category")
+                and removed_field.get("unique_count") == added_field.get("unique_count")
+                and removed_field.get("non_null_pct") == added_field.get("non_null_pct")
+            ):
+                possible_renames.append({"removed": removed_col, "added": added_col})
+
     return {
         "schema_changed": previous.get("schema_fingerprint") != current.get("schema_fingerprint"),
-        "columns_added": sorted(curr_cols - prev_cols),
-        "columns_removed": sorted(prev_cols - curr_cols),
+        "columns_added": columns_added,
+        "columns_removed": columns_removed,
         "row_count_delta": current.get("row_count", 0) - previous.get("row_count", 0),
         "changed_columns": changed_columns,
+        "distribution_drift": distribution_drift,
+        "possible_renames": possible_renames,
     }
 
 
@@ -1113,6 +1169,90 @@ def find_unit_inconsistency_evidence(
     return evidence
 
 
+def analyze_temporal_freshness(rows: list[dict], date_columns: list[str]) -> dict[str, dict]:
+    """For every column in `date_columns`, the earliest and latest ISO
+    (YYYY-MM-DD) date present, how many days ago the latest one was
+    (relative to now), and how many valid ISO dates were found. Omits a
+    column with no valid ISO date value at all.
+
+    Only ISO-shaped values count -- an ambiguous or otherwise non-ISO date
+    string is skipped rather than guessed at, the same rule every other
+    date comparison in this codebase follows.
+    """
+    results: dict[str, dict] = {}
+    for column in date_columns:
+        valid = [str(row.get(column, "")).strip() for row in rows if is_iso_date(str(row.get(column, "")).strip())]
+        if not valid:
+            continue
+        latest = max(valid)
+        # .date() immediately discards the naive datetime's (irrelevant,
+        # always-midnight) time component -- an ISO calendar date has no
+        # timezone of its own, so there's nothing to make "aware" here.
+        latest_date = datetime.strptime(latest, "%Y-%m-%d").date()  # noqa: DTZ007
+        results[column] = {
+            "earliest": min(valid),
+            "latest": latest,
+            "days_since_latest": (datetime.now(UTC).date() - latest_date).days,
+            "valid_date_count": len(valid),
+        }
+    return results
+
+
+def find_future_date_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for ISO-date values in `column`
+    that fall after today -- a common real bug (a mistyped year, a date
+    entered in the wrong century)."""
+    today = datetime.now(UTC).date().isoformat()
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, "")).strip()
+        if raw == "":
+            continue
+        if is_iso_date(raw) and raw > today:
+            evidence.append((i, raw))
+    return evidence
+
+
+_TEMPORAL_GAP_MIN_DATES = 5
+_TEMPORAL_GAP_MULTIPLE_THRESHOLD = 2.0
+
+
+def detect_temporal_gaps(rows: list[dict], column: str) -> dict | None:
+    """For a date-shaped column, find any gap between consecutive DISTINCT
+    observation dates that's at least `_TEMPORAL_GAP_MULTIPLE_THRESHOLD`
+    times this column's OWN median gap -- adapting to whatever cadence
+    the data actually has (daily, weekly, monthly, ...) rather than
+    assuming a specific calendar frequency nobody declared.
+
+    Only evaluated with at least `_TEMPORAL_GAP_MIN_DATES` distinct dates
+    -- a median computed over fewer than that is too noisy to trust.
+    Returns None if there's too little data, every value is the same
+    date (a zero median gap has no meaningful "how much bigger" to
+    measure against), or no gap crosses the threshold.
+    """
+    distinct_dates = sorted({str(row.get(column, "")).strip() for row in rows if is_iso_date(str(row.get(column, "")).strip())})
+    if len(distinct_dates) < _TEMPORAL_GAP_MIN_DATES:
+        return None
+    # Same rationale as analyze_temporal_freshness above: .date() discards
+    # the naive datetime's time component immediately, and a calendar date
+    # has no timezone of its own to be "aware" of.
+    parsed = [datetime.strptime(d, "%Y-%m-%d").date() for d in distinct_dates]  # noqa: DTZ007
+    gaps = [(parsed[i] - parsed[i - 1]).days for i in range(1, len(parsed))]
+    gaps_sorted = sorted(gaps)
+    n = len(gaps_sorted)
+    median_gap = gaps_sorted[n // 2] if n % 2 else (gaps_sorted[n // 2 - 1] + gaps_sorted[n // 2]) / 2
+    if median_gap <= 0:
+        return None
+    flagged = [
+        {"after": parsed[i - 1].isoformat(), "before": parsed[i].isoformat(), "gap_days": gaps[i - 1]}
+        for i in range(1, len(parsed))
+        if gaps[i - 1] >= median_gap * _TEMPORAL_GAP_MULTIPLE_THRESHOLD
+    ]
+    if not flagged:
+        return None
+    return {"median_gap_days": median_gap, "gaps": flagged}
+
+
 _ORDERED_KEYWORD_PAIRS = [
     ("start", "end"),
     ("begin", "end"),
@@ -1252,6 +1392,73 @@ def compute_key_coverage(parent_values: set, child_values: set) -> dict:
         "parent_count": len(parent_values),
         "covered_count": covered_count,
         "coverage_fraction": covered_count / len(parent_values),
+    }
+
+
+def reconcile_shared_records(
+    file_a_rows: list[dict],
+    file_b_rows: list[dict],
+    key_a: str,
+    key_b: str,
+    compare_columns: list[str],
+) -> dict:
+    """Field-by-field value reconciliation between two files sharing a
+    key -- "does file A agree with file B?" rather than the structural
+    "does every key exist?" question `check_referential_integrity`
+    answers. This is the closest DataForensics comes to an accuracy
+    check: it can't independently verify which source (if either) holds
+    the true value, only where the two DISAGREE.
+
+    Only defensible for a one-to-one key relationship -- the caller
+    should confirm that shape via `analyze_key_cardinality` first. Each
+    key value is looked up once per file (first occurrence wins); a
+    one-to-many key would silently compare against an arbitrary row.
+
+    Returns records_compared (keys present in both files), records_matched
+    (every compared column identical), records_with_discrepancy (at least
+    one differed), record_discrepancy_rate, and a per-column breakdown
+    with up to 10 example discrepancies each.
+    """
+    index_a: dict[str, dict] = {}
+    for row in file_a_rows:
+        k = str(row.get(key_a, "")).strip()
+        if k and k not in index_a:
+            index_a[k] = row
+    index_b: dict[str, dict] = {}
+    for row in file_b_rows:
+        k = str(row.get(key_b, "")).strip()
+        if k and k not in index_b:
+            index_b[k] = row
+
+    shared_keys = sorted(set(index_a) & set(index_b))
+    per_column: dict[str, dict] = {col: {"match": 0, "discrepancy": 0, "examples": []} for col in compare_columns}
+    records_matched = 0
+    records_with_discrepancy = 0
+    for k in shared_keys:
+        row_a, row_b = index_a[k], index_b[k]
+        any_diff = False
+        for col in compare_columns:
+            val_a = str(row_a.get(col, "")).strip()
+            val_b = str(row_b.get(col, "")).strip()
+            if val_a == val_b:
+                per_column[col]["match"] += 1
+            else:
+                any_diff = True
+                per_column[col]["discrepancy"] += 1
+                if len(per_column[col]["examples"]) < 10:
+                    per_column[col]["examples"].append({"key": k, "value_a": val_a, "value_b": val_b})
+        if any_diff:
+            records_with_discrepancy += 1
+        else:
+            records_matched += 1
+
+    return {
+        "records_compared": len(shared_keys),
+        "records_matched": records_matched,
+        "records_with_discrepancy": records_with_discrepancy,
+        "record_discrepancy_rate": (records_with_discrepancy / len(shared_keys)) if shared_keys else 0.0,
+        "columns_compared": compare_columns,
+        "per_column": per_column,
     }
 
 

@@ -324,6 +324,39 @@ class TestBuildInvestigationFindings:
         assert "weight: possible kg/lb unit mix" in f["title"]
         assert "70.0" in f["evidence"][0] and "154.3" in f["evidence"][0]
 
+    def test_future_date_finding_is_high_tier(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(future_date_findings={"visit_date": [(2, "2099-01-01")]})
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "high"
+        assert "visit_date: 1 value(s) dated after today" in f["title"]
+        assert "row 3" in f["evidence"][0] and "2099-01-01" in f["evidence"][0]
+
+    def test_future_date_finding_on_pii_like_column_masks_evidence(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(future_date_findings={"dob": [(0, "2099-01-01")]})
+        )
+        assert PII_EVIDENCE_MASK in findings[0]["evidence"][0]
+        assert "2099-01-01" not in findings[0]["evidence"][0]
+
+    def test_temporal_gap_finding_is_review_tier(self):
+        gap_findings = {
+            "visit_date": {
+                "median_gap_days": 30,
+                "gaps": [{"after": "2024-01-01", "before": "2024-04-01", "gap_days": 90}],
+            }
+        }
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(temporal_gap_findings=gap_findings)
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "review"
+        assert "visit_date: 1 coverage gap(s)" in f["title"]
+        assert "2024-01-01" in f["evidence"][0] and "2024-04-01" in f["evidence"][0]
+
     def test_column_order_finding_on_pii_like_column_masks_evidence(self):
         order_findings = {
             ("dob_start", "dob_end"): [(0, "1980-02-15", "1980-02-01")],
