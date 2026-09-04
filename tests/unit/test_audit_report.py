@@ -301,6 +301,29 @@ class TestBuildInvestigationFindings:
         assert f["tier"] == "review"
         assert "age: 18 of 20 value(s)" in f["title"]
 
+    def test_unit_inconsistency_finding_reflects_the_real_counts(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(
+                unit_inconsistency_findings={
+                    "weight": {
+                        "low_count": 5,
+                        "high_count": 5,
+                        "low_median": 70.0,
+                        "high_median": 154.32,
+                        "observed_ratio": 2.2046,
+                        "expected_factor": 2.20462,
+                        "unit_a": "kg",
+                        "unit_b": "lb",
+                    }
+                }
+            )
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "review"
+        assert "weight: possible kg/lb unit mix" in f["title"]
+        assert "70.0" in f["evidence"][0] and "154.3" in f["evidence"][0]
+
     def test_column_order_finding_on_pii_like_column_masks_evidence(self):
         order_findings = {
             ("dob_start", "dob_end"): [(0, "1980-02-15", "1980-02-01")],

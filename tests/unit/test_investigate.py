@@ -17,6 +17,7 @@ from dataforensics.investigate import (
     detect_numeric_representation_inconsistency,
     detect_similar_categories,
     detect_survey_weight_columns,
+    detect_unit_inconsistency,
     detect_value_shape_outliers,
     detect_whitespace_anomalies,
     find_ambiguous_date_evidence,
@@ -32,6 +33,7 @@ from dataforensics.investigate import (
     find_numeric_representation_evidence,
     find_ordered_column_pairs,
     find_sentinel_evidence,
+    find_unit_inconsistency_evidence,
     find_value_shape_outlier_evidence,
     find_whitespace_anomaly_evidence,
     find_year_like_value_evidence,
@@ -745,3 +747,81 @@ def test_find_column_order_violation_evidence_skips_ambiguous_or_blank_rows():
         {"start_date": "not-a-date", "end_date": "also-not-a-date"},
     ]
     assert find_column_order_violation_evidence(rows, "start_date", "end_date") == []
+
+
+def test_detect_unit_inconsistency_flags_kg_lb_mix():
+    kg_values = [60, 65, 70, 75, 80]
+    lb_values = [v * 2.20462 for v in kg_values]
+    rows = [{"weight": str(v)} for v in kg_values + lb_values]
+    role_by_column = {"weight": {"role": "WEIGHT"}}
+    result = detect_unit_inconsistency(rows, role_by_column)
+    assert "weight" in result
+    f = result["weight"]
+    assert f["unit_a"] == "kg" and f["unit_b"] == "lb"
+    assert abs(f["observed_ratio"] - 2.20462) < 0.01
+    evidence = find_unit_inconsistency_evidence(rows, "weight", f["boundary"], f["minority_side"])
+    assert len(evidence) == 5
+
+
+def test_detect_unit_inconsistency_flags_cm_in_mix():
+    cm_values = [150, 160, 170, 180, 190]
+    in_values = [v / 2.54 for v in cm_values]
+    rows = [{"height": str(v)} for v in cm_values + in_values]
+    role_by_column = {"height": {"role": "HEIGHT"}}
+    result = detect_unit_inconsistency(rows, role_by_column)
+    assert "height" in result
+    assert result["height"]["unit_a"] == "cm" and result["height"]["unit_b"] == "in"
+
+
+def test_detect_unit_inconsistency_flags_dollars_vs_thousands():
+    dollars_values = [45000, 50000, 55000, 60000, 65000]
+    thousands_values = [v / 1000 for v in dollars_values]
+    rows = [{"income": str(v)} for v in dollars_values + thousands_values]
+    role_by_column = {"income": {"role": "INCOME"}}
+    result = detect_unit_inconsistency(rows, role_by_column)
+    assert "income" in result
+    assert result["income"]["unit_a"] == "dollars"
+
+
+def test_detect_unit_inconsistency_does_not_flag_genuine_bimodal_subpopulation():
+    # Child and adult weights are both genuinely "weight" -- a real
+    # bimodal split, but the cluster ratio (~2.9) doesn't match any known
+    # unit-conversion factor, so this must NOT be flagged as a units
+    # problem. This is the core false-positive guard for this check.
+    child_weights = [20, 22, 24, 26, 28]
+    adult_weights = [60, 65, 70, 75, 80]
+    rows = [{"weight": str(v)} for v in child_weights + adult_weights]
+    role_by_column = {"weight": {"role": "WEIGHT"}}
+    assert detect_unit_inconsistency(rows, role_by_column) == {}
+
+
+def test_detect_unit_inconsistency_no_finding_on_consistent_column():
+    rows = [{"weight": str(v)} for v in [65, 68, 70, 72, 75, 78, 80, 82]]
+    role_by_column = {"weight": {"role": "WEIGHT"}}
+    assert detect_unit_inconsistency(rows, role_by_column) == {}
+
+
+def test_detect_unit_inconsistency_ignores_non_matching_roles():
+    rows = [{"age": str(v)} for v in [20, 22, 24, 60, 65, 70]]
+    role_by_column = {"age": {"role": "AGE"}}
+    assert detect_unit_inconsistency(rows, role_by_column) == {}
+
+
+def test_detect_unit_inconsistency_ignores_columns_with_too_few_values():
+    kg_values = [60, 65]
+    lb_values = [v * 2.20462 for v in kg_values]
+    rows = [{"weight": str(v)} for v in kg_values + lb_values]
+    role_by_column = {"weight": {"role": "WEIGHT"}}
+    assert detect_unit_inconsistency(rows, role_by_column) == {}
+
+
+def test_find_unit_inconsistency_evidence_returns_only_minority_cluster():
+    kg_values = [60, 62, 64, 66, 68, 70]  # majority group (6)
+    lb_values = [v * 2.20462 for v in [60, 65, 70]]  # minority group (3)
+    rows = [{"weight": str(v)} for v in kg_values + lb_values]
+    role_by_column = {"weight": {"role": "WEIGHT"}}
+    result = detect_unit_inconsistency(rows, role_by_column)
+    f = result["weight"]
+    assert f["minority_side"] == "high"
+    evidence = find_unit_inconsistency_evidence(rows, "weight", f["boundary"], f["minority_side"])
+    assert len(evidence) == 3

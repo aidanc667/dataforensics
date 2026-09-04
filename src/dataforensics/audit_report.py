@@ -118,6 +118,7 @@ def build_investigation_findings(
     encoding_corruption_counts: dict[str, int] | None = None,
     numeric_representation_findings: dict[str, dict] | None = None,
     age_year_findings: dict[str, dict] | None = None,
+    unit_inconsistency_findings: dict[str, dict] | None = None,
     column_order_findings: dict[tuple[str, str], list] | None = None,
 ) -> list[dict]:
     """One canonical list of findings -- tier (high/review/info), a
@@ -310,6 +311,25 @@ def build_investigation_findings(
             "more": 0,
             "detection": "This column's name matches the 'age' convention, but most values are 4-digit numbers in a plausible birth-year range.",
             "suggested_action": "Review manually — confirm what this column actually represents before analyzing it as age.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": 1,
+        })
+
+    for col, f in (unit_inconsistency_findings or {}).items():
+        findings.append({
+            "tier": "review",
+            "title": f"{col}: possible {f['unit_a']}/{f['unit_b']} unit mix",
+            "evidence": [
+                (
+                    f"{f['low_count']} value(s) around {f['low_median']:,.1f}, {f['high_count']} value(s) around "
+                    f"{f['high_median']:,.1f} — ratio {f['observed_ratio']:.2f}, close to the {f['unit_a']}-to-{f['unit_b']} "
+                    f"conversion factor ({f['expected_factor']:.2f})"
+                )
+            ],
+            "more": 0,
+            "detection": f"This column's values split into two clusters whose ratio matches the real {f['unit_a']}-to-{f['unit_b']} conversion factor, not just any two-humped distribution.",
+            "suggested_action": "Review manually — confirm which unit each row was actually recorded in.",
             "confidence": "Low",
             "resolved": 0,
             "total": 1,

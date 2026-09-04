@@ -1000,6 +1000,119 @@ def find_year_like_value_evidence(rows: list[dict], column: str) -> list[tuple[i
     return evidence
 
 
+# (unit_a, unit_b, unit_b_per_unit_a) -- only for roles where a real,
+# well-known conversion factor exists. Deliberately NOT a generic
+# "any two-humped distribution" check: a genuinely bimodal column (e.g.
+# adult vs. child weight, or two demographic subgroups) produces two
+# clusters too, but there's no reason its ratio would coincidentally land
+# within a few percent of a specific physical-unit conversion constant.
+# Requiring that specific match is what keeps this from firing on every
+# naturally two-peaked distribution.
+_UNIT_CONVERSION_FACTORS: dict[str, list[tuple[str, str, float]]] = {
+    "WEIGHT": [("kg", "lb", 2.20462)],
+    "HEIGHT": [("cm", "in", 2.54), ("m", "ft", 3.28084)],
+    "INCOME": [("dollars", "thousands of dollars", 1000.0)],
+}
+_UNIT_MIN_CLUSTER_SIZE = 3
+_UNIT_RATIO_TOLERANCE = 0.05
+
+
+def _find_bimodal_split(values: list[float]) -> tuple[list[float], list[float]] | None:
+    """Split sorted positive `values` into a low and high cluster at the
+    single largest multiplicative gap between consecutive values, provided
+    both resulting groups meet `_UNIT_MIN_CLUSTER_SIZE`. Returns None if
+    there are too few values for two such groups.
+    """
+    sorted_vals = sorted(v for v in values if v > 0)
+    if len(sorted_vals) < 2 * _UNIT_MIN_CLUSTER_SIZE:
+        return None
+    best_ratio = 1.0
+    best_index = None
+    for i in range(_UNIT_MIN_CLUSTER_SIZE, len(sorted_vals) - _UNIT_MIN_CLUSTER_SIZE + 1):
+        ratio = sorted_vals[i] / sorted_vals[i - 1]
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_index = i
+    if best_index is None:
+        return None
+    return sorted_vals[:best_index], sorted_vals[best_index:]
+
+
+def detect_unit_inconsistency(rows: list[dict], role_by_column: dict) -> dict[str, dict]:
+    """For a column whose inferred semantic role has a known unit-pair
+    (WEIGHT: kg/lb, HEIGHT: cm/in or m/ft, INCOME: dollars/thousands),
+    split its numeric values into two clusters at the largest gap and
+    check whether the clusters' median ratio is within
+    `_UNIT_RATIO_TOLERANCE` of that unit pair's real conversion factor --
+    e.g. a "weight" column with some rows in kg (median ~70) and some in
+    lb (median ~154) has a cluster ratio of ~2.2, matching kg-to-lb almost
+    exactly.
+
+    Returns {column: {low_count, high_count, low_median, high_median,
+    observed_ratio, expected_factor, unit_a, unit_b, boundary,
+    minority_side}} for columns where a match was found. `boundary` and
+    `minority_side` are for `find_unit_inconsistency_evidence` to classify
+    individual rows without repeating the clustering.
+    """
+    results: dict[str, dict] = {}
+    for column, role in role_by_column.items():
+        if not role:
+            continue
+        candidates = _UNIT_CONVERSION_FACTORS.get(role.get("role", ""))
+        if not candidates:
+            continue
+        values = []
+        for row in rows:
+            raw = str(row.get(column, "")).strip()
+            if raw == "":
+                continue
+            parsed = parse_finite_float(raw)
+            if parsed is not None and parsed > 0:
+                values.append(parsed)
+        split = _find_bimodal_split(values)
+        if split is None:
+            continue
+        low, high = split
+        observed_ratio = _median(high) / _median(low)
+        for unit_a, unit_b, factor in candidates:
+            if abs(observed_ratio - factor) / factor <= _UNIT_RATIO_TOLERANCE:
+                results[column] = {
+                    "low_count": len(low),
+                    "high_count": len(high),
+                    "low_median": _median(low),
+                    "high_median": _median(high),
+                    "observed_ratio": observed_ratio,
+                    "expected_factor": factor,
+                    "unit_a": unit_a,
+                    "unit_b": unit_b,
+                    "boundary": low[-1],
+                    "minority_side": "low" if len(low) <= len(high) else "high",
+                }
+                break
+    return results
+
+
+def find_unit_inconsistency_evidence(
+    rows: list[dict], column: str, boundary: float, minority_side: str
+) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for the minority cluster
+    `detect_unit_inconsistency` found in `column` (the smaller of the two
+    unit-conversion-matched clusters, on whichever side of `boundary`
+    `minority_side` names)."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, "")).strip()
+        if raw == "":
+            continue
+        parsed = parse_finite_float(raw)
+        if parsed is None or parsed <= 0:
+            continue
+        is_low = parsed <= boundary
+        if (minority_side == "low") == is_low:
+            evidence.append((i, raw))
+    return evidence
+
+
 _ORDERED_KEYWORD_PAIRS = [
     ("start", "end"),
     ("begin", "end"),

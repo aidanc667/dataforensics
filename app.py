@@ -59,6 +59,7 @@ from dataforensics.investigate import (
     detect_numeric_representation_inconsistency,
     detect_similar_categories,
     detect_survey_weight_columns,
+    detect_unit_inconsistency,
     detect_value_shape_outliers,
     detect_whitespace_anomalies,
     discover_shared_key_columns,
@@ -73,6 +74,7 @@ from dataforensics.investigate import (
     find_invisible_character_evidence,
     find_numeric_representation_evidence,
     find_sentinel_evidence,
+    find_unit_inconsistency_evidence,
     find_value_shape_outlier_evidence,
     find_whitespace_anomaly_evidence,
     find_year_like_value_evidence,
@@ -705,6 +707,14 @@ with tab_analyze:
     # calendar years rather than ages (e.g. full of 1978, 1990, 2001).
     age_year_findings = detect_age_columns_that_look_like_years(rows, role_by_column)
 
+    # Always on -- flags a WEIGHT/HEIGHT/INCOME-role column whose values
+    # split into two clusters at a ratio matching a real unit-conversion
+    # factor (kg/lb, cm/in, m/ft, dollars/thousands). Requires the SPECIFIC
+    # conversion-factor match, not just "this distribution is bimodal" --
+    # a genuinely bimodal column (e.g. adult vs. child weight) has no
+    # reason to coincidentally land within 5% of one of those constants.
+    unit_inconsistency_findings = detect_unit_inconsistency(rows, role_by_column)
+
     # Always on -- general "does column A ever exceed column B where their
     # names suggest A should never exceed B" check (start/end, min/max,
     # admission/discharge, ...). Complements (does not replace) the
@@ -936,6 +946,17 @@ with tab_analyze:
                 st.markdown(f"- **{col}**: {f['year_like_count']} of {f['total_count']} value(s) look like a year (e.g. 1978, 1990), not an age")
             st.caption("Most of this column's values are 4-digit numbers in a plausible birth-year range — possibly a birth-year column labeled as age. Full evidence in **Review & Approve** below.")
 
+    if unit_inconsistency_findings:
+        any_attention_items = True
+        with st.expander(f"🟠 {len(unit_inconsistency_findings)} column(s) that may mix two measurement units"):
+            for col, f in unit_inconsistency_findings.items():
+                st.markdown(
+                    f"- **{col}**: {f['low_count']} value(s) around {f['low_median']:,.1f} and "
+                    f"{f['high_count']} value(s) around {f['high_median']:,.1f} — a ratio of "
+                    f"{f['observed_ratio']:.2f}, close to the {f['unit_a']}-to-{f['unit_b']} conversion factor ({f['expected_factor']:.2f})"
+                )
+            st.caption("Two clusters of values whose ratio matches a real unit-conversion factor — possibly some rows recorded in a different unit. Full evidence in **Review & Approve** below.")
+
     if distribution_columns:
         any_attention_items = True
         n = len(distribution_columns)
@@ -1045,6 +1066,7 @@ with tab_analyze:
         + len(encoding_corruption_counts)
         + len(numeric_representation_findings)
         + len(age_year_findings)
+        + len(unit_inconsistency_findings)
         + total_domain_findings
     )
     st.markdown("**Overall**")
@@ -1416,6 +1438,7 @@ with tab_analyze:
     any_format_integrity_findings = bool(
         shape_outlier_findings or whitespace_anomaly_counts or invisible_char_counts
         or encoding_corruption_counts or numeric_representation_findings or age_year_findings
+        or unit_inconsistency_findings
     )
     if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings or any_format_integrity_findings:
         st.markdown('<div class="dataforensics-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
@@ -1554,6 +1577,27 @@ with tab_analyze:
                 known="Most of this column's values fall in a plausible calendar-year range rather than a plausible age range.",
                 not_known="Whether this column is actually a birth year mislabeled as age, or a genuine age column with an unrelated data issue.",
                 recommended_action="Review manually — confirm what this column actually represents before analyzing it as age.",
+            )
+        for col, f in unit_inconsistency_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: possible {_esc(f["unit_a"])}/{_esc(f["unit_b"])} unit mix</div>'
+                f'<div class="dataforensics-card-evidence">{f["low_count"]} value(s) around {f["low_median"]:,.1f}, {f["high_count"]} value(s) around {f["high_median"]:,.1f} — ratio {f["observed_ratio"]:.2f}</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=(
+                    f"{_esc(col)}'s values split into two clusters (around {f['low_median']:,.1f} and "
+                    f"{f['high_median']:,.1f}) whose ratio ({f['observed_ratio']:.3f}) is within 5% of the real "
+                    f"{_esc(f['unit_a'])}-to-{_esc(f['unit_b'])} conversion factor ({f['expected_factor']:.3f}) — "
+                    "not just any two-humped distribution, but one matching a specific known unit conversion."
+                ),
+                lines=_evidence_lines(
+                    col, find_unit_inconsistency_evidence(rows, col, f["boundary"], f["minority_side"])
+                ),
+                known=f"This value sits in the smaller of two clusters whose ratio matches the {_esc(f['unit_a'])}-to-{_esc(f['unit_b'])} conversion factor almost exactly.",
+                not_known=f"Whether this value is genuinely in {_esc(f['unit_b']) if f['minority_side'] == 'high' else _esc(f['unit_a'])}, or the two clusters reflect a real subpopulation difference that happens to land near this ratio by coincidence.",
+                recommended_action="Review manually — confirm which unit each row was actually recorded in before analyzing this column.",
             )
         if dup_rows:
             st.markdown(
@@ -1980,6 +2024,7 @@ with tab_analyze:
             encoding_corruption_counts=encoding_corruption_counts,
             numeric_representation_findings=numeric_representation_findings,
             age_year_findings=age_year_findings,
+            unit_inconsistency_findings=unit_inconsistency_findings,
             column_order_findings=column_order_findings,
         )
         audit_report_html = build_audit_report_html(
