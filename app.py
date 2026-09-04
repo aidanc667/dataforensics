@@ -54,6 +54,7 @@ from dataforensics.investigate import (
     detect_missingness_concentration,
     detect_similar_categories,
     detect_survey_weight_columns,
+    detect_value_shape_outliers,
     discover_shared_key_columns,
     find_ambiguous_date_evidence,
     find_birth_date_after_other_date_evidence,
@@ -63,6 +64,7 @@ from dataforensics.investigate import (
     find_invalid_fips_evidence,
     find_invalid_zip_evidence,
     find_sentinel_evidence,
+    find_value_shape_outlier_evidence,
     find_zip_like_columns,
     infer_semantic_role,
     match_clinical_range_rule,
@@ -631,6 +633,15 @@ with tab_analyze:
     if "survey_weight_columns" in profile_checks:
         survey_weight_columns = detect_survey_weight_columns(columns)
 
+    # Always on, not tied to any dataset profile -- a general "does this
+    # value's format match the rest of the column" check (phone numbers,
+    # emails, names, or any other free_text column with a consistent
+    # convention). Self-gating: it only fires when a dominant shape covers
+    # >=80% of a column's values, so genuine free-text (notes, comments)
+    # never matches and is silently skipped -- no cost on a column this
+    # doesn't apply to.
+    shape_outlier_findings = detect_value_shape_outliers(rows, columns, dictionary)
+
     # --- Cross-column reasoning: relationships BETWEEN columns, not just
     # one column in isolation. Always on (not gated behind a dataset
     # profile) -- both checks only fire when the relevant column roles
@@ -799,6 +810,15 @@ with tab_analyze:
                 st.markdown(f"- {birth_col} is after {other_col} in {len(evidence)} row(s)")
             st.caption("A birth date cannot come after another recorded date for the same person. Full evidence in **Review & Approve** below.")
 
+    if shape_outlier_findings:
+        any_attention_items = True
+        total_shape_outlier_rows = sum(f["outlier_count"] for f in shape_outlier_findings.values())
+        n = len(shape_outlier_findings)
+        with st.expander(f"🟠 {total_shape_outlier_rows} value(s) across {n} column{'s' if n != 1 else ''} that don't match the column's own format"):
+            for col, f in shape_outlier_findings.items():
+                st.markdown(f"- **{col}**: {f['outlier_count']} of {f['total_count']} value(s) don't match the dominant format")
+            st.caption("Most values in each column share one consistent shape (e.g. every phone number formatted the same way) — these don't. Full evidence in **Review & Approve** below.")
+
     if distribution_columns:
         any_attention_items = True
         n = len(distribution_columns)
@@ -901,6 +921,7 @@ with tab_analyze:
         + sum(len(v) for v in category_clusters.values())
         + len(distribution_columns)
         + len(missingness_columns)
+        + len(shape_outlier_findings)
         + total_domain_findings
     )
     st.markdown("**Overall**")
@@ -1269,7 +1290,7 @@ with tab_analyze:
         or invalid_zip_findings or survey_weight_columns
     )
     any_cross_column_findings = bool(birth_date_findings or duplicate_entities)
-    if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings:
+    if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings or shape_outlier_findings:
         st.markdown('<div class="dataforensics-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
         st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
         for c, f in outlier_cols.items():
@@ -1304,6 +1325,25 @@ with tab_analyze:
                 known="A disproportionate share of this column's non-null values sit exactly at its observed maximum.",
                 not_known="Whether this ceiling reflects a genuine natural maximum, or a survey/export cap where the true value could actually be higher.",
                 recommended_action="Review manually. DataForensics never assumes or corrects a top-coding ceiling.",
+            )
+        for col, f in shape_outlier_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {f["outlier_count"]} of {f["total_count"]} value(s) don\'t match the column\'s dominant format</div>'
+                f'<div class="dataforensics-card-evidence">{f["dominant_count"]} of {f["total_count"]} value(s) ({f["dominant_count"] / f["total_count"]:.0%}) share one shape</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=(
+                    f"{f['dominant_count']} of {f['total_count']} non-null values in {_esc(col)} "
+                    f"({f['dominant_count'] / f['total_count']:.0%}) reduce to the same character-pattern "
+                    "shape (digits/letters/spacing/punctuation) — a dominant format, not a declared rule. "
+                    "Values reducing to a different shape are flagged."
+                ),
+                lines=_evidence_lines(col, find_value_shape_outlier_evidence(rows, col, f["dominant_shape"])),
+                known="This value's character pattern (digits, letters, spacing, punctuation) doesn't match the format most other values in this column share.",
+                not_known="Whether this is a genuine formatting error, a legitimately different but valid format (e.g. an international phone number), or the correct value for an edge case.",
+                recommended_action="Review manually — DataForensics never reformats or corrects a value automatically.",
             )
         if dup_rows:
             st.markdown(
@@ -1689,6 +1729,7 @@ with tab_analyze:
             mutations=mutations,
             missingness_concentration=missingness_concentration,
             missingness_co_occurrence=missingness_co_occurrence,
+            shape_outlier_findings=shape_outlier_findings,
         )
         audit_report_html = build_audit_report_html(
             file_name=st.session_state["dataforensics_data_name"],

@@ -12,6 +12,7 @@ from dataforensics.investigate import (
     detect_missingness_concentration,
     detect_similar_categories,
     detect_survey_weight_columns,
+    detect_value_shape_outliers,
     find_ambiguous_date_evidence,
     find_birth_date_after_other_date_evidence,
     find_category_value_evidence,
@@ -20,6 +21,7 @@ from dataforensics.investigate import (
     find_invalid_fips_evidence,
     find_invalid_zip_evidence,
     find_sentinel_evidence,
+    find_value_shape_outlier_evidence,
     find_zip_like_columns,
     infer_semantic_role,
     match_clinical_range_rule,
@@ -527,3 +529,72 @@ def test_detect_missingness_co_occurrence_no_pattern_for_independent_gaps():
             }
         )
     assert detect_missingness_co_occurrence(rows, ["income", "employment_status"]) == []
+
+
+def test_detect_value_shape_outliers_flags_minority_phone_format():
+    rows = [{"phone": v} for v in ["555-100-0001", "555-100-0002", "555-100-0003", "555-100-0004", "5551000005"]]
+    dictionary = {"phone": {"category": "free_text"}}
+    results = detect_value_shape_outliers(rows, ["phone"], dictionary)
+    assert results["phone"]["dominant_shape"] == "D-D-D"
+    assert results["phone"]["dominant_count"] == 4
+    assert results["phone"]["outlier_count"] == 1
+
+
+def test_detect_value_shape_outliers_flags_name_with_embedded_digits():
+    rows = [
+        {"name": "John Smith"},
+        {"name": "Jane Doe"},
+        {"name": "Mary Jones"},
+        {"name": "Bob123 Miller"},  # digits where a name shouldn't have any
+        {"name": "Alice Brown"},
+    ]
+    dictionary = {"name": {"category": "free_text"}}
+    results = detect_value_shape_outliers(rows, ["name"], dictionary)
+    assert results["name"]["dominant_shape"] == "LSL"
+    assert results["name"]["outlier_count"] == 1
+    evidence = find_value_shape_outlier_evidence(rows, "name", results["name"]["dominant_shape"])
+    assert evidence == [(3, "Bob123 Miller")]
+
+
+def test_detect_value_shape_outliers_skips_genuine_free_text_with_no_dominant_shape():
+    # Real notes -- every value has a different length/punctuation shape,
+    # so no single shape reaches the 80% bar. Nothing defensible to flag.
+    rows = [
+        {"notes": "Patient reported mild fatigue."},
+        {"notes": "No complaints at this visit"},
+        {"notes": "Follow-up in 3 months, labs pending."},
+        {"notes": "Referred to cardiology; see attached."},
+        {"notes": "N/A"},
+    ]
+    dictionary = {"notes": {"category": "free_text"}}
+    assert detect_value_shape_outliers(rows, ["notes"], dictionary) == {}
+
+
+def test_detect_value_shape_outliers_skips_columns_below_minimum_size():
+    rows = [{"phone": "555-100-0001"}, {"phone": "not-a-phone-number"}]
+    dictionary = {"phone": {"category": "free_text"}}
+    assert detect_value_shape_outliers(rows, ["phone"], dictionary) == {}
+
+
+def test_detect_value_shape_outliers_skips_non_free_text_categories():
+    # Same lopsided shapes as the phone test, but classified "categorical" --
+    # this check is deliberately restricted to "free_text" columns.
+    rows = [{"code": v} for v in ["A-1", "A-2", "A-3", "A-4", "99"]]
+    dictionary = {"code": {"category": "categorical"}}
+    assert detect_value_shape_outliers(rows, ["code"], dictionary) == {}
+
+
+def test_detect_value_shape_outliers_no_finding_when_fully_consistent():
+    rows = [{"phone": v} for v in ["555-100-0001", "555-100-0002", "555-100-0003", "555-100-0004", "555-100-0005"]]
+    dictionary = {"phone": {"category": "free_text"}}
+    assert detect_value_shape_outliers(rows, ["phone"], dictionary) == {}
+
+
+def test_find_value_shape_outlier_evidence_ignores_blank_values():
+    rows = [
+        {"phone": "555-100-0001"},
+        {"phone": ""},
+        {"phone": "5551000002"},
+    ]
+    evidence = find_value_shape_outlier_evidence(rows, "phone", "D-D-D")
+    assert evidence == [(2, "5551000002")]

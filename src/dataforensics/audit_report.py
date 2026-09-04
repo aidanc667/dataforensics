@@ -112,6 +112,7 @@ def build_investigation_findings(
     mutations: list[dict],
     missingness_concentration: dict[str, list[dict]] | None = None,
     missingness_co_occurrence: list[dict] | None = None,
+    shape_outlier_findings: dict[str, dict] | None = None,
 ) -> list[dict]:
     """One canonical list of findings -- tier (high/review/info), a
     title, real evidence lines (PII-masked where the column warrants it),
@@ -352,6 +353,20 @@ def build_investigation_findings(
                 "resolved": 0,
                 "total": 1,
             })
+
+    for col, f in (shape_outlier_findings or {}).items():
+        dominant_pct = f["dominant_count"] / f["total_count"]
+        findings.append({
+            "tier": "review",
+            "title": f"{col}: {f['outlier_count']} of {f['total_count']} value(s) don't match the column's dominant format",
+            "evidence": [f"{f['dominant_count']} of {f['total_count']} value(s) ({dominant_pct:.0%}) share one character-pattern shape"],
+            "more": 0,
+            "detection": "A majority of this column's non-null values reduce to the same digit/letter/spacing/punctuation shape; a minority don't.",
+            "suggested_action": "Review manually — could be a genuine formatting error, or a legitimately different but valid format.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": 1,
+        })
 
     if sentinels:
         for col, values in sentinels.items():

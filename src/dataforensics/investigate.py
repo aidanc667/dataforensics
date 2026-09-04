@@ -680,6 +680,94 @@ def find_invalid_zip_evidence(rows: list[dict], column: str) -> list[tuple[int, 
     return evidence
 
 
+_SHAPE_MIN_VALUES = 5
+_SHAPE_DOMINANT_MIN_FRACTION = 0.8
+
+
+def _value_shape(value: str) -> str:
+    """Reduce `value` to a run-length-encoded character-class signature --
+    digits collapse to "D", letters to "L", whitespace to "S", and any other
+    character (punctuation/symbols) is kept literally, with consecutive
+    runs of the same class collapsed to one symbol.
+
+    This is a general, type-agnostic stand-in for "does this value have the
+    same format as the rest of the column" that doesn't require knowing in
+    advance whether the column holds phone numbers, emails, names, or
+    something else: "555-123-4567" and "555-987-6543" both reduce to
+    "D-D-D"; "(555) 123-4567" reduces to the different shape "(D)SD-D";
+    "john@example.com" reduces to "L@L.L"; "John Smith" reduces to "LSL".
+    """
+    shape: list[str] = []
+    for ch in value:
+        if ch.isdigit():
+            cls = "D"
+        elif ch.isalpha():
+            cls = "L"
+        elif ch.isspace():
+            cls = "S"
+        else:
+            cls = ch
+        if not shape or shape[-1] != cls:
+            shape.append(cls)
+    return "".join(shape)
+
+
+def detect_value_shape_outliers(rows: list[dict], columns: list[str], dictionary: dict) -> dict[str, dict]:
+    """Flag free_text columns where one value shape (see `_value_shape`)
+    dominates (>= 80% of non-null values) and a minority of values don't
+    match it -- a general format-consistency check that works for any
+    column (names, phone numbers, emails, ...) rather than the specific
+    types (ZIP, FIPS) this module already has dedicated checks for.
+
+    Deliberately restricted to "free_text" columns (never "id" or
+    "categorical" -- the same category this module already treats as
+    "continuous/varied enough to reason about numerically" elsewhere), and
+    only fires when a dominant shape actually exists. A genuine free-text
+    column (notes, comments) has no consistent shape to begin with, so no
+    shape will reach the 80% bar and the column is silently skipped --
+    this is not evidence of anything, just nothing defensible to report.
+
+    Returns {column: {"dominant_shape": str, "dominant_count": int,
+    "total_count": int, "outlier_count": int}}.
+    """
+    results: dict[str, dict] = {}
+    for column in columns:
+        if dictionary.get(column, {}).get("category") != "free_text":
+            continue
+        values = [str(row.get(column, "")).strip() for row in rows]
+        values = [v for v in values if v != ""]
+        if len(values) < _SHAPE_MIN_VALUES:
+            continue
+        shape_counts = Counter(_value_shape(v) for v in values)
+        dominant_shape, dominant_count = shape_counts.most_common(1)[0]
+        total = len(values)
+        if dominant_count / total < _SHAPE_DOMINANT_MIN_FRACTION:
+            continue
+        outlier_count = total - dominant_count
+        if outlier_count == 0:
+            continue
+        results[column] = {
+            "dominant_shape": dominant_shape,
+            "dominant_count": dominant_count,
+            "total_count": total,
+            "outlier_count": outlier_count,
+        }
+    return results
+
+
+def find_value_shape_outlier_evidence(rows: list[dict], column: str, dominant_shape: str) -> list[tuple[int, str]]:
+    """Real (row_index, raw_value) pairs for non-null values in `column`
+    whose value shape (see `_value_shape`) doesn't match `dominant_shape`."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, "")).strip()
+        if raw == "":
+            continue
+        if _value_shape(raw) != dominant_shape:
+            evidence.append((i, raw))
+    return evidence
+
+
 def detect_survey_weight_columns(columns: list[str]) -> list[str]:
     """Column names that look like a survey sampling/replicate weight
     (e.g. "wt_final", "wgt2011") -- purely a name-pattern flag, never

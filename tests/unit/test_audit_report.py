@@ -218,6 +218,25 @@ class TestBuildInvestigationFindings:
         assert "bmi missingness is concentrated where age is higher" in f["title"]
         assert "80.00" in f["evidence"][0] and "54.50" in f["evidence"][0]
 
+    def test_shape_outlier_finding_reflects_the_real_counts(self):
+        shape_findings = {
+            "phone": {
+                "dominant_shape": "D-D-D",
+                "dominant_count": 96,
+                "total_count": 100,
+                "outlier_count": 4,
+            }
+        }
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(shape_outlier_findings=shape_findings)
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "review"
+        assert f["resolved"] == 0 and f["total"] == 1
+        assert "phone: 4 of 100 value(s) don't match the column's dominant format" in f["title"]
+        assert "96 of 100" in f["evidence"][0] and "96%" in f["evidence"][0]
+
     def test_missingness_co_occurrence_finding_reflects_the_real_pattern(self):
         co_occurrence = [
             {
