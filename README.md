@@ -64,14 +64,21 @@ DataForensics can surface findings such as:
 * Potential duplicate records
 * Missing-value sentinels such as `-99` or `"Refused"`
 * Inconsistent categorical values
-* Ambiguous date formats
+* Ambiguous date formats and impossible date ordering
 * Values outside configured ranges
-* Statistical outliers
-* Top-coded distributions
+* Statistical outliers and top-coded distributions
+* Values that don't match a column's own dominant format (phone numbers, emails, names, or any other consistently-formatted column)
+* Whitespace padding, invisible/control characters, and encoding corruption (mojibake)
+* Numbers written in a different format than the rest of their column (`"$50,000"` vs. plain numbers)
+* Two measurement units mixed in one column (kg/lb, cm/in, dollars/thousands)
+* An age column whose values look like birth years
+* A column that should never exceed another (start/end, min/max, admission/discharge)
+* Missing observation-freshness, future-dated values, and irregular coverage gaps in date columns
+* Schema and distribution drift against a previously-saved fingerprint (columns added/removed/renamed, value distributions shifting)
 * Conflicting values across related variables
 * Potential identifier columns
 * FIPS, ZIP, and other identifier formatting issues
-* Potential referential-integrity problems across files
+* Potential referential-integrity problems across files, and field-level value discrepancies between two files sharing a key
 
 Every finding includes the evidence used to flag it and clearly distinguishes a **potential issue** from a confirmed error.
 
@@ -133,8 +140,8 @@ Upload a CSV, TSV, JSON, or Excel file and DataForensics produces a dataset inve
 * Cross-column checks
 * Optional Survey, Clinical & Research, and Geographic profiles
 * Before/after transformation review
-* Dataset fingerprints for tracking changes between versions
-* Multi-file relationship and referential-integrity checks
+* Dataset fingerprints for tracking schema and distribution drift between versions
+* Multi-file relationship, referential-integrity, and value-reconciliation checks
 
 After reviewing the findings, approve individual transformations and export the cleaned dataset together with its audit documentation.
 

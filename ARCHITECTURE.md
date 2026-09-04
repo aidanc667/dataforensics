@@ -79,8 +79,14 @@ src/dataforensics/
 ├── dictionary.py       # data dictionary: dtype, category, missingness,
 │                       # outliers, top-coding, per column
 ├── investigate.py      # pre-rules heuristic findings: duplicates, category
-│                       # clusters, missingness patterns, semantic roles —
-│                       # suggestions only, never mutates data
+│                       # clusters, missingness patterns, semantic roles,
+│                       # value-format integrity (whitespace, invisible
+│                       # characters, encoding corruption, inconsistent
+│                       # numeric representations), unit-mixing, temporal
+│                       # freshness/gaps/future-dates, cross-column
+│                       # ordering, dataset-fingerprint drift, and
+│                       # cross-file value reconciliation — suggestions
+│                       # only, never mutates data
 ├── validation.py        # three-tier (Error/Warning/Suggestion) rule engine
 ├── harmonize.py          # rules-driven transform + crosswalk mapping
 ├── quality_score.py       # deterministic, rule-based quality scoring —
@@ -96,7 +102,61 @@ src/dataforensics/
 
 `app.py` is a read-only Streamlit viewer over the same engine the CLI
 uses — no new logic, no write path, no way to trigger a transformation the
-CLI itself couldn't.
+CLI itself couldn't. One real asymmetry: `investigate.py` has grown a much
+larger battery of heuristic checks than the CLI's `scan` command surfaces —
+they're currently wired into the Streamlit app only, not the CLI's output.
+
+## Investigation heuristics (`investigate.py`)
+
+Every check below is a suggestion with evidence, never an automatic
+change, and self-gates so it costs nothing on a dataset it doesn't apply
+to (e.g. a check restricted to `free_text` columns is simply never
+evaluated against an `id` or `categorical` one).
+
+- **Duplicates** — exact row duplicates, near-duplicate entities sharing
+  quasi-identifiers, conflicting records under the same primary key.
+- **Missing-value sentinels** — literal values (`-99`, `"Refused"`) that
+  function as missing without being a null cell.
+- **Inconsistent categories** — fuzzy-matched near-duplicate values
+  (`"Male"`/`"male"`), with a negation-pair guard so opposites like
+  `"employed"`/`"unemployed"` are never merged.
+- **Ambiguous dates & impossible date ordering** — `MM/DD` vs. `DD/MM`
+  ambiguity; a birth date recorded after another event for the same person.
+- **Value-shape outliers** — a general "does this value match the
+  column's own dominant format" check (phone numbers, emails, names, or
+  any other column with a real convention), via a run-length character-
+  class shape signature, not a fixed list of column types.
+- **Format-integrity** — leading/trailing/doubled whitespace; invisible
+  characters (zero-width spaces, non-breaking spaces, embedded BOMs);
+  encoding corruption/mojibake, detected via the actual corruption
+  mechanism (round-trip through cp1252→UTF-8) rather than a fixed list of
+  known-bad substrings.
+- **Numeric-representation inconsistency** — `"$50,000"` / `"50k"`
+  flagged against a column where plain numbers are the norm.
+- **Unit-mixing** — a WEIGHT/HEIGHT/INCOME-role column whose values split
+  into two clusters at a ratio matching a real conversion factor
+  (kg↔lb, cm↔in, m↔ft, dollars↔thousands) — deliberately requires the
+  SPECIFIC factor match, not just "this distribution is bimodal", so a
+  genuine two-population column (e.g. adult vs. child weight) isn't
+  mistaken for a units bug.
+- **Role plausibility** — an AGE-role column whose values mostly look
+  like calendar years (born-year mislabeled as age).
+- **Cross-column ordering** — a general "column A should never exceed
+  column B" check driven by naming convention (start/end, min/max,
+  admission/discharge), comparing as ISO dates or numbers as appropriate.
+- **Temporal freshness & gaps** — earliest/latest observation per date
+  column, future-dated values, and coverage gaps measured against that
+  column's own observed cadence rather than an assumed calendar frequency.
+- **Dataset fingerprinting & drift** — a stateless hash-based comparison
+  against a previously-downloaded fingerprint: columns added/removed,
+  dtype/category/cardinality changes, numeric median drift, categorical
+  value-set changes, and a "possibly renamed" heuristic for a removed+added
+  column pair with matching stats.
+- **Cross-file reconciliation** — shared-key discovery, referential
+  integrity, and (for a one-to-one key relationship) field-by-field value
+  reconciliation between two files — the closest this tool comes to an
+  accuracy check, without pretending it can independently verify which
+  source holds the truth.
 
 ## CLI surface
 
@@ -154,7 +214,7 @@ schema and emits them as two independently-harmonized tables instead.
 
 ## Testing strategy
 
-421 tests across four levels: unit (per guard/rule), integration (full
+480 tests across four levels: unit (per guard/rule), integration (full
 pipeline on a fixture), regression (golden input → expected output,
 byte-identical on rerun), and end-to-end (CLI/Streamlit invocation through to
 manifest). CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs
