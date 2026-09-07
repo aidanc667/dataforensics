@@ -1462,7 +1462,7 @@ with tab_analyze:
                 st.markdown(
                     f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Concentration</span>'
                     f'<div class="dataforensics-card-title">{_esc(col)} missingness is concentrated where {_esc(f["column"])} is {f["direction"]}</div>'
-                    f'<div class="dataforensics-card-evidence">median {f["column"]} {f["median_when_missing"]:,.2f} when {col} is missing '
+                    f'<div class="dataforensics-card-evidence">median {_esc(f["column"])} {f["median_when_missing"]:,.2f} when {_esc(col)} is missing '
                     f'vs. {f["median_when_present"]:,.2f} when present</div></div>',
                     unsafe_allow_html=True,
                 )

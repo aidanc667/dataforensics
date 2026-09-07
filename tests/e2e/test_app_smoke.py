@@ -177,6 +177,48 @@ def test_example_dataset_buttons_load_without_exception():
         assert any("record(s)" in md.value and "variable(s)" in md.value for md in at.markdown)
 
 
+def test_missingness_concentration_evidence_escapes_a_malicious_column_name():
+    # Regression test: the "evidence" line of a missingness-concentration
+    # finding rendered the target/candidate column names unescaped, even
+    # though the "title" line two lines above it (same unsafe_allow_html
+    # markdown call) correctly escaped them -- a real stored-XSS gap,
+    # since a CSV column NAME is attacker-controlled input to a publicly
+    # hosted app, the same way test_report.py's
+    # test_render_html_escapes_unsafe_characters already covers for a
+    # row VALUE in the separate render_html path.
+    malicious_col = "<script>alert(1)</script>"
+    lines = [f"id,score,{malicious_col}"]
+    row_id = 1
+    for i in range(10):
+        lines.append(f"{row_id},,{100 + i}")  # score missing, candidate col high
+        row_id += 1
+    for i in range(10):
+        lines.append(f"{row_id},{i + 1},{10 + i}")  # score present, candidate col low
+        row_id += 1
+    csv_bytes = ("\n".join(lines) + "\n").encode()
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["dataforensics_data_bytes"] = csv_bytes
+    at.session_state["dataforensics_data_name"] = "xss_test.csv"
+    at.run(timeout=30)
+    assert not at.exception
+
+    # Only st.markdown(..., unsafe_allow_html=True) calls render raw HTML
+    # from their source string -- a plain st.markdown() call (the
+    # "Requires attention" summary bullet) is escaped by Streamlit itself
+    # regardless of what's in its source text, so checking THAT text
+    # would test Streamlit's own default, not this app's escaping
+    # discipline. The "dataforensics-card" wrapper only ever appears in
+    # an unsafe_allow_html=True call, so it reliably identifies the
+    # raw-HTML elements this app itself is responsible for escaping.
+    html_cards = [md.value for md in at.markdown if "dataforensics-card" in md.value]
+    assert html_cards, "expected at least one rendered finding card"
+    all_html = " ".join(html_cards)
+    assert "concentrated where" in all_html  # confirms the vulnerable code path actually ran
+    assert "<script>alert(1)</script>" not in all_html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in all_html
+
+
 def test_missingness_concentration_never_compares_against_a_categorical_column():
     # Regression test: the candidate columns for missingness-concentration
     # comparison used to include any non-id, non-PII column -- including
