@@ -12,6 +12,7 @@ from dataforensics.ingest import (
     strip_footer,
 )
 from dataforensics.typing_guards import (
+    find_sentinel_like_values,
     is_id_like_column,
     is_pii_like_column,
     parse_finite_float,
@@ -183,7 +184,22 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
         # just below. When include_raw_samples=True the column behaves
         # exactly like any other, so numeric detection still runs.
         if category == "free_text" and not mask_pii:
+            # A literal missing-value sentinel (e.g. "9999" for
+            # "refused") parses as a perfectly valid float, so without
+            # excluding it here it silently sits in the same numeric
+            # pool as genuine measurements -- inflating the outlier
+            # count with sentinel values that aren't real observations,
+            # and, worse, getting mistaken for an actual top-coding
+            # ceiling on the underlying quantity (a "possible top-coding
+            # at 9999" reading like a real measurement cap the way a
+            # genuine top-code such as "500%+ of poverty" is). Uses the
+            # same dominance-aware definition detect_candidate_sentinels
+            # uses, so a column where "9999" IS the dominant real value
+            # (not a rare sentinel) is never stripped of most of its data.
+            sentinel_like = find_sentinel_like_values([v.strip() for v in non_null_values])
             for v in non_null_values:
+                if v.strip() in sentinel_like:
+                    continue
                 parsed = parse_finite_float(v)
                 if parsed is None:
                     numeric_values = []
@@ -297,9 +313,12 @@ def find_outlier_evidence(rows: list[dict], column: str) -> list[tuple[int, str]
     filtered non-null-and-numeric-parseable value list it was given, NOT
     row indices into the original dataset -- a documented, deliberate
     scope boundary of that function (it doesn't have the original rows to
-    map back to). This function re-derives the same non-null/numeric
-    filtering build_data_dictionary uses (so the same values end up
-    flagged) while keeping each value's real row index alongside it.
+    map back to). This function re-derives the same non-null/numeric/
+    sentinel-excluded filtering build_data_dictionary uses (so the same
+    values end up flagged, for the same reason -- a literal "9999"
+    missing-value code must not both distort the outlier bounds AND show
+    up as if it were evidence of one) while keeping each value's real
+    row index alongside it.
 
     Returns [] if the column isn't uniformly numeric (any non-null value
     fails float() parsing) -- the same "all or nothing" numeric detection
@@ -307,14 +326,16 @@ def find_outlier_evidence(rows: list[dict], column: str) -> list[tuple[int, str]
     column the dictionary didn't actually treat as numeric.
     """
     non_null = [(i, row.get(column, "")) for i, row in enumerate(rows) if row.get(column, "") != ""]
+    sentinel_like = find_sentinel_like_values([str(v).strip() for _, v in non_null])
+    eligible = [(i, v) for i, v in non_null if str(v).strip() not in sentinel_like]
     values_only: list[float] = []
-    for _, v in non_null:
+    for _, v in eligible:
         parsed = parse_finite_float(v)
         if parsed is None:
             return []
         values_only.append(parsed)
     result = detect_outliers(values_only)
-    return [non_null[pos] for pos in result["outlier_indices"]]
+    return [eligible[pos] for pos in result["outlier_indices"]]
 
 
 def find_top_code_evidence(rows: list[dict], column: str, top_value: float) -> list[tuple[int, str]]:

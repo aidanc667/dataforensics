@@ -1,5 +1,6 @@
 import math
 import re
+from collections import Counter
 
 _ID_LIKE_PATTERN = re.compile(
     r"(^|[_\s])(id|zip)(\d*)([_\s]|$)"      # id, zip [+ optional digits], on a real boundary
@@ -61,6 +62,68 @@ _PII_COLUMN_PATTERN = re.compile(
 
 def is_pii_like_column(name: str) -> bool:
     return bool(_PII_COLUMN_PATTERN.search(name))
+
+
+# A missing-value convention is essentially never the dominant answer in
+# real research/survey data -- documented non-response rates for even
+# sensitive survey items rarely exceed ~20-30%. A sentinel-looking value
+# that accounts for MORE than this share of a column's non-null values
+# is far more likely a legitimate, common value that happens to match
+# the pattern (e.g. "999" as a genuine numeric code, not a missing-value
+# marker) than actual evidence of missingness -- so it's not flagged at
+# all, rather than flagged with a misleadingly confident-sounding "looks
+# like a common missing-value convention." Bare "99" hit this so often
+# in practice that it's excluded from COMMON_SENTINEL_STRINGS entirely,
+# below, rather than left to this threshold alone.
+SENTINEL_DOMINANCE_THRESHOLD = 0.25
+
+COMMON_SENTINEL_STRINGS = {
+    # Bare "99" deliberately excluded: it's an extremely common
+    # legitimate value in its own right (e.g. a neighborhood/district
+    # code, a percentile, a real category id) far more often than it's
+    # actually a missing-value convention, and SENTINEL_DOMINANCE_THRESHOLD
+    # alone wasn't enough -- a value that's rare in one dataset but a
+    # real, correct answer in another still got flagged every time
+    # regardless of frequency. "-99"/"999"/"9999" stay: a negative number
+    # or an all-9s value of 3+ digits is a much stronger, more
+    # unambiguous missing-value signal with far less legitimate-value
+    # collision risk.
+    "-99", "-9", "999", "9999",
+    # CDC survey convention (BRFSS, NHANES, and others): a 9-family code
+    # means "refused" and its paired 7-family code means "don't know/not
+    # sure" -- the two are always used together, so a column carrying one
+    # is extremely likely to carry the other. Bare "7" AND bare "77" are
+    # both excluded for the same collision-risk reason bare "99" is --
+    # confirmed against this project's own bundled demo datasets, where
+    # "77" is a real, ordinary age in years, a real weight in kg, and a
+    # real waist circumference in cm, not a missing-value marker, in
+    # three different columns across three different files. Only
+    # "777"/"7777" (3+ digits, all the same digit) keep the same
+    # unambiguity as their "999"/"9999" counterparts.
+    "777", "7777",
+    "n/a", "na", "n.a.", "unknown", "unk",
+    "refused", "dk", "don't know", "not applicable", ".",
+}
+
+
+def find_sentinel_like_values(values: list[str]) -> set[str]:
+    """Which of `values` (already stripped, non-null) literally match a
+    common missing-value convention (see COMMON_SENTINEL_STRINGS)
+    without dominating the column -- shared by investigate.py's sentinel
+    SUGGESTION (does this column have a literal missing-value code worth
+    mapping to a label?) and dictionary.py's numeric-statistics
+    computation (a sentinel like "9999" left in the raw values would
+    otherwise silently inflate that column's outlier count and could get
+    mistaken for a genuine top-coding ceiling).
+    """
+    if not values:
+        return set()
+    counts = Counter(values)
+    total = len(values)
+    return {
+        v for v in counts
+        if v.casefold() in COMMON_SENTINEL_STRINGS and counts[v] / total <= SENTINEL_DOMINANCE_THRESHOLD
+    }
 
 
 def preserves_leading_zero(values: list[str]) -> bool:

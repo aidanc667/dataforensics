@@ -1,5 +1,6 @@
 from dataforensics.typing_guards import (
     classify_sentinel,
+    find_sentinel_like_values,
     is_id_like_column,
     is_pii_like_column,
     parse_finite_float,
@@ -113,3 +114,32 @@ def test_parse_finite_float_rejects_non_numeric_text():
 def test_parse_finite_float_rejects_non_string_types_gracefully():
     assert parse_finite_float(None) is None
     assert parse_finite_float(["1", "2"]) is None
+
+
+def test_find_sentinel_like_values_catches_the_cdc_dont_know_family():
+    # The real gap this closes: BRFSS/NHANES pair a 9-family "refused"
+    # code with a 7-family "don't know" code -- both must be caught, not
+    # just the 9-family one.
+    values = ["9999"] * 5 + ["7777"] * 3 + [str(150 + i) for i in range(50)]
+    assert find_sentinel_like_values(values) == {"9999", "7777"}
+
+
+def test_find_sentinel_like_values_excludes_bare_7_bare_77_and_bare_99():
+    # Bare "7"/"77"/"99" collide too often with legitimate values (a 1-7
+    # Likert scale, a real age/weight/waist measurement, a district
+    # code) to flag unconditionally -- only the 3+-digit all-same-digit
+    # forms ("777"/"7777", "999"/"9999") do.
+    values = ["7", "77", "99"] + [str(200 + i) for i in range(50)]
+    assert find_sentinel_like_values(values) == set()
+
+
+def test_find_sentinel_like_values_respects_dominance_threshold():
+    # A sentinel-looking value that's actually the dominant real answer
+    # (here "7777" at 60%) is not a missing-value convention -- it's the
+    # column's normal value, and must not be excluded from anything.
+    values = ["7777"] * 6 + ["100", "200", "300", "400"]
+    assert find_sentinel_like_values(values) == set()
+
+
+def test_find_sentinel_like_values_empty_input():
+    assert find_sentinel_like_values([]) == set()

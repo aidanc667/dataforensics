@@ -36,7 +36,6 @@ from dataforensics.ingest import (
     list_excel_sheets,
 )
 from dataforensics.investigate import (
-    COMMON_SENTINEL_STRINGS,
     DATASET_PROFILES,
     analyze_key_cardinality,
     analyze_key_uniqueness,
@@ -93,7 +92,7 @@ from dataforensics.investigate import (
 )
 from dataforensics.quality_score import compute_quality_score
 from dataforensics.report import render_html
-from dataforensics.typing_guards import is_pii_like_column
+from dataforensics.typing_guards import COMMON_SENTINEL_STRINGS, is_pii_like_column
 from dataforensics.validation import validate
 
 st.set_page_config(page_title="DataForensics", layout="wide", page_icon="🧬")

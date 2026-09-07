@@ -133,6 +133,45 @@ def test_dictionary_still_runs_top_code_detection_on_high_cardinality_numeric_co
     assert d["income"]["top_code_spike"]["value"] == 250000.0
 
 
+def test_dictionary_excludes_sentinel_values_from_outlier_and_top_code_stats(tmp_path):
+    # Real bug found on the bundled BRFSS demo: weight_lbs reported 78
+    # "statistical outliers" and a "possible top-coding at 9999" -- but
+    # 9999/7777 are literal refused/don't-know codes, not real
+    # measurements, and previously sat uncontested in the numeric pool
+    # used for these stats. A rare (well under the 25% dominance
+    # threshold) sentinel-shaped value must not distort either stat.
+    real_weights = [150 + i for i in range(20)]  # a tight, unremarkable range
+    rows = [str(w) for w in real_weights] + ["9999"] * 3 + ["7777"] * 2
+    lines = ["id,weight_lbs"] + [f"{i},{v}" for i, v in enumerate(rows, start=1)]
+    f = tmp_path / "weight.csv"
+    f.write_text("\n".join(lines) + "\n")
+    d = build_data_dictionary(f)
+    assert d["weight_lbs"]["category"] == "free_text"
+    # No real top-coding spike in a clean, tight range of real weights --
+    # 9999 must not be reported as though it were a genuine ceiling.
+    assert d["weight_lbs"]["top_code_spike"] is None
+    # No genuine statistical outliers in a tight, unremarkable range --
+    # 9999/7777 must not inflate the count either.
+    assert d["weight_lbs"]["outliers"]["outlier_count"] == 0
+
+
+def test_dictionary_does_not_exclude_a_dominant_sentinel_shaped_value(tmp_path):
+    # The dominance guard must carry through: if "9999" IS the column's
+    # real dominant value (not a rare sentinel), it must NOT be silently
+    # stripped from the numeric pool -- that would gut the column's own
+    # statistics for a value that's actually normal here. 60 of 100 rows
+    # (60%, well over the 25% dominance threshold) share "9999"; 40
+    # distinct real values keep this column "free_text"-classified.
+    rows = ["9999"] * 60 + [str(100 + i) for i in range(40)]
+    lines = ["id,code"] + [f"{i},{v}" for i, v in enumerate(rows, start=1)]
+    f = tmp_path / "dominant_code.csv"
+    f.write_text("\n".join(lines) + "\n")
+    d = build_data_dictionary(f)
+    assert d["code"]["category"] == "free_text"
+    assert d["code"]["top_code_spike"] is not None
+    assert d["code"]["top_code_spike"]["value"] == 9999.0
+
+
 def test_dictionary_high_cardinality_is_free_text(tmp_path):
     rows = "\n".join(f"{i},note-{i}-unique" for i in range(60))
     f = tmp_path / "notes.csv"
@@ -348,6 +387,28 @@ def test_find_outlier_evidence_empty_when_column_contains_nan_string():
     # be treated the same as any other non-numeric value: not numeric.
     rows = [{"age": "30"}, {"age": "nan"}, {"age": "31"}, {"age": "300"}]
     assert find_outlier_evidence(rows, "age") == []
+
+
+def test_find_outlier_evidence_excludes_sentinel_values_consistently_with_the_dictionary():
+    from dataforensics.dictionary import find_outlier_evidence
+
+    # Regression: build_data_dictionary excludes sentinel-shaped values
+    # (e.g. "9999") from its outlier COUNT, but find_outlier_evidence
+    # independently re-derives its own numeric pool from the raw rows --
+    # without the same exclusion, the evidence panel would show a
+    # different set of rows (including the sentinel rows themselves,
+    # mislabeled as "outlier evidence") than the count it's supposed to
+    # explain. Both must agree: neither the count nor the evidence
+    # includes the 9999/7777 sentinel rows.
+    rows = (
+        [{"weight_lbs": str(150 + i)} for i in range(20)]
+        + [{"weight_lbs": "9999"}] * 3
+        + [{"weight_lbs": "7777"}] * 2
+    )
+    # A tight, unremarkable range of real weights plus rare sentinel
+    # codes: no genuine outliers, and critically, the sentinel rows
+    # themselves must never appear in the returned evidence.
+    assert find_outlier_evidence(rows, "weight_lbs") == []
 
 
 def test_build_data_dictionary_column_with_nan_string_is_not_treated_as_numeric(tmp_path):

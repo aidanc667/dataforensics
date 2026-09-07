@@ -24,24 +24,12 @@ from collections import Counter
 from datetime import UTC, datetime
 from itertools import combinations
 
-from dataforensics.typing_guards import is_pii_like_column, parse_finite_float
+from dataforensics.typing_guards import (
+    find_sentinel_like_values,
+    is_pii_like_column,
+    parse_finite_float,
+)
 from dataforensics.validation import is_ambiguous_date, is_date_like, is_iso_date
-
-COMMON_SENTINEL_STRINGS = {
-    # Bare "99" deliberately excluded: it's an extremely common
-    # legitimate value in its own right (e.g. a neighborhood/district
-    # code, a percentile, a real category id) far more often than it's
-    # actually a missing-value convention, and _SENTINEL_DOMINANCE_THRESHOLD
-    # alone wasn't enough -- a value that's rare in one dataset but a
-    # real, correct answer in another still got flagged every time
-    # regardless of frequency. "-99"/"999"/"9999" stay: a negative number
-    # or an all-9s value of 3+ digits is a much stronger, more
-    # unambiguous missing-value signal with far less legitimate-value
-    # collision risk.
-    "-99", "-9", "999", "9999",
-    "n/a", "na", "n.a.", "unknown", "unk",
-    "refused", "dk", "don't know", "not applicable", ".",
-}
 
 _MAX_CARDINALITY_FOR_FUZZY_MATCH = 50
 
@@ -65,25 +53,11 @@ def detect_duplicate_rows(rows: list[dict]) -> list[dict]:
     return duplicates
 
 
-# A missing-value convention is essentially never the dominant answer in
-# real research/survey data -- documented non-response rates for even
-# sensitive survey items rarely exceed ~20-30%. A sentinel-looking value
-# that accounts for MORE than this share of a column's non-null values
-# is far more likely a legitimate, common value that happens to match
-# the pattern (e.g. "999" as a genuine numeric code, not a missing-value
-# marker) than actual evidence of missingness -- so it's not flagged at
-# all, rather than flagged with a misleadingly confident-sounding "looks
-# like a common missing-value convention." Bare "99" hit this so often
-# in practice that it's excluded from COMMON_SENTINEL_STRINGS entirely,
-# above, rather than left to this threshold alone.
-_SENTINEL_DOMINANCE_THRESHOLD = 0.25
-
-
 def detect_candidate_sentinels(rows: list[dict], columns: list[str]) -> dict[str, list[str]]:
     """Values that look like common research/survey missing-value codes
     (e.g. "-99", "N/A", "Refused") appearing literally in the data --
-    excluding any that account for more than _SENTINEL_DOMINANCE_THRESHOLD
-    of the column's non-null values (see that constant's docstring).
+    excluding any that dominate the column (see
+    typing_guards.find_sentinel_like_values's docstring).
 
     Never claims these ARE sentinels -- only that they match a common
     naming convention and are worth a human decision (map to a specific
@@ -94,15 +68,7 @@ def detect_candidate_sentinels(rows: list[dict], columns: list[str]) -> dict[str
         raw_values = [str(row.get(col, "")).strip() for row in rows if row.get(col) not in (None, "")]
         if not raw_values:
             continue
-        counts: dict[str, int] = {}
-        for v in raw_values:
-            counts[v] = counts.get(v, 0) + 1
-        total = len(raw_values)
-        hits = sorted(
-            v
-            for v in counts
-            if v.casefold() in COMMON_SENTINEL_STRINGS and counts[v] / total <= _SENTINEL_DOMINANCE_THRESHOLD
-        )
+        hits = sorted(find_sentinel_like_values(raw_values))
         if hits:
             found[col] = hits
     return found
@@ -741,6 +707,9 @@ _SHAPE_MIN_VALUES = 5
 _SHAPE_DOMINANT_MIN_FRACTION = 0.8
 
 
+_PLAIN_NUMBER_PATTERN = re.compile(r"^-?\d+(\.\d+)?$")
+
+
 def _value_shape(value: str) -> str:
     """Reduce `value` to a run-length-encoded character-class signature --
     digits collapse to "D", letters to "L", whitespace to "S", and any other
@@ -753,7 +722,22 @@ def _value_shape(value: str) -> str:
     something else: "555-123-4567" and "555-987-6543" both reduce to
     "D-D-D"; "(555) 123-4567" reduces to the different shape "(D)SD-D";
     "john@example.com" reduces to "L@L.L"; "John Smith" reduces to "LSL".
+
+    A plain number (optionally negative, optionally with one decimal
+    point) is special-cased to a single canonical shape regardless of
+    digit or decimal-place count -- "72" and "103.2" are both real
+    measurements recorded to different precision, not two different
+    FORMATS the way "555-1234" and "(555) 1234" are. Without this, a
+    genuine measurement column (e.g. weight recorded as "72" for an
+    exact kilogram and "103.2" elsewhere) throws a wall of false-
+    positive "format" outliers over ordinary precision variation. A
+    currency-decorated or comma-grouped number ("$50,000") still fails
+    this pattern and gets its own distinct shape below --
+    detect_numeric_representation_inconsistency is the dedicated check
+    for that kind of real formatting difference.
     """
+    if _PLAIN_NUMBER_PATTERN.match(value):
+        return "#NUM#"
     shape: list[str] = []
     for ch in value:
         if ch.isdigit():

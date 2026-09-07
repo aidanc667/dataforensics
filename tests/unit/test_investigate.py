@@ -87,7 +87,10 @@ def test_detect_candidate_sentinels_never_flags_bare_99():
     # neighborhood/district code, a percentile, a real category id) far
     # more often than it's actually a missing-value marker. Must not be
     # flagged even where it's genuinely rare, unlike "-99"/"999"/"9999".
-    rows = [{"neighborhood": "99"}] + [{"neighborhood": str(i)} for i in range(99)]
+    # Range starts at 100 (not 0) so it never coincidentally includes
+    # "77" -- also excluded bare, for the exact same reason -- which
+    # would otherwise be a false collision unrelated to this test's point.
+    rows = [{"neighborhood": "99"}] + [{"neighborhood": str(i)} for i in range(100, 199)]
     assert detect_candidate_sentinels(rows, ["neighborhood"]) == {}
 
 
@@ -618,6 +621,42 @@ def test_find_value_shape_outlier_evidence_ignores_blank_values():
     ]
     evidence = find_value_shape_outlier_evidence(rows, "phone", "D-D-D")
     assert evidence == [(2, "5551000002")]
+
+
+def test_detect_value_shape_outliers_does_not_flag_decimal_precision_variance():
+    # Real bug found on the bundled NHANES demo: BMX exam measurements
+    # mix whole-number ("72") and one-decimal ("103.2") recordings for
+    # the exact same quantity -- that's precision, not a format
+    # inconsistency, and must not be flagged the way a genuinely
+    # different format (a currency symbol, a unit suffix) would be.
+    rows = [{"weight_kg": v} for v in ["72", "103.2", "97", "82.4", "74.8", "-5.5", "-3"]]
+    dictionary = {"weight_kg": {"category": "free_text"}}
+    assert detect_value_shape_outliers(rows, ["weight_kg"], dictionary) == {}
+
+
+def test_detect_value_shape_outliers_still_flags_a_genuinely_decorated_number():
+    # Plain-number collapsing must not swallow a REAL format outlier --
+    # a currency-decorated or comma-grouped value still isn't a plain
+    # number and still gets its own distinct shape.
+    rows = [{"income": v} for v in ["50000", "62000", "71000", "48000", "$50,000"]]
+    dictionary = {"income": {"category": "free_text"}}
+    results = detect_value_shape_outliers(rows, ["income"], dictionary)
+    assert results["income"]["outlier_count"] == 1
+    evidence = find_value_shape_outlier_evidence(rows, "income", results["income"]["dominant_shape"])
+    assert evidence == [(4, "$50,000")]
+
+
+def test_detect_candidate_sentinels_catches_the_cdc_dont_know_and_refused_pair():
+    # Real gap found on the bundled BRFSS demo: weight_lbs/height_ft_in
+    # carry BOTH 9999 (refused) and 7777 (don't know) -- both must be
+    # caught, not just the 9-family code.
+    rows = (
+        [{"weight_lbs": "9999"}] * 3
+        + [{"weight_lbs": "7777"}] * 2
+        + [{"weight_lbs": str(150 + i)} for i in range(50)]
+    )
+    hits = detect_candidate_sentinels(rows, ["weight_lbs"])
+    assert set(hits["weight_lbs"]) == {"9999", "7777"}
 
 
 def test_detect_whitespace_anomalies_flags_leading_trailing_and_doubled_spaces():
