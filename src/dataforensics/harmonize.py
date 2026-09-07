@@ -308,6 +308,102 @@ def apply_transformations(
     return transformed, mutations
 
 
+def merge_files_on_key(
+    file_a_rows: list[dict],
+    file_b_rows: list[dict],
+    key_a: str,
+    key_b: str,
+    file_a_label: str,
+    file_b_label: str,
+    join_type: str = "left",
+) -> dict:
+    """Row-merge two files on a shared key -- the one place DataForensics
+    actually joins separate datasets, and it exists specifically to be
+    opt-in: the caller (the Multi-File Relationships tab) only offers
+    this after the analyst has reviewed referential integrity, key
+    uniqueness, and relationship shape, and only produces output when
+    they explicitly approve it. Nothing upstream of this function ever
+    calls it automatically.
+
+    The output grain is file_b's -- one output row per file_b row, with
+    file_a's columns attached (broadcast onto every matching file_b row
+    for a one-to-many relationship; unambiguous for one-to-one). This
+    matches the "parent"/"child" convention the rest of the Multi-File
+    tab already uses (file_a is cand["file_a"], file_b is cand["file_b"]).
+
+    Any column name that appears in BOTH files (other than the key
+    columns themselves) is suffixed with " (<file label>)" on BOTH
+    sides -- e.g. a "sex" column present in both files becomes
+    "sex (participants.csv)" and "sex (visits.csv)" in the output. This
+    is deliberate: value reconciliation already exists specifically to
+    show where two files' shared columns DISAGREE, and a merge that
+    silently let one side's value overwrite the other would throw that
+    exact evidence away. A human decides which value to trust (or keeps
+    both) after the merge, the same "never guess, always show both"
+    discipline as the rest of this codebase.
+
+    join_type "left" (default): every file_b row appears in the output;
+    a file_b row with no matching file_a key gets blank file_a columns.
+    join_type "inner": only file_b rows whose key value has a match in
+    file_a appear in the output.
+
+    A key value repeated in file_a (not unique -- see
+    investigate.analyze_key_uniqueness) uses its FIRST occurrence, the
+    same convention investigate.reconcile_shared_records already uses
+    for the identical ambiguity, rather than silently duplicating file_b
+    rows against every match.
+
+    Returns {"rows": [...], "columns": [...], "matched_count": int,
+    "unmatched_count": int, "total_count": int}. Never mutates
+    file_a_rows or file_b_rows.
+    """
+    index_a: dict[str, dict] = {}
+    for row in file_a_rows:
+        k = str(row.get(key_a, "")).strip()
+        if k and k not in index_a:
+            index_a[k] = row
+
+    columns_a = list(file_a_rows[0].keys()) if file_a_rows else []
+    columns_b = list(file_b_rows[0].keys()) if file_b_rows else []
+    shared = (set(columns_a) & set(columns_b)) - {key_a, key_b}
+
+    def out_name(col: str, label: str) -> str:
+        return f"{col} ({label})" if col in shared else col
+
+    columns_b_out = [out_name(c, file_b_label) for c in columns_b]
+    columns_a_out = [out_name(c, file_a_label) for c in columns_a if c != key_a]
+    out_columns = columns_b_out + columns_a_out
+
+    merged_rows = []
+    matched_count = 0
+    unmatched_count = 0
+    for row_b in file_b_rows:
+        k = str(row_b.get(key_b, "")).strip()
+        row_a = index_a.get(k)
+        if row_a is None:
+            unmatched_count += 1
+            if join_type == "inner":
+                continue
+        else:
+            matched_count += 1
+        merged: dict[str, str] = {}
+        for col in columns_b:
+            merged[out_name(col, file_b_label)] = row_b.get(col, "")
+        for col in columns_a:
+            if col == key_a:
+                continue
+            merged[out_name(col, file_a_label)] = (row_a or {}).get(col, "")
+        merged_rows.append(merged)
+
+    return {
+        "rows": merged_rows,
+        "columns": out_columns,
+        "matched_count": matched_count,
+        "unmatched_count": unmatched_count,
+        "total_count": len(merged_rows),
+    }
+
+
 def apply_crosswalk(rows: list[dict], source_crosswalk: dict) -> list[dict]:
     """Remap a single source's rows onto a shared target schema.
 

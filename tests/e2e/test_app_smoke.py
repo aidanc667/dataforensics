@@ -124,6 +124,38 @@ def test_birth_date_after_other_date_evidence_masks_pii_like_columns():
     assert "2024-01-01" in evidence_lines[0]
 
 
+def test_fuzzy_duplicate_entity_finding_renders_without_exception():
+    # End-to-end smoke coverage for detect_fuzzy_duplicate_entities: a
+    # real dataset with a genuine name-spelling variant on the same
+    # birth date must render both the summary card and the full evidence
+    # panel without raising -- the one thing a unit test on the
+    # detection function alone can't confirm (it doesn't touch any of
+    # app.py's rendering code, including the masked-evidence formatting
+    # this finding's card uses).
+    csv_bytes = (
+        b"participant_id,name,birth_date,sex\n"
+        b"1,Jon Smith,1960-02-18,M\n"
+        b"2,John Smith,1960-02-18,M\n"  # spelling variant, same DOB -- triggers the finding
+        b"3,Maria Alvarez,1985-03-04,F\n"
+        b"4,Robert Diaz,1970-01-01,M\n"
+        b"5,Susan Nguyen,1988-09-09,F\n"
+    )
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["dataforensics_data_bytes"] = csv_bytes
+    at.session_state["dataforensics_data_name"] = "fuzzy_test.csv"
+    at.run(timeout=30)
+    assert not at.exception
+
+    # "possible duplicate entities" itself is an st.expander LABEL (the
+    # "Requires attention" summary line), not an st.markdown element --
+    # AppTest's .markdown collection doesn't include expander labels, so
+    # this checks the detail card's own st.markdown(unsafe_allow_html=True)
+    # content instead, which is unique to this finding.
+    all_text = " ".join(md.value for md in at.markdown)
+    assert "weaker evidence than an exact duplicate entity" in all_text
+    assert any("possible duplicate entit" in exp.label for exp in at.expander)
+
+
 def test_two_redundant_zip_columns_do_not_alone_trigger_duplicate_entity_finding():
     # Regression test: a dataset with two zip-named columns (a common
     # real-world shape -- an open-data export with both a live "Zipcode"

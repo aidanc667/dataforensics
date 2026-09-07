@@ -124,6 +124,9 @@ def build_investigation_findings(
     column_order_findings: dict[tuple[str, str], list] | None = None,
     conditional_column_findings: dict[tuple[str, str], list] | None = None,
     pii_content_findings: dict[str, dict[str, int]] | None = None,
+    fuzzy_duplicate_entities: list[dict] | None = None,
+    fuzzy_exact_columns: list[str] | None = None,
+    fuzzy_name_column: str | None = None,
 ) -> list[dict]:
     """One canonical list of findings -- tier (high/review/info), a
     title, real evidence lines (PII-masked where the column warrants it),
@@ -218,6 +221,32 @@ def build_investigation_findings(
             "confidence": "Low",
             "resolved": 0,
             "total": len(duplicate_entities),
+        })
+
+    if fuzzy_duplicate_entities:
+        total = sum(len(d["row_indices"]) for d in fuzzy_duplicate_entities)
+        id_col = id_like_defaults[0] if id_like_defaults else "id"
+        exact_cols = fuzzy_exact_columns or []
+        evidence = []
+        for d in fuzzy_duplicate_entities:
+            row_x, row_y = rows[d["row_indices"][0]], rows[d["row_indices"][1]]
+            exact_desc = ", ".join(f"{c}={_mask(c, row_x.get(c))}" for c in exact_cols)
+            name_x = _mask(fuzzy_name_column, row_x.get(fuzzy_name_column)) if fuzzy_name_column else ""
+            name_y = _mask(fuzzy_name_column, row_y.get(fuzzy_name_column)) if fuzzy_name_column else ""
+            evidence.append(
+                f"{exact_desc}, {fuzzy_name_column}: {name_x!r} vs {name_y!r} ({d['similarity']}% similar) "
+                f"→ {id_col} values {', '.join(d['id_values'])}"
+            )
+        findings.append({
+            "tier": "review",
+            "title": f"{len(fuzzy_duplicate_entities)} possible duplicate entit{'ies' if len(fuzzy_duplicate_entities) != 1 else 'y'} ({total} record(s)) — similar but not identical names",
+            "evidence": evidence[:10],
+            "more": max(0, len(fuzzy_duplicate_entities) - 10),
+            "detection": f"Same {', '.join(exact_cols)}, and a close (not exact) match on {fuzzy_name_column}, but different {id_col}.",
+            "suggested_action": "Could be a spelling variant of the same real-world entity, or two different people who happen to share the exact-matched fields. Review with study documentation.",
+            "confidence": "Low",
+            "resolved": 0,
+            "total": len(fuzzy_duplicate_entities),
         })
 
     if birth_date_findings:

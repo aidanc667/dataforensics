@@ -26,6 +26,7 @@ from dataforensics.harmonize import (
     apply_transformations,
     column_union,
     compute_safety_report,
+    merge_files_on_key,
 )
 from dataforensics.ingest import (
     DuplicateHeaderError,
@@ -56,6 +57,7 @@ from dataforensics.investigate import (
     detect_duplicate_entities,
     detect_duplicate_rows,
     detect_encoding_corruption,
+    detect_fuzzy_duplicate_entities,
     detect_invisible_characters,
     detect_missingness_co_occurrence,
     detect_missingness_concentration,
@@ -830,6 +832,23 @@ with tab_analyze:
     if len(quasi_identifier_columns) >= 2 and id_like_defaults:
         duplicate_entities = detect_duplicate_entities(rows, quasi_identifier_columns, id_like_defaults[0])
 
+    # Fuzzy variant: the same idea, but for the harder, more common real
+    # case where one field (typically the name) has a genuine spelling
+    # variant rather than an exact match -- "Jon Smith" vs "John Smith"
+    # on the same birth date. Only offered when a NAME-role column was
+    # actually found among the quasi-identifiers; the rest (birth date,
+    # sex, ZIP) anchor the comparison ("blocking") and must still match
+    # exactly, keeping this tractable and precise.
+    fuzzy_name_column = next(
+        (c for c in quasi_identifier_columns if (role_by_column.get(c) or {}).get("role") == "NAME"), None
+    )
+    fuzzy_exact_columns = [c for c in quasi_identifier_columns if c != fuzzy_name_column]
+    fuzzy_duplicate_entities: list[dict] = []
+    if fuzzy_name_column and fuzzy_exact_columns and id_like_defaults:
+        fuzzy_duplicate_entities = detect_fuzzy_duplicate_entities(
+            rows, fuzzy_exact_columns, fuzzy_name_column, id_like_defaults[0]
+        )
+
     outlier_cols_preview = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
     top_code_cols_preview = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
 
@@ -918,6 +937,7 @@ with tab_analyze:
     total_conflicting_records = sum(len(v) for v in conflicting_id_findings.values())
     total_birth_date_rows = sum(len(v) for v in birth_date_findings.values())
     total_duplicate_entity_rows = sum(len(d["row_indices"]) for d in duplicate_entities)
+    total_fuzzy_duplicate_entity_rows = sum(len(d["row_indices"]) for d in fuzzy_duplicate_entities)
     total_domain_findings = len(clinical_range_findings) + len(invalid_fips_findings) + len(invalid_zip_findings) + len(survey_weight_columns)
 
     st.markdown("**Requires attention**")
@@ -946,6 +966,14 @@ with tab_analyze:
         with st.expander(f"🔴 {len(duplicate_entities)} potential duplicate entit{'ies' if len(duplicate_entities) != 1 else 'y'} ({total_duplicate_entity_rows} record(s))"):
             st.caption(f"Same {', '.join(quasi_identifier_columns)}, but different {id_col} — the same real-world entity may have been assigned more than one ID.")
             st.caption("Full evidence in **Review & Approve** below — DataForensics never merges records.")
+
+    if fuzzy_duplicate_entities:
+        any_attention_items = True
+        id_col = id_like_defaults[0] if id_like_defaults else "id"
+        n = len(fuzzy_duplicate_entities)
+        with st.expander(f"🟠 {n} possible duplicate entit{'ies' if n != 1 else 'y'} ({total_fuzzy_duplicate_entity_rows} record(s)) — similar but not identical names"):
+            st.caption(f"Same {', '.join(fuzzy_exact_columns)} and a very similar (not identical) {fuzzy_name_column}, but different {id_col} — could be a spelling variant of the same real-world entity.")
+            st.caption("Weaker evidence than an exact match — full evidence in **Review & Approve** below. DataForensics never merges records.")
 
     if birth_date_findings:
         any_attention_items = True
@@ -1169,6 +1197,7 @@ with tab_analyze:
         + len(age_year_findings)
         + len(unit_inconsistency_findings)
         + total_domain_findings
+        + len(fuzzy_duplicate_entities)
     )
     st.markdown("**Overall**")
     total_findings = n_high_priority + n_worth_reviewing
@@ -1566,7 +1595,8 @@ with tab_analyze:
         or invalid_zip_findings or survey_weight_columns
     )
     any_cross_column_findings = bool(
-        birth_date_findings or duplicate_entities or column_order_findings or conditional_column_findings
+        birth_date_findings or duplicate_entities or fuzzy_duplicate_entities
+        or column_order_findings or conditional_column_findings
     )
     any_format_integrity_findings = bool(
         shape_outlier_findings or whitespace_anomaly_counts or invisible_char_counts
@@ -2089,6 +2119,56 @@ with tab_analyze:
                 st.markdown("**Recommended action:**  \nHuman review — DataForensics never merges records.")
                 st.markdown("**Automatic modification:**  \nNONE.")
 
+        if fuzzy_duplicate_entities:
+            total_fuzzy_flagged_rows = sum(len(d["row_indices"]) for d in fuzzy_duplicate_entities)
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Possible duplicate entity</span>'
+                f'<div class="dataforensics-card-title">{len(fuzzy_duplicate_entities)} group(s), {total_fuzzy_flagged_rows} row(s) — same {", ".join(_esc(c) for c in fuzzy_exact_columns)}, similar {_esc(fuzzy_name_column)}, different {_esc(id_like_defaults[0])}</div>'
+                f'<div class="dataforensics-card-evidence">a spelling variant, not an exact match — weaker evidence than an exact duplicate entity</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    f"**Rule:**  \n2+ rows share the same value (case/whitespace-normalized) across every one of "
+                    f"{', '.join(_esc(c) for c in fuzzy_exact_columns)}, and {_esc(fuzzy_name_column)} is a close "
+                    f"but not exact match (rapidfuzz token-sort similarity ≥90%), but the rows have different "
+                    f"{_esc(id_like_defaults[0])} values."
+                )
+                st.markdown("**Evidence:**")
+                fuzzy_pii_cols = [c for c in [*fuzzy_exact_columns, fuzzy_name_column] if is_pii_like_column(c)]
+                fuzzy_entity_lines = []
+                for d in fuzzy_duplicate_entities[:10]:
+                    row_x, row_y = rows[d["row_indices"][0]], rows[d["row_indices"][1]]
+                    name_x = _PII_EVIDENCE_MASK if fuzzy_name_column in fuzzy_pii_cols else row_x.get(fuzzy_name_column)
+                    name_y = _PII_EVIDENCE_MASK if fuzzy_name_column in fuzzy_pii_cols else row_y.get(fuzzy_name_column)
+                    exact_desc = ", ".join(
+                        f"{c}={_PII_EVIDENCE_MASK if c in fuzzy_pii_cols else row_x.get(c)}" for c in fuzzy_exact_columns
+                    )
+                    fuzzy_entity_lines.append(
+                        f"{exact_desc}, {fuzzy_name_column}: {name_x!r} vs {name_y!r} ({d['similarity']}% similar) → "
+                        f"{id_like_defaults[0]} values {', '.join(d['id_values'])} "
+                        f"(rows {', '.join(str(i + 1) for i in d['row_indices'])})"
+                    )
+                st.markdown(
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in fuzzy_entity_lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if len(fuzzy_duplicate_entities) > 10:
+                    st.caption(f"...and {len(fuzzy_duplicate_entities) - 10} more group(s) not shown.")
+                st.markdown(
+                    f"**What the system knows:**  \nThese rows match exactly on {', '.join(_esc(c) for c in fuzzy_exact_columns)} "
+                    f"and are a close (not exact) match on {_esc(fuzzy_name_column)}, but carry different "
+                    f"{_esc(id_like_defaults[0])} values."
+                )
+                st.markdown(
+                    "**What it does NOT know:**  \nWhether this is genuinely a spelling variant of the same "
+                    "real-world entity, or two different people who happen to have similar-sounding names and "
+                    "share the exact-matched fields by coincidence — weaker evidence than an exact match on "
+                    "every field."
+                )
+                st.markdown("**Recommended action:**  \nHuman review — DataForensics never merges records.")
+                st.markdown("**Automatic modification:**  \nNONE.")
+
     rules = {
         "version": 1,
         "primary_key": primary_key or columns[:1],
@@ -2247,6 +2327,9 @@ with tab_analyze:
             invalid_zip_findings=invalid_zip_findings,
             survey_weight_columns=survey_weight_columns,
             duplicate_entities=duplicate_entities,
+            fuzzy_duplicate_entities=fuzzy_duplicate_entities,
+            fuzzy_exact_columns=fuzzy_exact_columns,
+            fuzzy_name_column=fuzzy_name_column,
             birth_date_findings=birth_date_findings,
             quasi_identifier_columns=quasi_identifier_columns,
             id_like_defaults=id_like_defaults,
@@ -2304,7 +2387,8 @@ with tab_multifile:
         "not name alone — checks referential integrity, key uniqueness, and relationship shape (one-to-one "
         "vs. one-to-many) across a pair you pick, then either reconciles shared-column values record-by-record "
         "(one-to-one) or checks that shared columns stay consistent across repeated keys (one-to-many). "
-        "Nothing here is ever joined or merged; this is discovery only."
+        "Nothing here is ever joined or merged automatically — the optional Merge section at the bottom only "
+        "produces a combined file if you explicitly review and approve it."
     )
     multi_files = st.file_uploader(
         "Upload 2 or more CSV/TSV/JSON/Excel files",
@@ -2510,6 +2594,69 @@ with tab_multifile:
                             st.caption("Never concludes which value is correct — DataForensics doesn't guess. Review with study documentation.")
                         else:
                             st.success(f"Every shared column stays consistent across all repeated {cand['column_b']} values in {cand['file_b']}.")
+
+                st.subheader("Merge these files")
+                if cardinality["relationship"] == "no_matches":
+                    st.caption("No matching keys between these files — nothing to merge.")
+                else:
+                    st.caption(
+                        f"Combine {cand['file_a']} and {cand['file_b']} into one downloadable file, joined on "
+                        f"{cand['column_a']} ↔ {cand['column_b']}. Unlike everything else on this page, this "
+                        "actually produces new data — nothing is combined until you review the preview below and "
+                        "explicitly approve it."
+                    )
+                    join_choice = st.radio(
+                        "Join type",
+                        [
+                            f"Left — keep every {cand['file_b']} row (blank {cand['file_a']} columns where there's no match)",
+                            "Inner — keep only rows matched in both files",
+                        ],
+                        key=f"merge_join_type__{cand['file_a']}__{cand['file_b']}",
+                    )
+                    merge_join_type = "left" if join_choice.startswith("Left") else "inner"
+                    merge_preview = merge_files_on_key(
+                        file_rows[cand["file_a"]], file_rows[cand["file_b"]],
+                        cand["column_a"], cand["column_b"],
+                        cand["file_a"], cand["file_b"],
+                        join_type=merge_join_type,
+                    )
+                    mc1, mc2, mc3 = st.columns(3)
+                    mc1.metric("Output rows", f"{merge_preview['total_count']:,}")
+                    mc2.metric("Matched", f"{merge_preview['matched_count']:,}")
+                    mc3.metric("Unmatched", f"{merge_preview['unmatched_count']:,}")
+                    shared_merge_columns = sorted(
+                        (set(file_rows[cand["file_a"]][0]) & set(file_rows[cand["file_b"]][0]))
+                        - {cand["column_a"], cand["column_b"]}
+                    ) if file_rows[cand["file_a"]] and file_rows[cand["file_b"]] else []
+                    if shared_merge_columns:
+                        example_col = shared_merge_columns[0]
+                        st.caption(
+                            f"Column(s) present in both files ({', '.join(shared_merge_columns)}) are kept as BOTH "
+                            f"separately (e.g. \"{example_col} ({cand['file_a']})\" and \"{example_col} "
+                            f"({cand['file_b']})\") rather than one silently overwriting the other — check "
+                            "Value reconciliation above first if you want to know exactly where they disagree."
+                        )
+                    approve_merge = st.checkbox(
+                        "I've reviewed this and approve merging these files",
+                        key=f"merge_approve__{cand['file_a']}__{cand['file_b']}",
+                    )
+                    if approve_merge:
+                        merge_buffer = io.StringIO()
+                        merge_writer = csv.DictWriter(merge_buffer, fieldnames=merge_preview["columns"])
+                        merge_writer.writeheader()
+                        merge_writer.writerows(merge_preview["rows"])
+                        merged_file_name = f"merged_{cand['file_a']}"
+                        st.download_button(
+                            f"⬇ Download {merged_file_name}",
+                            data=merge_buffer.getvalue(),
+                            file_name=merged_file_name,
+                            mime="text/csv",
+                            width="stretch",
+                        )
+                        st.success(
+                            f"Merge approved — {merge_preview['total_count']:,} row(s), "
+                            f"{len(merge_preview['columns'])} column(s)."
+                        )
     elif multi_files:
         st.info("Upload at least 2 files to discover relationships between them.")
     else:

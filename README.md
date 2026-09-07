@@ -62,6 +62,7 @@ DataForensics can surface findings such as:
 
 * Duplicate participant IDs
 * Potential duplicate records
+* The same real-world entity recorded under two different IDs — an exact match on identifying fields, or a spelling variant (e.g. "Jon Smith" vs. "John Smith" on the same birth date)
 * Missing-value sentinels such as `-99` or `"Refused"`
 * Inconsistent categorical values
 * Ambiguous date formats and impossible date ordering
@@ -81,6 +82,7 @@ DataForensics can surface findings such as:
 * Potential identifier columns
 * FIPS, ZIP, and other identifier formatting issues
 * Potential referential-integrity problems across files, a candidate join key that isn't actually unique, and field-level value discrepancies between two files sharing a key (record-by-record for a one-to-one relationship, or consistency-across-repeated-keys for a one-to-many relationship)
+* An accurate, previewable row-merge of two files on a confirmed key — offered only after the checks above, never automatic
 
 Every finding includes the evidence used to flag it and clearly distinguishes a **potential issue** from a confirmed error.
 
@@ -90,10 +92,10 @@ The tool is intentionally conservative.
 
 * **No automatic deletion of outliers**
 * **No automatic imputation**
-* **No automatic fuzzy deduplication**
+* **No automatic fuzzy deduplication** — a fuzzy near-duplicate entity is always a suggestion, never auto-merged
 * **No automatic unit conversion**
 * **No silent category remapping**
-* **No row-level merging of separate datasets**
+* **No merging of separate datasets without explicit review and approval** — the Multi-File Relationships tab's merge step shows a full preview (row counts, matched/unmatched, which columns disagree) before producing anything
 * **No claims that a dataset is scientifically valid simply because checks pass**
 
 If DataForensics cannot determine what a value means from the available evidence, it reports the uncertainty rather than guessing.
@@ -143,7 +145,7 @@ Upload a CSV, TSV, JSON, or Excel file and DataForensics produces a dataset inve
 * Optional Survey, Clinical & Research, and Geographic profiles
 * Before/after transformation review
 * Dataset fingerprints for tracking schema and distribution drift between versions
-* Multi-file relationship, referential-integrity, and value-reconciliation checks
+* Multi-file relationship, referential-integrity, and value-reconciliation checks, plus an approval-gated row-merge with a full before-you-commit preview
 
 After reviewing the findings, approve individual transformations and export the cleaned dataset together with its audit documentation.
 

@@ -15,6 +15,7 @@ from dataforensics.investigate import (
     detect_conflicting_id_records,
     detect_duplicate_entities,
     detect_duplicate_rows,
+    detect_fuzzy_duplicate_entities,
     detect_encoding_corruption,
     detect_invisible_characters,
     detect_missingness_co_occurrence,
@@ -433,6 +434,77 @@ def test_detect_duplicate_entities_empty_quasi_identifier_list_flags_nothing():
     # silently flag the entire dataset as one giant "duplicate entity."
     rows = [{"id": "1", "age": "10"}, {"id": "2", "age": "20"}, {"id": "3", "age": "30"}]
     assert detect_duplicate_entities(rows, [], "id") == []
+
+
+def test_detect_fuzzy_duplicate_entities_catches_a_real_typo():
+    rows = [
+        {"id": "1", "name": "Jon Smith", "dob": "1960-02-18"},
+        {"id": "2", "name": "John Smith", "dob": "1960-02-18"},
+    ]
+    dups = detect_fuzzy_duplicate_entities(rows, ["dob"], "name", "id")
+    assert len(dups) == 1
+    assert dups[0]["row_indices"] == [0, 1]
+    assert dups[0]["id_values"] == ["1", "2"]
+    assert dups[0]["similarity"] >= 90
+
+
+def test_detect_fuzzy_duplicate_entities_handles_swapped_word_order():
+    # token_sort_ratio (not plain fuzz.ratio) so "Smith, Jon" vs "Jon
+    # Smith" -- a realistic cross-system re-entry -- still matches.
+    rows = [
+        {"id": "1", "name": "Smith Jon", "dob": "1960-02-18"},
+        {"id": "2", "name": "Jon Smith", "dob": "1960-02-18"},
+    ]
+    dups = detect_fuzzy_duplicate_entities(rows, ["dob"], "name", "id")
+    assert len(dups) == 1
+
+
+def test_detect_fuzzy_duplicate_entities_requires_the_exact_columns_to_match():
+    rows = [
+        {"id": "1", "name": "Jon Smith", "dob": "1960-02-18"},
+        {"id": "2", "name": "John Smith", "dob": "1975-06-01"},  # different DOB
+    ]
+    assert detect_fuzzy_duplicate_entities(rows, ["dob"], "name", "id") == []
+
+
+def test_detect_fuzzy_duplicate_entities_skips_genuinely_dissimilar_names():
+    rows = [
+        {"id": "1", "name": "Jon Smith", "dob": "1960-02-18"},
+        {"id": "2", "name": "Maria Alvarez", "dob": "1960-02-18"},
+    ]
+    assert detect_fuzzy_duplicate_entities(rows, ["dob"], "name", "id") == []
+
+
+def test_detect_fuzzy_duplicate_entities_skips_exact_name_matches():
+    # An exact match (after normalization) is detect_duplicate_entities'
+    # job, not this function's -- avoids double-reporting the same pair.
+    rows = [
+        {"id": "1", "name": "Jon Smith", "dob": "1960-02-18"},
+        {"id": "2", "name": "jon smith", "dob": "1960-02-18"},
+    ]
+    assert detect_fuzzy_duplicate_entities(rows, ["dob"], "name", "id") == []
+
+
+def test_detect_fuzzy_duplicate_entities_skips_same_id():
+    rows = [
+        {"id": "1", "name": "Jon Smith", "dob": "1960-02-18"},
+        {"id": "1", "name": "John Smith", "dob": "1960-02-18"},
+    ]
+    assert detect_fuzzy_duplicate_entities(rows, ["dob"], "name", "id") == []
+
+
+def test_detect_fuzzy_duplicate_entities_skips_rows_with_incomplete_fields():
+    rows = [
+        {"id": "1", "name": "Jon Smith", "dob": ""},
+        {"id": "2", "name": "John Smith", "dob": ""},
+    ]
+    assert detect_fuzzy_duplicate_entities(rows, ["dob"], "name", "id") == []
+
+
+def test_detect_fuzzy_duplicate_entities_empty_inputs_flag_nothing():
+    rows = [{"id": "1", "name": "Jon Smith", "dob": "1960-02-18"}]
+    assert detect_fuzzy_duplicate_entities(rows, [], "name", "id") == []
+    assert detect_fuzzy_duplicate_entities(rows, ["dob"], "", "id") == []
 
 
 def test_analyze_key_cardinality_one_to_one():

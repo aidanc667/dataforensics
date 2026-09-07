@@ -78,7 +78,8 @@ src/dataforensics/
 ├── typing_guards.py   # ID/PII pattern guards, sentinel classification
 ├── dictionary.py       # data dictionary: dtype, category, missingness,
 │                       # outliers, top-coding, per column
-├── investigate.py      # pre-rules heuristic findings: duplicates, category
+├── investigate.py      # pre-rules heuristic findings: duplicates (exact
+│                       # and fuzzy-name entity matching), category
 │                       # clusters, missingness patterns, semantic roles,
 │                       # value-format integrity (whitespace, invisible
 │                       # characters, encoding corruption, inconsistent
@@ -88,7 +89,8 @@ src/dataforensics/
 │                       # cross-file value reconciliation — suggestions
 │                       # only, never mutates data
 ├── validation.py        # three-tier (Error/Warning/Suggestion) rule engine
-├── harmonize.py          # rules-driven transform + crosswalk mapping
+├── harmonize.py          # rules-driven transform + crosswalk mapping +
+│                          # approval-gated cross-file row-merge
 ├── quality_score.py       # deterministic, rule-based quality scoring —
 │                          # every sub-score traces to a specific check above
 ├── audit_report.py         # self-contained HTML investigation report
@@ -100,11 +102,17 @@ src/dataforensics/
 └── viewer.py                     # report-type classification for app.py
 ```
 
-`app.py` is a read-only Streamlit viewer over the same engine the CLI
-uses — no new logic, no write path, no way to trigger a transformation the
-CLI itself couldn't. One real asymmetry: `investigate.py` has grown a much
-larger battery of heuristic checks than the CLI's `scan` command surfaces —
-they're currently wired into the Streamlit app only, not the CLI's output.
+`app.py` is mostly a read-only Streamlit viewer over the same engine the
+CLI uses. Two real asymmetries: `investigate.py` has grown a much larger
+battery of heuristic checks than the CLI's `scan` command surfaces —
+they're currently wired into the Streamlit app only, not the CLI's
+output — and the Multi-File Relationships tab's merge step is a genuine
+write path the CLI has no equivalent of at all (`harmonize.merge_files_on_key`,
+called only from that one UI section, gated behind an explicit approval
+checkbox after a full preview). Every other write path in the app —
+sentinel mapping, category merges, date-format declarations — mirrors a
+rule the CLI's `harmonize` command could also apply from a YAML file;
+the cross-file merge is the one capability that exists only here.
 
 ## Investigation heuristics (`investigate.py`)
 
@@ -114,7 +122,14 @@ to (e.g. a check restricted to `free_text` columns is simply never
 evaluated against an `id` or `categorical` one).
 
 - **Duplicates** — exact row duplicates, near-duplicate entities sharing
-  quasi-identifiers, conflicting records under the same primary key.
+  quasi-identifiers exactly, near-duplicate entities sharing quasi-
+  identifiers where the name field is a fuzzy (not exact) match —
+  "Jon Smith" vs. "John Smith" on the same birth date — using
+  rapidfuzz's word-order-independent token_sort_ratio and a stricter
+  90% threshold than category clustering's 85% (mistaking two different
+  people for one entity is a more consequential error than merging two
+  spellings of a category), and conflicting records under the same
+  primary key.
 - **Missing-value sentinels** — literal values (`-99`, `"Refused"`) that
   function as missing without being a null cell.
 - **Inconsistent categories** — fuzzy-matched near-duplicate values
@@ -173,6 +188,19 @@ evaluated against an `id` or `categorical` one).
   shared with the "parent" file stay consistent across every row sharing
   the same repeated key (e.g. sex/birth_date shouldn't change from one
   visit row to the next for the same participant).
+- **Cross-file merge** (`harmonize.merge_files_on_key`, not
+  `investigate.py` — this one actually produces data, gated behind an
+  explicit approval checkbox after a full preview) — a real row-level
+  join on the confirmed key, output grain matching the "child"/"many"
+  file, with the parent file's columns broadcast onto every matching
+  row. Any column name present in both files (other than the key
+  itself) is suffixed with each file's name on both sides rather than
+  one silently overwriting the other — the exact same disagreement value
+  reconciliation already surfaces, never silently resolved by the merge.
+  Supports left (keep every child row) and inner (only matched rows)
+  join semantics; a duplicated parent key uses its first occurrence, the
+  same convention `reconcile_shared_records` already uses for the
+  identical ambiguity.
 
 ## CLI surface
 
@@ -230,7 +258,7 @@ schema and emits them as two independently-harmonized tables instead.
 
 ## Testing strategy
 
-502 tests across four levels: unit (per guard/rule), integration (full
+527 tests across four levels: unit (per guard/rule), integration (full
 pipeline on a fixture), regression (golden input → expected output,
 byte-identical on rerun), and end-to-end (CLI/Streamlit invocation through to
 manifest). CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs

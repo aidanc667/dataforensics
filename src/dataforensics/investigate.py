@@ -388,6 +388,86 @@ def detect_duplicate_entities(rows: list[dict], quasi_identifier_columns: list[s
     return duplicates
 
 
+_FUZZY_ENTITY_MIN_SIMILARITY = 90
+# A block this large carries no real identifying signal (usually a
+# common/placeholder exact_columns value), and comparing every pair
+# within it would be both slow (O(block_size^2)) and meaningless --
+# matches the same-spirit guard _MAX_CARDINALITY_FOR_FUZZY_MATCH already
+# applies to category clustering.
+_FUZZY_ENTITY_MAX_BLOCK_SIZE = 200
+
+
+def detect_fuzzy_duplicate_entities(
+    rows: list[dict], exact_columns: list[str], fuzzy_column: str, id_column: str
+) -> list[dict]:
+    """Like detect_duplicate_entities, but for the harder, more common
+    real case: the same entity recorded under two different IDs where
+    one identifying field has a genuine spelling variant, not just
+    different whitespace/casing -- "Jon Smith" vs "John Smith" on the
+    same birth date, which detect_duplicate_entities' exact match can
+    never catch.
+
+    `exact_columns` (e.g. birth_date, sex) must still match exactly --
+    this is "blocking," a standard entity-resolution technique: only
+    rows that already agree on the cheap, typo-resistant fields are ever
+    compared to each other, instead of comparing every row in the
+    dataset to every other row (which would be both O(n^2) and mostly
+    meaningless). `fuzzy_column` (e.g. name) is compared with
+    rapidfuzz's token_sort_ratio -- not plain fuzz.ratio, the metric
+    detect_similar_categories uses for single-token category values --
+    because a name is commonly re-entered in a different word order
+    across two source systems ("Smith, Jon" vs "Jon Smith"), which a
+    plain edit-distance ratio would score as very dissimilar despite
+    being the same name. A match requires
+    >=_FUZZY_ENTITY_MIN_SIMILARITY, deliberately stricter than category
+    clustering's 85 -- mistaking two different real people for the same
+    entity is a more consequential mistake than merging two spellings of
+    one category.
+
+    Skips a pair that's already an EXACT match on `fuzzy_column` too
+    (that's detect_duplicate_entities' job, not this function's) and a
+    pair that already shares the same `id_column` value (not evidence of
+    a duplicate ENTITY at all). Never concludes these ARE the same
+    entity, and never merges anything -- only that a human should look,
+    exactly like detect_duplicate_entities.
+    """
+    if not exact_columns or not fuzzy_column:
+        return []
+    from rapidfuzz import fuzz
+
+    blocks: dict[tuple, list[int]] = {}
+    for i, row in enumerate(rows):
+        exact_values = [row.get(c) for c in exact_columns]
+        fuzzy_value = row.get(fuzzy_column)
+        if any(v in (None, "") for v in exact_values) or fuzzy_value in (None, ""):
+            continue
+        key = tuple(str(v).strip().casefold() for v in exact_values)
+        blocks.setdefault(key, []).append(i)
+
+    duplicates = []
+    for indices in blocks.values():
+        if len(indices) < 2 or len(indices) > _FUZZY_ENTITY_MAX_BLOCK_SIZE:
+            continue
+        for a, b in combinations(indices, 2):
+            id_a, id_b = rows[a].get(id_column), rows[b].get(id_column)
+            if id_a == id_b:
+                continue
+            val_a = str(rows[a].get(fuzzy_column, "")).strip().casefold()
+            val_b = str(rows[b].get(fuzzy_column, "")).strip().casefold()
+            if val_a == val_b:
+                continue
+            similarity = fuzz.token_sort_ratio(val_a, val_b)
+            if similarity >= _FUZZY_ENTITY_MIN_SIMILARITY:
+                duplicates.append(
+                    {
+                        "row_indices": sorted((a, b)),
+                        "id_values": sorted(str(v) for v in {id_a, id_b}),
+                        "similarity": round(similarity, 1),
+                    }
+                )
+    return sorted(duplicates, key=lambda d: d["row_indices"])
+
+
 # --------------------------------------------------------------------- #
 # Dataset fingerprinting — stateless by design. This module never writes
 # a fingerprint to disk itself; the caller (e.g. the app) offers the

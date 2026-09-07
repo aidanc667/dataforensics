@@ -1,6 +1,11 @@
 import pytest
 
-from dataforensics.harmonize import HarmonizeSafetyError, assert_row_and_column_integrity, compute_safety_report
+from dataforensics.harmonize import (
+    HarmonizeSafetyError,
+    assert_row_and_column_integrity,
+    compute_safety_report,
+    merge_files_on_key,
+)
 
 
 def test_row_count_mismatch_raises():
@@ -191,3 +196,58 @@ def test_compute_safety_report_no_columns_modified():
     report = compute_safety_report(rows, rows, primary_key=["id"])
     assert report["modified_columns"] == []
     assert set(report["unmodified_columns"]) == {"id", "age"}
+
+
+def test_merge_files_on_key_left_join_keeps_every_file_b_row():
+    file_a = [{"pid": "1", "sex": "F"}, {"pid": "2", "sex": "M"}]
+    file_b = [
+        {"pid": "1", "visit_date": "2024-01-01"},
+        {"pid": "1", "visit_date": "2024-06-01"},
+        {"pid": "3", "visit_date": "2024-02-01"},  # no match in file_a
+    ]
+    result = merge_files_on_key(file_a, file_b, "pid", "pid", "participants.csv", "visits.csv", join_type="left")
+    assert result["total_count"] == 3
+    assert result["matched_count"] == 2
+    assert result["unmatched_count"] == 1
+    assert set(result["columns"]) == {"pid", "visit_date", "sex"}
+    # unmatched row keeps its own fields, blank for the unmatched side
+    unmatched_row = next(r for r in result["rows"] if r["pid"] == "3")
+    assert unmatched_row["sex"] == ""
+
+
+def test_merge_files_on_key_inner_join_drops_unmatched():
+    file_a = [{"pid": "1", "sex": "F"}]
+    file_b = [{"pid": "1", "visit_date": "2024-01-01"}, {"pid": "2", "visit_date": "2024-02-01"}]
+    result = merge_files_on_key(file_a, file_b, "pid", "pid", "a.csv", "b.csv", join_type="inner")
+    assert result["total_count"] == 1
+    assert result["matched_count"] == 1
+    assert result["unmatched_count"] == 1  # counted even though excluded from the output
+    assert result["rows"][0]["pid"] == "1"
+
+
+def test_merge_files_on_key_suffixes_shared_non_key_columns():
+    file_a = [{"pid": "1", "sex": "F"}]
+    file_b = [{"pid": "1", "sex": "M"}]  # disagrees with file_a -- must never silently overwrite
+    result = merge_files_on_key(file_a, file_b, "pid", "pid", "participants.csv", "visits.csv")
+    assert "sex (participants.csv)" in result["columns"]
+    assert "sex (visits.csv)" in result["columns"]
+    assert "sex" not in result["columns"]
+    assert result["rows"][0]["sex (participants.csv)"] == "F"
+    assert result["rows"][0]["sex (visits.csv)"] == "M"
+
+
+def test_merge_files_on_key_uses_first_occurrence_for_duplicate_parent_key():
+    file_a = [{"pid": "1", "sex": "F"}, {"pid": "1", "sex": "M"}]  # duplicate key, first wins
+    file_b = [{"pid": "1", "visit_date": "2024-01-01"}]
+    result = merge_files_on_key(file_a, file_b, "pid", "pid", "a.csv", "b.csv")
+    assert result["rows"][0]["sex"] == "F"
+
+
+def test_merge_files_on_key_never_mutates_inputs():
+    file_a = [{"pid": "1", "sex": "F"}]
+    file_b = [{"pid": "1", "visit_date": "2024-01-01"}]
+    file_a_copy = [dict(r) for r in file_a]
+    file_b_copy = [dict(r) for r in file_b]
+    merge_files_on_key(file_a, file_b, "pid", "pid", "a.csv", "b.csv")
+    assert file_a == file_a_copy
+    assert file_b == file_b_copy
