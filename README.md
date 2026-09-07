@@ -68,6 +68,8 @@ DataForensics can surface findings such as:
 * Values outside configured ranges
 * Statistical outliers and top-coded distributions
 * Values that don't match a column's own dominant format (phone numbers, emails, names, or any other consistently-formatted column)
+* A personal identifier (SSN, email, phone) pasted into a column whose name gives no indication it holds PII
+* A negative flag column paired with a dependent detail column that should logically be empty (`has_spouse = No` but `spouse_name` is filled in)
 * Whitespace padding, invisible/control characters, and encoding corruption (mojibake)
 * Numbers written in a different format than the rest of their column (`"$50,000"` vs. plain numbers)
 * Two measurement units mixed in one column (kg/lb, cm/in, dollars/thousands)
@@ -78,7 +80,7 @@ DataForensics can surface findings such as:
 * Conflicting values across related variables
 * Potential identifier columns
 * FIPS, ZIP, and other identifier formatting issues
-* Potential referential-integrity problems across files, and field-level value discrepancies between two files sharing a key
+* Potential referential-integrity problems across files, a candidate join key that isn't actually unique, and field-level value discrepancies between two files sharing a key (record-by-record for a one-to-one relationship, or consistency-across-repeated-keys for a one-to-many relationship)
 
 Every finding includes the evidence used to flag it and clearly distinguishes a **potential issue** from a confirmed error.
 

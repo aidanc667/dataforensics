@@ -122,6 +122,8 @@ def build_investigation_findings(
     future_date_findings: dict[str, list] | None = None,
     temporal_gap_findings: dict[str, dict] | None = None,
     column_order_findings: dict[tuple[str, str], list] | None = None,
+    conditional_column_findings: dict[tuple[str, str], list] | None = None,
+    pii_content_findings: dict[str, dict[str, int]] | None = None,
 ) -> list[dict]:
     """One canonical list of findings -- tier (high/review/info), a
     title, real evidence lines (PII-masked where the column warrants it),
@@ -251,6 +253,38 @@ def build_investigation_findings(
             "confidence": "Medium",
             "resolved": 0,
             "total": len(items),
+        })
+
+    for (flag_col, detail_col), items in (conditional_column_findings or {}).items():
+        evidence = [
+            f"row {i + 1:,} → {flag_col} = {_mask(flag_col, fv)}, {detail_col} = {_mask(detail_col, dv)}"
+            for i, fv, dv in items
+        ]
+        findings.append({
+            "tier": "high",
+            "title": f"{len(items)} record(s) where {flag_col} = \"No\" but {detail_col} is filled in",
+            "evidence": evidence[:10],
+            "more": max(0, len(items) - 10),
+            "detection": f"{flag_col} looks like a yes/no flag by name and {detail_col} shares that same stem; {flag_col} holds a clearly negative value while {detail_col} is non-empty.",
+            "suggested_action": "Review manually — one of the two fields is likely wrong, or the columns aren't actually related.",
+            "confidence": "Medium",
+            "resolved": 0,
+            "total": len(items),
+        })
+
+    for col, counts in (pii_content_findings or {}).items():
+        total = sum(counts.values())
+        kinds = ", ".join(f"{count} {label}(s)" for label, count in counts.items())
+        findings.append({
+            "tier": "high",
+            "title": f"{col}: {kinds} found in cell values (column not named as PII)",
+            "evidence": [],
+            "more": 0,
+            "detection": "This column's name did not match a known PII naming pattern, but at least one cell value contains a substring shaped like an SSN, email address, or phone number.",
+            "suggested_action": "Review manually — consider masking this column in any report or export if it does contain real personal data.",
+            "confidence": "Medium",
+            "resolved": 0,
+            "total": total,
         })
 
     for col, count in (whitespace_anomaly_counts or {}).items():

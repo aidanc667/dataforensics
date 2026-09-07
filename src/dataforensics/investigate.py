@@ -24,7 +24,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from itertools import combinations
 
-from dataforensics.typing_guards import parse_finite_float
+from dataforensics.typing_guards import is_pii_like_column, parse_finite_float
 from dataforensics.validation import is_ambiguous_date, is_date_like, is_iso_date
 
 COMMON_SENTINEL_STRINGS = {
@@ -1586,3 +1586,231 @@ def detect_missingness_co_occurrence(rows: list[dict], columns: list[str]) -> li
                     }
                 )
     return sorted(results, key=lambda r: r["overlap_fraction"], reverse=True)
+
+
+# --------------------------------------------------------------------- #
+# Content-based PII detection -- unlike typing_guards.is_pii_like_column
+# (which only ever looks at a column's NAME), this scans cell VALUES for
+# an SSN/email/phone shape regardless of what the column is called, so a
+# personal identifier pasted into an innocuously-named free-text column
+# (a "notes" field with an email address typed into it) is still caught.
+# --------------------------------------------------------------------- #
+
+_PII_CONTENT_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
+    ("email address", re.compile(r"\b[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}\b")),
+    # Requires a separator between digit groups (dash/dot/space, optional
+    # parens around the area code) -- deliberately does NOT match a bare
+    # 10-digit run, which collides too often with ordinary research
+    # identifiers (a study ID, a FIPS+block code, a truncated barcode).
+    ("phone number", re.compile(r"\b\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b")),
+]
+
+
+def detect_pii_content(rows: list[dict], columns: list[str]) -> dict[str, dict[str, int]]:
+    """{column: {pattern_label: count}} for any column NOT already
+    name-flagged by `is_pii_like_column` (nothing new to learn there)
+    whose cell VALUES contain something shaped like an SSN, email
+    address, or phone number. Uses `search`, not `match`, so a PII-shaped
+    substring embedded in longer free text ("call John at 555-123-4567")
+    is still caught, not just a cell that's nothing but the identifier.
+
+    Deliberately excludes credit-card-like or other generic long-digit
+    shapes -- those collide too often with ordinary research identifiers
+    to flag with acceptable precision. SSN/email/phone are specific
+    enough (real separators, a real @domain) to keep false positives low.
+    """
+    findings: dict[str, dict[str, int]] = {}
+    for col in columns:
+        if is_pii_like_column(col):
+            continue
+        counts: dict[str, int] = {}
+        for row in rows:
+            raw = str(row.get(col, ""))
+            if raw == "":
+                continue
+            for label, pattern in _PII_CONTENT_PATTERNS:
+                if pattern.search(raw):
+                    counts[label] = counts.get(label, 0) + 1
+        if counts:
+            findings[col] = counts
+    return findings
+
+
+def find_pii_content_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+    """Real (row_index, pattern_label) pairs for `detect_pii_content` --
+    deliberately never returns the actual matched substring (that IS the
+    PII this check exists to catch), only which pattern matched and
+    where, so the evidence for a privacy finding can't itself become the
+    leak."""
+    evidence = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, ""))
+        if raw == "":
+            continue
+        for label, pattern in _PII_CONTENT_PATTERNS:
+            if pattern.search(raw):
+                evidence.append((i, label))
+                break
+    return evidence
+
+
+# --------------------------------------------------------------------- #
+# Conditional cross-field consistency -- a naming-convention pair check
+# in the same spirit as find_ordered_column_pairs, but for "flag /
+# dependent detail" columns instead of "before / after" columns: a
+# clearly negative flag value (has_spouse=No) paired with a non-empty
+# value in the column it should be gating (spouse_name filled in).
+# --------------------------------------------------------------------- #
+
+_CONDITIONAL_FLAG_PREFIXES = ("has_", "is_", "had_", "was_")
+_CONDITIONAL_FLAG_SUFFIXES = ("_flag", "_status", "_indicator")
+_CONDITIONAL_NEGATIVE_VALUES = {"no", "false", "0", "never", "none", "n", "not applicable", "n/a", "na"}
+_CONDITIONAL_MIN_STEM_LENGTH = 3
+
+
+def _strip_conditional_affixes(name: str) -> str:
+    lowered = name.lower()
+    for prefix in _CONDITIONAL_FLAG_PREFIXES:
+        if lowered.startswith(prefix):
+            lowered = lowered[len(prefix):]
+            break
+    else:
+        for suffix in _CONDITIONAL_FLAG_SUFFIXES:
+            if lowered.endswith(suffix):
+                lowered = lowered[: -len(suffix)]
+                break
+    return lowered.strip("_")
+
+
+def find_conditional_column_pairs(columns: list[str]) -> list[tuple[str, str]]:
+    """Column pairs where one column's name looks like a yes/no flag
+    (has_X, is_X, X_flag, X_status, ...) and another column's name
+    contains that same stem X, on a real "_"-boundary, once the flag-style
+    prefix/suffix is stripped -- e.g. has_spouse / spouse_name,
+    is_deceased / deceased_date. A name-pattern suggestion only, exactly
+    like find_ordered_column_pairs: the actual inconsistency (if any) is
+    checked against real values by find_conditional_column_violation_evidence.
+    """
+    pairs = []
+    for flag_col in columns:
+        lowered = flag_col.lower()
+        is_flag_shaped = lowered.startswith(_CONDITIONAL_FLAG_PREFIXES) or lowered.endswith(_CONDITIONAL_FLAG_SUFFIXES)
+        if not is_flag_shaped:
+            continue
+        stem = _strip_conditional_affixes(flag_col)
+        if len(stem) < _CONDITIONAL_MIN_STEM_LENGTH:
+            continue
+        stem_pattern = re.compile(r"(^|_)" + re.escape(stem) + r"($|_)")
+        for other_col in columns:
+            if other_col == flag_col:
+                continue
+            other_lowered = other_col.lower()
+            other_is_flag_shaped = other_lowered.startswith(_CONDITIONAL_FLAG_PREFIXES) or other_lowered.endswith(
+                _CONDITIONAL_FLAG_SUFFIXES
+            )
+            if other_is_flag_shaped:
+                continue  # don't pair two flag-shaped columns with each other
+            if stem_pattern.search(other_lowered):
+                pairs.append((flag_col, other_col))
+    return pairs
+
+
+def find_conditional_column_violation_evidence(
+    rows: list[dict], flag_column: str, detail_column: str
+) -> list[tuple[int, str, str]]:
+    """Real (row_index, flag_value, detail_value) triples where
+    `flag_column` holds a clearly negative value ("No", "False", "0",
+    "Never", "N/A", ...) in the same row where `detail_column` is
+    non-empty -- e.g. has_spouse=No but spouse_name is filled in.
+
+    Only checks the negative-flag-but-filled-detail direction, never the
+    reverse ("flag=Yes but detail empty") -- that direction collides
+    constantly with ordinary missingness already surfaced by the
+    completeness checks, and isn't a logical impossibility the way a
+    filled detail behind a negative flag is.
+    """
+    evidence = []
+    for i, row in enumerate(rows):
+        flag_raw = str(row.get(flag_column, "")).strip()
+        detail_raw = str(row.get(detail_column, "")).strip()
+        if flag_raw == "" or detail_raw == "":
+            continue
+        if flag_raw.casefold() in _CONDITIONAL_NEGATIVE_VALUES:
+            evidence.append((i, flag_raw, detail_raw))
+    return evidence
+
+
+def detect_conditional_column_violations(
+    rows: list[dict], columns: list[str]
+) -> dict[tuple[str, str], list[tuple[int, str, str]]]:
+    """{(flag_column, detail_column): evidence} for every name-matched
+    conditional column pair (see find_conditional_column_pairs) that has
+    at least one row violating it."""
+    results: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+    for flag_col, detail_col in find_conditional_column_pairs(columns):
+        evidence = find_conditional_column_violation_evidence(rows, flag_col, detail_col)
+        if evidence:
+            results[(flag_col, detail_col)] = evidence
+    return results
+
+
+# --------------------------------------------------------------------- #
+# Multi-file: key uniqueness and repeated-key internal consistency --
+# checks specific to "several files from the same study sharing a key"
+# that go beyond the pairwise referential-integrity/reconciliation
+# checks above.
+# --------------------------------------------------------------------- #
+
+
+def analyze_key_uniqueness(values: list[str]) -> dict:
+    """How many of a candidate "parent" key column's non-empty values are
+    actually unique. A plausible primary/join key usually has none
+    repeated; this never refuses to treat a column as a key when it does
+    (some legitimate designs repeat a key), only surfaces the fact for a
+    human to judge -- the same restraint check_referential_integrity uses.
+    """
+    non_empty = [v for v in values if v not in (None, "")]
+    counts = Counter(non_empty)
+    duplicated = {v: c for v, c in counts.items() if c > 1}
+    return {
+        "total_count": len(non_empty),
+        "unique_count": len(counts),
+        "duplicate_value_count": len(duplicated),
+        "duplicate_examples": sorted(duplicated.items(), key=lambda kv: kv[1], reverse=True)[:10],
+    }
+
+
+def check_repeated_key_column_consistency(
+    rows: list[dict], key_column: str, compare_columns: list[str]
+) -> dict[str, list[dict]]:
+    """For a key column that legitimately repeats (a one-to-many
+    relationship, e.g. one participant_id across many visit rows), check
+    whether each of `compare_columns` stays the SAME across every row
+    sharing a key value. These are typically columns that also exist in
+    the "parent" file (demographics repeated onto every child row) and
+    should describe one entity, not vary by event.
+
+    Returns {column: [{"key": key_value, "values": [...], "row_count": n}, ...]}
+    for any column where the same key value has 2+ distinct non-empty
+    values across its rows -- e.g. the same participant_id recorded with
+    two different sex values across their visit rows. Never concludes
+    which value (if any) is correct, only that the same key disagrees
+    with itself.
+    """
+    by_key: dict[str, list[int]] = {}
+    for i, row in enumerate(rows):
+        k = str(row.get(key_column, "")).strip()
+        if k:
+            by_key.setdefault(k, []).append(i)
+
+    results: dict[str, list[dict]] = {col: [] for col in compare_columns}
+    for k, indices in by_key.items():
+        if len(indices) < 2:
+            continue
+        for col in compare_columns:
+            distinct_values = {str(rows[i].get(col, "")).strip() for i in indices} - {""}
+            if len(distinct_values) > 1:
+                results[col].append({"key": k, "values": sorted(distinct_values), "row_count": len(indices)})
+
+    return {col: items for col, items in results.items() if items}

@@ -1,10 +1,17 @@
 import pytest
 
 from dataforensics.investigate import (
+    analyze_key_uniqueness,
     check_referential_integrity,
+    check_repeated_key_column_consistency,
     compare_fingerprints,
     compute_dataset_fingerprint,
+    detect_conditional_column_violations,
+    detect_pii_content,
     discover_shared_key_columns,
+    find_conditional_column_pairs,
+    find_conditional_column_violation_evidence,
+    find_pii_content_evidence,
     infer_semantic_role,
     reconcile_shared_records,
 )
@@ -255,3 +262,154 @@ def test_reconcile_shared_records_no_shared_keys():
     result = reconcile_shared_records(file_a, file_b, "id", "id", ["sex"])
     assert result["records_compared"] == 0
     assert result["record_discrepancy_rate"] == 0.0
+
+
+# --------------------------------------------------------------------- #
+# Content-based PII detection
+# --------------------------------------------------------------------- #
+
+def test_detect_pii_content_finds_email_in_unnamed_column():
+    rows = [{"notes": "please contact john@example.com for follow-up"}, {"notes": "no issues"}]
+    findings = detect_pii_content(rows, ["notes"])
+    assert findings == {"notes": {"email address": 1}}
+
+
+def test_detect_pii_content_finds_ssn():
+    rows = [{"comments": "SSN on file: 123-45-6789"}, {"comments": "n/a"}]
+    findings = detect_pii_content(rows, ["comments"])
+    assert findings["comments"]["SSN"] == 1
+
+
+def test_detect_pii_content_finds_phone_with_separators():
+    rows = [{"comments": "call back at 555-123-4567 tomorrow"}]
+    findings = detect_pii_content(rows, ["comments"])
+    assert findings["comments"]["phone number"] == 1
+
+
+def test_detect_pii_content_ignores_bare_digit_run_no_separators():
+    # A 10-digit run with no separators collides too often with ordinary
+    # research identifiers -- deliberately not treated as a phone number.
+    rows = [{"study_code": "5551234567"}]
+    findings = detect_pii_content(rows, ["study_code"])
+    assert findings == {}
+
+
+def test_detect_pii_content_skips_columns_already_pii_named_by_column_name():
+    # "email" already gets caught by typing_guards.is_pii_like_column's
+    # name-based check -- nothing new for this content-based check to add.
+    rows = [{"email": "john@example.com"}]
+    findings = detect_pii_content(rows, ["email"])
+    assert findings == {}
+
+
+def test_detect_pii_content_no_findings_on_clean_data():
+    rows = [{"notes": "patient reports mild headache"}]
+    findings = detect_pii_content(rows, ["notes"])
+    assert findings == {}
+
+
+def test_find_pii_content_evidence_never_includes_the_matched_value():
+    rows = [{"notes": "email me at jane.doe@example.com please"}]
+    evidence = find_pii_content_evidence(rows, "notes")
+    assert evidence == [(0, "email address")]
+    # The raw value must never leak into the evidence tuple itself.
+    assert "jane.doe@example.com" not in str(evidence)
+
+
+# --------------------------------------------------------------------- #
+# Conditional (flag / dependent detail) column consistency
+# --------------------------------------------------------------------- #
+
+def test_find_conditional_column_pairs_matches_has_prefix():
+    pairs = find_conditional_column_pairs(["has_spouse", "spouse_name", "age"])
+    assert pairs == [("has_spouse", "spouse_name")]
+
+
+def test_find_conditional_column_pairs_requires_underscore_boundary():
+    # "data" is a substring of "database_name" but not on a real "_"
+    # boundary -- must NOT match, the same discipline is_id_like_column
+    # uses to avoid "id" matching inside an unrelated word.
+    pairs = find_conditional_column_pairs(["has_data", "database_name"])
+    assert pairs == []
+
+
+def test_find_conditional_column_pairs_ignores_short_stems():
+    # "is_ok" strips to stem "ok" (length 2) -- too short to be a
+    # meaningful match, would produce noisy false pairings.
+    pairs = find_conditional_column_pairs(["is_ok", "ok_reason"])
+    assert pairs == []
+
+
+def test_find_conditional_column_pairs_does_not_pair_two_flag_columns():
+    pairs = find_conditional_column_pairs(["has_spouse", "is_spouse_deceased"])
+    assert pairs == []
+
+
+def test_find_conditional_column_violation_evidence_flags_negative_flag_with_filled_detail():
+    rows = [
+        {"has_spouse": "No", "spouse_name": "Jane Doe"},   # violation
+        {"has_spouse": "Yes", "spouse_name": "Jane Doe"},  # consistent, not flagged
+        {"has_spouse": "No", "spouse_name": ""},           # consistent, not flagged
+        {"has_spouse": "no", "spouse_name": "John"},        # case-insensitive match
+    ]
+    evidence = find_conditional_column_violation_evidence(rows, "has_spouse", "spouse_name")
+    assert evidence == [(0, "No", "Jane Doe"), (3, "no", "John")]
+
+
+def test_detect_conditional_column_violations_end_to_end():
+    rows = [{"has_spouse": "No", "spouse_name": "Jane Doe"}, {"has_spouse": "Yes", "spouse_name": "John Smith"}]
+    result = detect_conditional_column_violations(rows, ["has_spouse", "spouse_name"])
+    assert result == {("has_spouse", "spouse_name"): [(0, "No", "Jane Doe")]}
+
+
+def test_detect_conditional_column_violations_no_findings_when_consistent():
+    rows = [{"has_spouse": "No", "spouse_name": ""}, {"has_spouse": "Yes", "spouse_name": "John Smith"}]
+    result = detect_conditional_column_violations(rows, ["has_spouse", "spouse_name"])
+    assert result == {}
+
+
+# --------------------------------------------------------------------- #
+# Multi-file: key uniqueness and repeated-key consistency
+# --------------------------------------------------------------------- #
+
+def test_analyze_key_uniqueness_all_unique():
+    result = analyze_key_uniqueness(["1", "2", "3"])
+    assert result["total_count"] == 3
+    assert result["unique_count"] == 3
+    assert result["duplicate_value_count"] == 0
+    assert result["duplicate_examples"] == []
+
+
+def test_analyze_key_uniqueness_with_duplicates():
+    result = analyze_key_uniqueness(["1", "1", "2", "", None])
+    assert result["total_count"] == 3
+    assert result["unique_count"] == 2
+    assert result["duplicate_value_count"] == 1
+    assert result["duplicate_examples"] == [("1", 2)]
+
+
+def test_check_repeated_key_column_consistency_flags_disagreement():
+    rows = [
+        {"participant_id": "1", "sex": "F", "visit_date": "2020-01-01"},
+        {"participant_id": "1", "sex": "M", "visit_date": "2020-06-01"},  # sex disagrees with row 0
+        {"participant_id": "2", "sex": "M", "visit_date": "2020-01-01"},
+    ]
+    result = check_repeated_key_column_consistency(rows, "participant_id", ["sex"])
+    assert result == {"sex": [{"key": "1", "values": ["F", "M"], "row_count": 2}]}
+
+
+def test_check_repeated_key_column_consistency_no_findings_when_consistent():
+    rows = [
+        {"participant_id": "1", "sex": "F"},
+        {"participant_id": "1", "sex": "F"},
+        {"participant_id": "2", "sex": "M"},
+    ]
+    result = check_repeated_key_column_consistency(rows, "participant_id", ["sex"])
+    assert result == {}
+
+
+def test_check_repeated_key_column_consistency_ignores_singleton_keys():
+    # A key appearing only once has nothing to disagree with itself about.
+    rows = [{"participant_id": "1", "sex": "F"}, {"participant_id": "2", "sex": "M"}]
+    result = check_repeated_key_column_consistency(rows, "participant_id", ["sex"])
+    assert result == {}

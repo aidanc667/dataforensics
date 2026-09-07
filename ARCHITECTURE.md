@@ -126,6 +126,17 @@ evaluated against an `id` or `categorical` one).
   column's own dominant format" check (phone numbers, emails, names, or
   any other column with a real convention), via a run-length character-
   class shape signature, not a fixed list of column types.
+- **Content-based PII detection** — unlike `typing_guards.is_pii_like_column`
+  (name-only), scans cell VALUES for an SSN/email/phone shape regardless
+  of what the column is called, catching a personal identifier pasted
+  into an innocuously-named free-text column. Never surfaces the matched
+  substring itself in a finding, title, or evidence line — only which
+  pattern matched and where.
+- **Conditional column consistency** — a naming-convention pair check
+  (has_X / X_detail, is_X / X_status, ...) for a negative flag paired
+  with a non-empty dependent detail column in the same row (has_spouse =
+  No but spouse_name is filled in), the same name-then-verify-against-
+  values approach as cross-column ordering below.
 - **Format-integrity** — leading/trailing/doubled whitespace; invisible
   characters (zero-width spaces, non-breaking spaces, embedded BOMs);
   encoding corruption/mojibake, detected via the actual corruption
@@ -153,10 +164,15 @@ evaluated against an `id` or `categorical` one).
   value-set changes, and a "possibly renamed" heuristic for a removed+added
   column pair with matching stats.
 - **Cross-file reconciliation** — shared-key discovery, referential
-  integrity, and (for a one-to-one key relationship) field-by-field value
-  reconciliation between two files — the closest this tool comes to an
-  accuracy check, without pretending it can independently verify which
-  source holds the truth.
+  integrity, key uniqueness (does a candidate parent key actually repeat
+  when it shouldn't?), and relationship-shape-aware follow-up checks:
+  for a one-to-one key relationship, field-by-field value reconciliation
+  between the two files — the closest this tool comes to an accuracy
+  check, without pretending it can independently verify which source
+  holds the truth; for a one-to-many relationship, whether the columns
+  shared with the "parent" file stay consistent across every row sharing
+  the same repeated key (e.g. sex/birth_date shouldn't change from one
+  visit row to the next for the same participant).
 
 ## CLI surface
 
@@ -214,7 +230,7 @@ schema and emits them as two independently-harmonized tables instead.
 
 ## Testing strategy
 
-480 tests across four levels: unit (per guard/rule), integration (full
+502 tests across four levels: unit (per guard/rule), integration (full
 pipeline on a fixture), regression (golden input → expected output,
 byte-identical on rerun), and end-to-end (CLI/Streamlit invocation through to
 manifest). CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs

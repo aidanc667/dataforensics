@@ -368,6 +368,48 @@ class TestBuildInvestigationFindings:
         assert PII_EVIDENCE_MASK in evidence_line
         assert "1980-02-15" not in evidence_line and "1980-02-01" not in evidence_line
 
+    def test_conditional_column_finding_reflects_the_real_violation(self):
+        conditional_findings = {
+            ("has_pet", "pet_name"): [(2, "No", "Fido")],
+        }
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(conditional_column_findings=conditional_findings)
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "high"
+        assert f["total"] == 1
+        assert 'has_pet = "No" but pet_name is filled in' in f["title"]
+        assert "row 3" in f["evidence"][0]
+        assert "Fido" in f["evidence"][0]
+
+    def test_conditional_column_finding_on_pii_like_column_masks_evidence(self):
+        conditional_findings = {
+            ("has_spouse", "spouse_name"): [(0, "No", "Jane Doe")],
+        }
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(conditional_column_findings=conditional_findings)
+        )
+        evidence_line = findings[0]["evidence"][0]
+        assert PII_EVIDENCE_MASK in evidence_line
+        assert "Jane Doe" not in evidence_line
+
+    def test_pii_content_finding_reflects_the_real_counts(self):
+        findings = build_investigation_findings(
+            **_base_findings_kwargs(
+                pii_content_findings={"notes": {"email address": 2, "SSN": 1}}
+            )
+        )
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["tier"] == "high"
+        assert f["total"] == 3
+        assert "notes:" in f["title"]
+        assert "2 email address(s)" in f["title"] and "1 SSN(s)" in f["title"]
+        # The finding never carries per-row evidence -- only counts -- so
+        # the actual matched PII substring can never leak through it.
+        assert f["evidence"] == []
+
     def test_missingness_co_occurrence_finding_reflects_the_real_pattern(self):
         co_occurrence = [
             {

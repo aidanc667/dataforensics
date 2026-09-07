@@ -39,9 +39,11 @@ from dataforensics.investigate import (
     COMMON_SENTINEL_STRINGS,
     DATASET_PROFILES,
     analyze_key_cardinality,
+    analyze_key_uniqueness,
     analyze_temporal_freshness,
     build_missingness_overview,
     check_referential_integrity,
+    check_repeated_key_column_consistency,
     classify_column_types,
     compare_fingerprints,
     compute_dataset_fingerprint,
@@ -50,6 +52,7 @@ from dataforensics.investigate import (
     detect_ambiguous_date_columns,
     detect_candidate_sentinels,
     detect_column_order_violations,
+    detect_conditional_column_violations,
     detect_conflicting_id_records,
     detect_duplicate_entities,
     detect_duplicate_rows,
@@ -58,6 +61,7 @@ from dataforensics.investigate import (
     detect_missingness_co_occurrence,
     detect_missingness_concentration,
     detect_numeric_representation_inconsistency,
+    detect_pii_content,
     detect_similar_categories,
     detect_survey_weight_columns,
     detect_temporal_gaps,
@@ -76,6 +80,7 @@ from dataforensics.investigate import (
     find_invalid_zip_evidence,
     find_invisible_character_evidence,
     find_numeric_representation_evidence,
+    find_pii_content_evidence,
     find_sentinel_evidence,
     find_unit_inconsistency_evidence,
     find_value_shape_outlier_evidence,
@@ -297,6 +302,16 @@ def _invisible_char_evidence_lines(column: str, evidence: list[tuple[int, str]])
         shown = _PII_EVIDENCE_MASK if pii else _make_invisible_characters_visible(value)
         lines.append(f"row {row_index + 1:,} → {column} = {shown}")
     return lines
+
+
+def _pii_content_evidence_lines(evidence: list[tuple[int, str]]) -> list[str]:
+    """Format (row_index, pattern_label) pairs from `find_pii_content_evidence`
+    as evidence lines. Never shows the matched value itself -- unlike
+    `_evidence_lines`, which only masks a value when the COLUMN is
+    PII-like by name, this finding exists specifically because the
+    column's name did NOT signal PII, so the matched substring is the
+    only thing that would leak it."""
+    return [f"row {row_index + 1:,} → contains what looks like a {label}" for row_index, label in evidence]
 
 
 def _evidence_panel(
@@ -726,6 +741,18 @@ with tab_analyze:
     # semantic role rather than naming convention.
     column_order_findings = detect_column_order_violations(rows, columns)
 
+    # Always on -- same name-pattern-then-verify-against-values approach
+    # as column_order_findings above, but for "flag / dependent detail"
+    # pairs instead of "before / after" pairs (has_spouse=No but
+    # spouse_name is filled in).
+    conditional_column_findings = detect_conditional_column_violations(rows, columns)
+
+    # Always on -- scans cell VALUES (not just column names) for an
+    # SSN/email/phone shape, catching PII that leaked into an
+    # innocuously-named column (e.g. an email pasted into a "notes"
+    # field) that is_pii_like_column's name-based check can never see.
+    pii_content_findings = detect_pii_content(rows, columns)
+
     # Always on -- freshness/timeliness of every date-shaped column (by
     # actual value shape via classify_column_types, not just a
     # name-pattern role), plus future-dated values and irregular gaps in
@@ -929,6 +956,23 @@ with tab_analyze:
                 st.markdown(f"- {before_col} is after {after_col} in {len(evidence)} row(s)")
             st.caption("The column names suggest one value should never exceed the other (start/end, min/max, admission/discharge, ...). Full evidence in **Review & Approve** below.")
 
+    if conditional_column_findings:
+        any_attention_items = True
+        total_conditional_rows = sum(len(v) for v in conditional_column_findings.values())
+        with st.expander(f"🔴 {total_conditional_rows} record(s) with a logically inconsistent pair of columns"):
+            for (flag_col, detail_col), evidence in conditional_column_findings.items():
+                st.markdown(f"- {flag_col} says \"no\" but {detail_col} is filled in, in {len(evidence)} row(s)")
+            st.caption("A negative flag column (has_X = No) paired with a non-empty dependent detail column (X filled in). Full evidence in **Review & Approve** below.")
+
+    if pii_content_findings:
+        any_attention_items = True
+        total_pii_content_hits = sum(sum(counts.values()) for counts in pii_content_findings.values())
+        with st.expander(f"🔴 {total_pii_content_hits} possible personal identifier(s) found in a column not named as PII"):
+            for col, counts in pii_content_findings.items():
+                kinds = ", ".join(f"{count} {label}(s)" for label, count in counts.items())
+                st.markdown(f"- **{col}**: {kinds}")
+            st.caption("A cell value shaped like an SSN, email address, or phone number, in a column whose name gave no indication it holds personal data. Full evidence in **Review & Approve** below.")
+
     if future_date_findings:
         any_attention_items = True
         total_future_dates = sum(len(v) for v in future_date_findings.values())
@@ -1101,6 +1145,8 @@ with tab_analyze:
         + len(birth_date_findings)
         + len(column_order_findings)
         + len(future_date_findings)
+        + len(conditional_column_findings)
+        + len(pii_content_findings)
     )
     n_worth_reviewing = (
         sum(len(v) for v in sentinels.values())
@@ -1513,14 +1559,20 @@ with tab_analyze:
         clinical_range_findings or conflicting_id_findings or invalid_fips_findings
         or invalid_zip_findings or survey_weight_columns
     )
-    any_cross_column_findings = bool(birth_date_findings or duplicate_entities or column_order_findings)
+    any_cross_column_findings = bool(
+        birth_date_findings or duplicate_entities or column_order_findings or conditional_column_findings
+    )
     any_format_integrity_findings = bool(
         shape_outlier_findings or whitespace_anomaly_counts or invisible_char_counts
         or encoding_corruption_counts or numeric_representation_findings or age_year_findings
         or unit_inconsistency_findings
     )
     any_temporal_findings = bool(future_date_findings or temporal_gap_findings)
-    if outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings or any_format_integrity_findings or any_temporal_findings:
+    any_privacy_findings = bool(pii_content_findings)
+    if (
+        outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings
+        or any_format_integrity_findings or any_temporal_findings or any_privacy_findings
+    ):
         st.markdown('<div class="dataforensics-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
         st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
         for c, f in outlier_cols.items():
@@ -1678,6 +1730,25 @@ with tab_analyze:
                 known=f"This value sits in the smaller of two clusters whose ratio matches the {_esc(f['unit_a'])}-to-{_esc(f['unit_b'])} conversion factor almost exactly.",
                 not_known=f"Whether this value is genuinely in {_esc(f['unit_b']) if f['minority_side'] == 'high' else _esc(f['unit_a'])}, or the two clusters reflect a real subpopulation difference that happens to land near this ratio by coincidence.",
                 recommended_action="Review manually — confirm which unit each row was actually recorded in before analyzing this column.",
+            )
+        for col, counts in pii_content_findings.items():
+            kinds = ", ".join(f"{count} {label}(s)" for label, count in counts.items())
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Privacy</span>'
+                f'<div class="dataforensics-card-title">{_esc(col)}: {kinds} found in cell values</div>'
+                f'<div class="dataforensics-card-evidence">this column\'s name gave no indication it holds personal data</div></div>',
+                unsafe_allow_html=True,
+            )
+            _evidence_panel(
+                rule=(
+                    f"{_esc(col)} is not name-flagged as a PII-like column, but at least one cell value contains "
+                    "a substring shaped like an SSN (###-##-####), an email address, or a phone number with "
+                    "standard separators."
+                ),
+                lines=_pii_content_evidence_lines(find_pii_content_evidence(rows, col)),
+                known="This cell's value contains a substring matching the shape of a personal identifier.",
+                not_known="Whether this is genuinely someone's personal information, a coincidental format match, or placeholder/test data.",
+                recommended_action="Review manually — consider masking this column in any report or export if it does contain real personal data. DataForensics never redacts a value automatically.",
             )
         if dup_rows:
             st.markdown(
@@ -1886,6 +1957,41 @@ with tab_analyze:
                     "mislabeled/swapped) — only that both cannot be correct as recorded given their names."
                 )
                 st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which value is correct.")
+                st.markdown("**Automatic modification:**  \nNONE.")
+
+        for (flag_col, detail_col), evidence in conditional_column_findings.items():
+            st.markdown(
+                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Logical inconsistency</span>'
+                f'<div class="dataforensics-card-title">{len(evidence)} row(s) where {_esc(flag_col)} = "No" but {_esc(detail_col)} is filled in</div>'
+                f'<div class="dataforensics-card-evidence">{_esc(flag_col)} names a negative-value flag that {_esc(detail_col)} appears to depend on</div></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Why was this flagged?"):
+                st.markdown(
+                    f"**Rule:**  \n{_esc(flag_col)} looks like a yes/no flag by name (has_/is_/_flag/_status) and "
+                    f"{_esc(detail_col)} shares that same stem; when {_esc(flag_col)} holds a clearly negative "
+                    f"value (\"No\", \"False\", \"0\", \"Never\", ...), {_esc(detail_col)} should logically be empty."
+                )
+                st.markdown("**Evidence:**")
+                flag_pii = is_pii_like_column(flag_col)
+                detail_pii = is_pii_like_column(detail_col)
+                conditional_lines = [
+                    f"row {i + 1:,} → {flag_col} = {_PII_EVIDENCE_MASK if flag_pii else fv}, "
+                    f"{detail_col} = {_PII_EVIDENCE_MASK if detail_pii else dv}"
+                    for i, fv, dv in evidence[:10]
+                ]
+                st.markdown(
+                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in conditional_lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if len(evidence) > 10:
+                    st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
+                st.markdown(f"**What the system knows:**  \nIn these rows, {_esc(flag_col)} holds a negative value while {_esc(detail_col)} is non-empty.")
+                st.markdown(
+                    "**What it does NOT know:**  \nWhich of the two fields is wrong (or whether the flag and "
+                    "detail column are actually related the way their names suggest)."
+                )
+                st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which field is correct.")
                 st.markdown("**Automatic modification:**  \nNONE.")
 
         for col, evidence in future_date_findings.items():
@@ -2152,6 +2258,8 @@ with tab_analyze:
             future_date_findings=future_date_findings,
             temporal_gap_findings=temporal_gap_findings,
             column_order_findings=column_order_findings,
+            conditional_column_findings=conditional_column_findings,
+            pii_content_findings=pii_content_findings,
         )
         audit_report_html = build_audit_report_html(
             file_name=st.session_state["dataforensics_data_name"],
@@ -2187,7 +2295,9 @@ with tab_multifile:
     st.caption(
         "Upload 2+ files from the same study (e.g. participants.csv, visits.csv, labs.csv). "
         "DataForensics suggests which columns look like shared keys — by name AND by real value overlap, "
-        "not name alone — and checks referential integrity across a pair you pick. "
+        "not name alone — checks referential integrity, key uniqueness, and relationship shape (one-to-one "
+        "vs. one-to-many) across a pair you pick, then either reconciles shared-column values record-by-record "
+        "(one-to-one) or checks that shared columns stay consistent across repeated keys (one-to-many). "
         "Nothing here is ever joined or merged; this is discovery only."
     )
     multi_files = st.file_uploader(
@@ -2246,9 +2356,35 @@ with tab_multifile:
                         f"{cand['column_b']} value absent from {cand['file_a']}. This may be expected "
                         "by the study design, or may indicate a data issue — DataForensics doesn't assume either."
                     )
-                    st.write("Examples:", integrity["orphan_examples"])
+                    if is_pii_like_column(cand["column_b"]):
+                        st.write(f"Examples: {_PII_EVIDENCE_MASK} ({len(integrity['orphan_examples'])} shown)")
+                    else:
+                        st.write("Examples:", integrity["orphan_examples"])
                 else:
                     st.success(f"Every {cand['column_b']} value in {cand['file_b']} is present in {cand['file_a']}.")
+
+                st.subheader("Key uniqueness")
+                st.caption(
+                    f"Is {cand['file_a']}.{cand['column_a']} actually unique — the shape a primary/join key "
+                    "usually has? A repeated key doesn't mean the choice is wrong (some legitimate designs "
+                    "repeat a key), but it's worth knowing before treating it as one."
+                )
+                key_uniqueness = analyze_key_uniqueness(
+                    [str(r[cand["column_a"]]) for r in file_rows[cand["file_a"]] if r.get(cand["column_a"]) not in (None, "")]
+                )
+                ku1, ku2, ku3 = st.columns(3)
+                ku1.metric(f"{cand['column_a']} values in {cand['file_a']}", f"{key_uniqueness['total_count']:,}")
+                ku2.metric("Distinct values", f"{key_uniqueness['unique_count']:,}")
+                ku3.metric("Value(s) repeated", f"{key_uniqueness['duplicate_value_count']:,}")
+                if key_uniqueness["duplicate_value_count"]:
+                    pii = is_pii_like_column(cand["column_a"])
+                    if pii:
+                        st.warning(f"⚠ {key_uniqueness['duplicate_value_count']} {cand['column_a']} value(s) in {cand['file_a']} appear more than once.")
+                    else:
+                        examples = ", ".join(f"{v} (×{c})" for v, c in key_uniqueness["duplicate_examples"][:5])
+                        st.warning(f"⚠ {key_uniqueness['duplicate_value_count']} {cand['column_a']} value(s) in {cand['file_a']} appear more than once, e.g. {examples}.")
+                else:
+                    st.success(f"Every {cand['column_a']} value in {cand['file_a']} is unique.")
 
                 st.subheader("Relationship shape")
                 st.caption(
@@ -2330,6 +2466,44 @@ with tab_multifile:
                                         st.caption(f"...and {v['discrepancy'] - len(v['examples'])} more not shown.")
                         else:
                             st.success(f"Every shared column agrees for all {reconciliation['records_compared']:,} record(s) present in both files.")
+
+                elif cardinality["relationship"] == "one_to_many":
+                    st.subheader("Repeated-key consistency")
+                    st.caption(
+                        f"For a {cand['column_b']} value that legitimately repeats across several {cand['file_b']} "
+                        f"rows (e.g. one participant, several visits), do the columns {cand['file_b']} shares with "
+                        f"{cand['file_a']} actually stay the same across those rows? A demographic field like sex "
+                        "or birth date shouldn't change from one visit to the next for the same person."
+                    )
+                    repeated_key_compare_columns = sorted(
+                        (set(file_rows[cand["file_a"]][0]) & set(file_rows[cand["file_b"]][0]))
+                        - {cand["column_a"], cand["column_b"]}
+                    ) if file_rows[cand["file_a"]] and file_rows[cand["file_b"]] else []
+                    if not repeated_key_compare_columns:
+                        st.info(f"{cand['file_a']} and {cand['file_b']} have no other columns in common to compare.")
+                    else:
+                        repeated_key_findings = check_repeated_key_column_consistency(
+                            file_rows[cand["file_b"]], cand["column_b"], repeated_key_compare_columns
+                        )
+                        if repeated_key_findings:
+                            st.write("**Columns that disagree with themselves under the same key:**")
+                            for col, items in repeated_key_findings.items():
+                                pii = is_pii_like_column(col)
+                                with st.expander(f"{col}: {len(items)} {cand['column_b']} value(s) with disagreeing rows"):
+                                    inconsistency_lines = [
+                                        f"{cand['column_b']} {item['key']} ({item['row_count']} row(s)) → "
+                                        f"{_PII_EVIDENCE_MASK if pii else ', '.join(item['values'])}"
+                                        for item in items[:10]
+                                    ]
+                                    st.markdown(
+                                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in inconsistency_lines)}</div>',
+                                        unsafe_allow_html=True,
+                                    )
+                                    if len(items) > 10:
+                                        st.caption(f"...and {len(items) - 10} more not shown.")
+                            st.caption("Never concludes which value is correct — DataForensics doesn't guess. Review with study documentation.")
+                        else:
+                            st.success(f"Every shared column stays consistent across all repeated {cand['column_b']} values in {cand['file_b']}.")
     elif multi_files:
         st.info("Upload at least 2 files to discover relationships between them.")
     else:
