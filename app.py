@@ -407,12 +407,19 @@ def _rewrite_with_deduplicated_header(path: Path) -> Path:
 
 tab_analyze, tab_multifile = st.tabs(["Analyze & Clean", "Multi-File Relationships"])
 
-# Real, unmodified extracts from public U.S. government microdata -- each
-# subsampled from a much larger official release to a demo-appropriate
-# size (a few hundred rows), but every value is a genuine survey/exam
-# response, not synthetic data. Chosen specifically because each one
-# carries a well-documented, real messiness pattern this tool is built to
-# catch (see fixtures/demos/README.md for exact provenance and columns).
+# Two real, unmodified extracts from public U.S. government microdata --
+# each subsampled from a much larger official release to a demo-
+# appropriate size (a few hundred rows), but every value is a genuine
+# survey response, not synthetic data. Chosen specifically because each
+# one carries a well-documented, real messiness pattern this tool is
+# built to catch (see fixtures/demos/README.md for exact provenance and
+# columns). The third is a synthetic intake-form CSV, deliberately
+# constructed (not real data) to exercise the checks and the full
+# Review & Approve workflow that real, already-coded government
+# microdata structurally can't: text-label category variants worth
+# merging, literal sentinel codes worth mapping, and an ambiguous date
+# format -- none of which a pre-coded, dateless census/survey extract
+# can ever contain.
 _EXAMPLE_DATASETS = {
     "ACS PUMS (Census)": {
         "file": "acs_pums_person_dc.csv",
@@ -431,13 +438,13 @@ _EXAMPLE_DATASETS = {
             "sentinel codes (7/9/9999 = don't know/refused) and age top-coded at 80."
         ),
     },
-    "NHANES (CDC/NCHS)": {
-        "file": "nhanes_health_exam.csv",
+    "Messy CSV Example": {
+        "file": "messy_csv_example.csv",
         "caption": (
-            "CDC/NCHS, National Health and Nutrition Examination Survey, August "
-            "2021–August 2023 — combined demographic, body measurement, and smoking "
-            "questionnaire data. Real clinical exam data with genuine skip-pattern "
-            "missingness and an income-to-poverty ratio topped out at 5.00."
+            "Synthetic intake-form data — not real. Deliberately built to exercise the "
+            "full Review & Approve workflow: inconsistent category spellings, literal "
+            "missing-value codes, an ambiguous date, mixed measurement units, a "
+            "near-duplicate patient, and more."
         ),
     },
 }
@@ -468,18 +475,18 @@ with tab_analyze:
         st.session_state.pop("dataforensics_applied", None)
         st.session_state.pop("dataforensics_applied_at", None)
 
-    with st.expander("Or try a real public dataset — no upload needed"):
+    with st.expander("Or try an example dataset — no upload needed"):
         st.caption(
-            "Each is a real, unmodified extract from a public U.S. government release, "
-            "subsampled to a demo-appropriate size — not synthetic data."
+            "ACS PUMS and BRFSS are real, unmodified extracts from a public U.S. "
+            "government release, subsampled to a demo-appropriate size. Messy CSV "
+            "Example is synthetic, built to show the full Review & Approve workflow."
         )
         ex_cols = st.columns(3)
         for ex_col, (label, info) in zip(ex_cols, _EXAMPLE_DATASETS.items()):
             with ex_col:
                 # Fixed-height text block so all three "Load this dataset"
                 # buttons land on the same row regardless of how long each
-                # dataset's caption is (BRFSS's is noticeably shorter than
-                # the other two).
+                # dataset's caption is.
                 with st.container(height=190, border=False):
                     st.markdown(f"**{label}**")
                     st.caption(info["caption"])

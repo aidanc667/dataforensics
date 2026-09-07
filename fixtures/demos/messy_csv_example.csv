@@ -1,0 +1,21 @@
+participant_id,first_name,last_name,birth_date,admission_date,discharge_date,sex,marital_status,smoking_status,weight_lbs,has_spouse,spouse_name,notes
+P001,Maria,Alvarez,1985-03-04,2024-01-10,2024-01-15,Female,Married,Never,150,Yes,Carlos Alvarez,routine intake
+P002,James,Chen,1970-11-22,2024-01-11,2024-01-14,Male,Single,never,160,No,,no complaints
+P003,Linda,Park,1992-06-30,2024-01-12,2024-01-20,female,Divorced,N,165,No,,call back at 555-201-4488 if labs are abnormal
+P004,Robert,Diaz,1960-02-18,2024-01-13,2024-01-16,M,Married,0,170,Yes,Elena Diaz,stable
+P005,Robert,Diaz,1960-02-18,2024-01-13,2024-01-16,M,Married,0,170,Yes,Elena Diaz,stable
+P006,Susan,Nguyen,1988-09-09,2024-01-14,2024-01-18,FEMALE,Single,Never,175,No,,
+P007,David,Kim,1975-12-01,2024-01-15,2024-01-19,male,Widowed,-99,180,No,,
+P008,Patricia,Moore,1990-05-17,2024-01-16,2024-01-21,Female,Married,never,185,Yes,Thomas Moore,
+P009,Michael,Scott,1965-08-25,2024-01-17,2024-01-22, Male ,Single,Unknown,190,No,Jane Doe,has_spouse is No but a name is on file
+P010,Jennifer,Lee,1982-04-14,2024-01-18,2024-01-23,F,Divorced,Never,155,No,,
+P011,Carlos,Alvarez,1955-07-19,2024-01-19,2024-01-24,Male,Married,never,79,Yes,Maria Alvarez,weight recorded in kg by mistake
+P012,Angela,Brooks,1998-01-30,2024-01-20,2024-01-25,Female,Single,N,77,No,,weight recorded in kg by mistake
+P013,Thomas,Wright,1969-10-05,2024-01-21,2024-01-27,male,Married,0,75,Yes,Patricia Wright,weight recorded in kg by mistake
+P014,Karen,Young,1991-03-22,2024-01-22,2024-01-26,Female,Single,Never,195,No,,
+P015,Daniel,Hall,1973-06-11,2024-01-23,2024-01-28,Male,Divorced,never,200,No,,email me at d.hall.records@example.com with questions
+P016,Nancy,Allen,1987-02-08,03/04/2024,2024-01-30,Female,Married,Never,160,Yes,Peter Allen,
+P017,Paul,Wright,1958-12-15,2024-01-25,2024-01-29,Male,Widowed,N,205,No,,
+P018,Betty,King,1994-07-27,2024-01-26,2024-01-19,Female,Single,never,150,No,,discharge before admission -- check dates
+P019,Steven,Wright,2024-02-01,2024-01-27,2024-02-02,Male,Married,0,210,Yes, Mary  Wright ,birth date after admission -- check dates
+P020,Donna,Baker,1966-11-03,2024-01-28,2024-02-01,Female,Divorced,Never,165,No,,

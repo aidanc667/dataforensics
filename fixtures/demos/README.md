@@ -1,8 +1,10 @@
 # Example datasets
 
-Three real, unmodified extracts from public U.S. government microdata releases, each subsampled from a much larger official file down to a demo-appropriate size. Every value is a genuine survey/exam response — nothing here is synthetic. All three sources are U.S. federal government works and are in the public domain (no license restrictions, no attribution legally required).
+Two real, unmodified extracts from public U.S. government microdata releases, each subsampled from a much larger official file down to a demo-appropriate size. Every value is a genuine survey response — nothing here is synthetic. Both sources are U.S. federal government works and are in the public domain (no license restrictions, no attribution legally required).
 
 Selected specifically because each carries a well-documented, real messiness pattern DataForensics is built to catch — not curated to look artificially clean.
+
+The third example, `messy_csv_example.csv`, is different on purpose: it's synthetic. Real government microdata releases are already pre-coded (numeric category codes, not free-text labels) and contain no date columns at all, so genuinely they can never exercise a large share of what this tool does — category-spelling standardization, ambiguous-date detection, cross-column date ordering, near-duplicate-entity detection, unit-mixing — or the Review & Approve workflow those checks feed into (nothing in ACS PUMS or BRFSS ever needs an approved change). `messy_csv_example.csv` fills that gap.
 
 ## `acs_pums_person_dc.csv`
 
@@ -52,30 +54,27 @@ Selected specifically because each carries a well-documented, real messiness pat
 | `currently_smokes` | `SMOKDAY2` | Missing for anyone who answered "no" above — a real skip-pattern |
 | `diabetes_status` | `DIABETE4` | |
 
-## `nhanes_health_exam.csv`
+## `messy_csv_example.csv`
 
-**Source:** CDC/NCHS National Health and Nutrition Examination Survey (NHANES), August 2021–August 2023 cycle. Merged from the Demographics, Body Measures, and Smoking Questionnaire components on the shared `SEQN` respondent ID.
-**Downloaded from:** https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles/DEMO_L.xpt, `BMX_L.xpt`, `SMQ_L.xpt`
-**Documentation:** https://wwwn.cdc.gov/nchs/nhanes/continuousnhanes/default.aspx?Cycle=2021-2023
+**Source:** Synthetic. Not real data — no provenance, no real people. 20 fabricated clinical-intake records, 13 columns, hand-constructed so every planted issue is verified to actually fire against DataForensics' real detection code (not just eyeballed) before being committed.
 
-466 participant records, 13 columns, subsampled from 11,933 demographics records (stratified to guarantee the messy examples below survive subsampling, then shuffled).
-
-| Column | Original NHANES variable | Notes |
+| Issue planted | Where | What it demonstrates |
 |---|---|---|
-| `respondent_id` | `SEQN` | |
-| `sex` | `RIAGENDR` | |
-| `age_years` | `RIDAGEYR` | |
-| `race_ethnicity_code` | `RIDRETH3` | |
-| `education_level` | `DMDEDUC2` | Only asked of adults 20+ — missing for children, a real skip-pattern |
-| `marital_status` | `DMDMARTZ` | |
-| `income_poverty_ratio` | `INDFMPIR` | **Genuinely top-coded at 5.00** ("5 or more") |
-| `weight_kg` | `BMXWT` | |
-| `height_cm` | `BMXHT` | |
-| `bmi` | `BMXBMI` | |
-| `waist_cm` | `BMXWAIST` | |
-| `smoked_100_cigarettes` | `SMQ020` | 1/2 = yes/no, 7/9 = don't know/refused |
-| `currently_smokes` | `SMQ040` | Missing for most respondents (only asked if the above was "yes") — a real skip-pattern |
+| Inconsistent category spelling | `sex`: `Female`/`FEMALE`/`female`, `Male`/`male`/`" Male "` | Fuzzy category-cluster merge suggestion (needs approval) |
+| Literal missing-value codes | `smoking_status`: `-99`, `Unknown` | Candidate sentinel mapping (needs approval) |
+| Ambiguous date format | `admission_date`: one `03/04/2024` amid ISO dates | Ambiguous-date format picker (needs approval) |
+| Impossible date ordering (naming-convention pair) | `admission_date`/`discharge_date` reversed for one patient | Cross-column ordering violation |
+| Impossible date ordering (semantic role) | `birth_date` after `admission_date` for one patient | Birth-date-after-other-date violation |
+| Near-duplicate entity | Same name + birth date, two different `participant_id`s | Duplicate-entity detection |
+| Mixed measurement units | `weight_lbs`: three values actually recorded in kg | Unit-mixing detection (ratio matches the real kg↔lb conversion factor) |
+| Conditional column inconsistency | `has_spouse` = No but `spouse_name` filled in | Conditional flag/detail column violation |
+| PII pasted into free text | A phone number and an email address inside `notes` | Content-based PII detection |
+| Whitespace anomalies | Leading/trailing/doubled spaces in `sex` and `spouse_name` | Whitespace-anomaly detection |
+
+Unlike ACS PUMS and BRFSS, this file genuinely needs approved changes — loading it and clicking through Review & Approve exercises the part of the workflow the two real datasets never touch.
 
 ## Regenerating these files
 
-Not automated (deliberately — these are static, curated demo files, not a build step). To refresh with a newer survey cycle: download the source files linked above, load with `pandas.read_sas(..., format="xport")` for the CDC files or `pandas.read_csv` for PUMS, select/rename the columns in the tables above, and subsample. Decode any `bytes`-typed columns (SAS string columns come back as raw bytes from `pandas.read_sas`) before writing to CSV.
+The two real datasets are not automated (deliberately — these are static, curated demo files, not a build step). To refresh with a newer survey cycle: download the source files linked above, load with `pandas.read_sas(..., format="xport")` for the CDC files or `pandas.read_csv` for PUMS, select/rename the columns in the tables above, and subsample. Decode any `bytes`-typed columns (SAS string columns come back as raw bytes from `pandas.read_sas`) before writing to CSV.
+
+`messy_csv_example.csv` is hand-edited directly — if you add a new planted issue, verify it actually fires against the real `investigate.py`/`dictionary.py` functions before committing, the same way every issue currently in the file was verified.
