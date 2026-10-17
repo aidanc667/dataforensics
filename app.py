@@ -558,7 +558,7 @@ _SPECIMEN_HTML = (
 
 
 # The path shown on the first screen: what happens to a file, in order.
-_HOME_PATH = ("Upload", "Detect Issues", "Provide Insights", "Review &amp; Fix", "Cleaned Dataset")
+_HOME_PATH = ("Upload", "Detect Issues", "Get Insights", "Review &amp; Fix", "Cleaned Dataset")
 
 
 def _hero_html() -> str:
