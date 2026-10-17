@@ -550,6 +550,29 @@ class TestBuildAuditReportHtml:
         kwargs.update(overrides)
         return build_audit_report_html(**kwargs)
 
+    def test_file_hashes_shown_when_provided_and_escaped(self):
+        html = self._build(input_sha256="a" * 64, output_sha256="<b>x</b>")
+        assert "Input SHA-256" in html and "a" * 64 in html
+        assert "&lt;b&gt;x&lt;/b&gt;" in html
+        assert "SHA-256" not in self._build()
+
+    def test_approved_duplicate_removal_is_reported_not_denied(self):
+        # Regression: after 1 approved duplicate removal (4 -> 3 rows) the
+        # report still said "Rows deleted: 0 — DataForensics never deletes rows".
+        dedup = {
+            "row_key": {"id": "4"}, "column": "(entire row)", "original_value": "data row 4",
+            "new_value": "(removed: exact duplicate of data row 1)",
+            "transformation_rule": "drop_exact_duplicate_row", "reason": "Approved",
+        }
+        html = self._build(transformed_rows=ROWS[:3], mutations=[dedup], rows_removed=1)
+        assert "never deletes rows" not in html
+        assert "4 → 3" in html
+        assert "1 — exact duplicate rows" in html
+
+    def test_checks_performed_listed_when_provided(self):
+        html = self._build(checks_performed=["DF-01 Exact duplicate records", "DF-36 Round-number heaping"])
+        assert "DF-36 Round-number heaping" in html
+
     def test_contains_all_ten_numbered_sections(self):
         html = self._build()
         for i in range(1, 11):

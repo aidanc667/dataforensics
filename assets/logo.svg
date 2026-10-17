@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DataForensics">
+  <!-- flat ink-blue tile: a magnifying lens over a small bar chart -->
+  <rect width="64" height="64" rx="6" fill="#2C5D86"/>
+  <circle cx="27" cy="27" r="16" fill="none" stroke="#FFFFFF" stroke-width="4"/>
+  <rect x="19" y="27" width="4.5" height="8" fill="#FFFFFF"/>
+  <rect x="25" y="22" width="4.5" height="13" fill="#FFFFFF"/>
+  <rect x="31" y="18" width="4.5" height="17" fill="#F3D899"/>
+  <path d="M39 39 51 51" stroke="#FFFFFF" stroke-width="6" stroke-linecap="square"/>
+</svg>

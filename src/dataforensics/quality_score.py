@@ -61,9 +61,12 @@ def compute_quality_score(
 ) -> dict:
     """Five sub-scores (0-100) plus a worst-dimension-weighted `overall`.
 
-      - completeness: share of cells that are NOT null. Every column can
-        be null regardless of its type, so the whole cell grid is the
-        right denominator here -- no dilution concern.
+      - completeness: share of cells that are NOT null and NOT a candidate
+        missing-value code. Every column can be null regardless of its
+        type, so the whole cell grid is the right denominator here -- no
+        dilution concern. A code also costs validity (it masquerades as a
+        real value); once mapped to an empty cell, only completeness still
+        counts it, so cleaning codes can only raise the overall score.
       - uniqueness: share of rows that are NOT an exact duplicate of an
         earlier row.
       - validity: combines three checks. Two have DIFFERENT eligibility
@@ -131,7 +134,11 @@ def compute_quality_score(
     """
     total_cells = row_count * column_count
 
-    completeness = _score(null_cell_count, total_cells)
+    # A missing-value code (9999, "Refused") is missing data written as a
+    # value, so it counts against completeness too -- otherwise cleaning
+    # it into an honest empty cell would LOWER completeness, making the
+    # score fall exactly when the data got more truthful.
+    completeness = _score(null_cell_count + sentinel_flagged_cell_count, total_cells)
     uniqueness = _score(duplicate_row_count, row_count)
 
     sentinel_score = _score(sentinel_flagged_cell_count, total_cells)

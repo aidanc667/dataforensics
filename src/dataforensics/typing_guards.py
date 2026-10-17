@@ -135,7 +135,11 @@ def preserves_leading_zero(values: list[str]) -> bool:
 
 
 def classify_sentinel(value: object, sentinel_map: dict) -> str | None:
-    return sentinel_map.get(str(value))
+    """The approved replacement for a missing-value code, or None. Matched
+    after trimming, the same way codes are detected and their evidence is
+    listed -- otherwise " N/A " is shown to the analyst as an instance of
+    the approved "N/A" code but silently left in the cleaned file."""
+    return sentinel_map.get(str(value).strip())
 
 
 def parse_finite_float(value) -> float | None:

@@ -198,3 +198,20 @@ def test_consistency_not_diluted_by_columns_ineligible_for_category_checks():
         )
     )
     assert score["consistency"] < 50
+
+
+def test_cleaning_missing_value_codes_into_blanks_never_lowers_the_score():
+    # Regression: a 9999 code mapped to an empty cell moved its penalty
+    # from validity (where it was diluted) to completeness (where it
+    # wasn't), so cleaning BRFSS's codes dropped the overall score 93 -> 92.
+    before = compute_quality_score(**_base_kwargs(null_cell_count=40, sentinel_flagged_cell_count=60))
+    after = compute_quality_score(**_base_kwargs(null_cell_count=100, sentinel_flagged_cell_count=0))
+    assert after["completeness"] == before["completeness"]  # same 100 missing cells either way
+    assert after["validity"] > before["validity"]
+    assert after["overall"] >= before["overall"]
+
+
+def test_missing_value_codes_count_against_completeness():
+    # 100 of 1000 cells are codes -> pass rate 0.9 -> 0.81 -> 81.
+    score = compute_quality_score(**_base_kwargs(sentinel_flagged_cell_count=100))
+    assert score["completeness"] == 81

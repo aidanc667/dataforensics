@@ -143,3 +143,10 @@ def test_find_sentinel_like_values_respects_dominance_threshold():
 
 def test_find_sentinel_like_values_empty_input():
     assert find_sentinel_like_values([]) == set()
+
+
+def test_classify_sentinel_matches_padded_codes():
+    # Regression: " N/A " was listed as evidence for the approved "N/A"
+    # code (detection strips) but never mapped (lookup didn't).
+    assert classify_sentinel(" N/A ", {"N/A": ""}) == ""
+    assert classify_sentinel(" 9999", {"9999": ""}) == ""

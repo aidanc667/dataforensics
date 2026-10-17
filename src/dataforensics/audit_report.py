@@ -704,6 +704,10 @@ def build_audit_report_html(
     validation_report: dict,
     applied_at: str,
     dataset_type: str,
+    input_sha256: str | None = None,
+    output_sha256: str | None = None,
+    rows_removed: int = 0,
+    checks_performed: list[str] | None = None,
 ) -> str:
     """The full DataForensics Data Investigation Report: what did I
     receive, what does the data look like, what deserves attention, what
@@ -732,6 +736,11 @@ def build_audit_report_html(
     else:
         readiness_status, readiness_icon = "Ready with review", "🟢"
 
+    # `safety` describes the 1:1 value-level transform (its row counts are
+    # before any approved duplicate removal); the final file is shorter by
+    # `rows_removed`, and every row count shown below reflects that.
+    final_row_count = safety["row_count"]["after"] - rows_removed
+    value_mutations = [m for m in mutations if m["transformation_rule"] != "drop_exact_duplicate_row"]
     null_count_before = sum(f["null_count"] for f in dictionary.values())
     null_count_after = sum(1 for row in transformed_rows for v in row.values() if v == "")
     rows_changed = len({tuple(sorted(m["row_key"].items())) for m in mutations})
@@ -769,6 +778,8 @@ def build_audit_report_html(
     <p class="headline">{len(rows):,} record(s) · {len(columns)} variable(s) · {esc(format_bytes(file_size_bytes))}</p>
     <table class="kv"><tbody>
         <tr><th>File name</th><td>{esc(file_name)}</td></tr>
+        {f"<tr><th>Input SHA-256</th><td><code>{esc(input_sha256)}</code></td></tr>" if input_sha256 else ""}
+        {f"<tr><th>Cleaned output SHA-256</th><td><code>{esc(output_sha256)}</code></td></tr>" if output_sha256 else ""}
         <tr><th>Numeric variables</th><td>{type_counts.get('numeric', 0)}</td></tr>
         <tr><th>Categorical variables</th><td>{type_counts.get('categorical', 0)}</td></tr>
         <tr><th>Date variables</th><td>{type_counts.get('date', 0)}</td></tr>
@@ -841,6 +852,11 @@ def build_audit_report_html(
     # ---------------------------------------------------------------- #
     # 6. Transformation Log
     # ---------------------------------------------------------------- #
+    rows_deleted_text = (
+        f"{rows_removed:,} — exact duplicate rows, removed only because you approved it, each re-verified as identical to the row kept"
+        if rows_removed
+        else "0 — no row removal was approved"
+    )
     if mutations:
         log_rows = "".join(
             f"<tr><td>{esc(m['column'])}</td><td>{esc(m['original_value'])}</td><td>{esc(m['new_value'])}</td>"
@@ -853,8 +869,8 @@ def build_audit_report_html(
         </tr></thead><tbody>{log_rows}</tbody></table>
         <table class="kv"><tbody>
             <tr><th>Rows changed</th><td>{rows_changed:,}</td></tr>
-            <tr><th>Values changed</th><td>{len(mutations):,}</td></tr>
-            <tr><th>Rows deleted</th><td>0 — DataForensics never deletes rows</td></tr>
+            <tr><th>Values changed</th><td>{len(value_mutations):,}</td></tr>
+            <tr><th>Rows deleted</th><td>{rows_deleted_text}</td></tr>
             <tr><th>Columns deleted</th><td>0 — DataForensics never deletes columns</td></tr>
         </tbody></table>
         """
@@ -865,7 +881,11 @@ def build_audit_report_html(
     # 7. Integrity Verification
     # ---------------------------------------------------------------- #
     integrity_checks = [
-        ("Row count preserved", safety["row_count"]["passed"]),
+        (
+            "Row count preserved by every value-level change"
+            + (f" (then {rows_removed:,} approved duplicate row(s) removed)" if rows_removed else ""),
+            safety["row_count"]["passed"],
+        ),
         ("Column set preserved", safety["column_count"]["passed"]),
         ("No primary-key values collapsed together", safety["primary_key_uniqueness"]["passed"]),
         ("No unapproved values changed", True),  # unmodified_columns is proven byte-identical below
@@ -874,7 +894,7 @@ def build_audit_report_html(
     integrity_rows = "".join(f"<li>{'✅' if passed else '❌'} {esc(label)}</li>" for label, passed in integrity_checks)
     integrity_section = f"""
     <table class="kv"><tbody>
-        <tr><th>Rows</th><td>{safety['row_count']['before']:,} → {safety['row_count']['after']:,}</td></tr>
+        <tr><th>Rows</th><td>{safety['row_count']['before']:,} → {final_row_count:,}</td></tr>
         <tr><th>Columns</th><td>{safety['column_count']['before']} → {safety['column_count']['after']}</td></tr>
         <tr><th>Missing values</th><td>{null_count_before:,} → {null_count_after:,}</td></tr>
         <tr><th>Unique primary-key values</th><td>{safety['primary_key_uniqueness']['before']:,} → {safety['primary_key_uniqueness']['after']:,}</td></tr>
@@ -914,18 +934,25 @@ def build_audit_report_html(
     # ---------------------------------------------------------------- #
     # 10. Reproducibility & Provenance
     # ---------------------------------------------------------------- #
+    checks_text = (
+        esc(", ".join(checks_performed))
+        if checks_performed
+        else (
+            "duplicate rows, candidate missing-value sentinels, ambiguous dates, inconsistent category spellings, "
+            "statistical outliers (IQR), top-coding, substantial missingness, cross-column temporal ordering, "
+            "potential duplicate entities, and (if selected) domain-profile checks"
+        )
+    )
     provenance_section = f"""
     <table class="kv"><tbody>
         <tr><th>Original file</th><td>{esc(file_name)}</td></tr>
         <tr><th>Date/time processed (UTC)</th><td>{esc(applied_at)}</td></tr>
         <tr><th>DataForensics version</th><td>{esc(__version__)}</td></tr>
         <tr><th>Dataset type profile</th><td>{esc(dataset_type)}</td></tr>
-        <tr><th>Checks performed</th><td>duplicate rows, candidate missing-value sentinels, ambiguous dates,
-            inconsistent category spellings, statistical outliers (IQR), top-coding, substantial missingness,
-            cross-column temporal ordering, potential duplicate entities, and (if selected) domain-profile checks</td></tr>
+        <tr><th>Checks performed</th><td>{checks_text}</td></tr>
         <tr><th>Transformations approved</th><td>{len(mutations):,}</td></tr>
-        <tr><th>Records before → after</th><td>{safety['row_count']['before']:,} → {safety['row_count']['after']:,}</td></tr>
-        <tr><th>Values changed</th><td>{len(mutations):,}</td></tr>
+        <tr><th>Records before → after</th><td>{safety['row_count']['before']:,} → {final_row_count:,}</td></tr>
+        <tr><th>Values changed</th><td>{len(value_mutations):,}</td></tr>
     </tbody></table>
     <p class="muted">This report and the exported cleaned CSV together are the audit log for this run —
     the same inputs and the same approvals reproduce the same output.</p>

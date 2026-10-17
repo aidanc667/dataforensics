@@ -80,6 +80,22 @@ def deduplicate_header(header: list[str]) -> list[str]:
 
 
 def detect_encoding(path: Path) -> str:
+    """The file's text encoding. Bytes that decode cleanly as UTF-8 ARE
+    UTF-8: non-ASCII text in another encoding almost never forms valid
+    UTF-8 by accident, whereas charset_normalizer's statistical guess can
+    be wrong on small files -- it read a short UTF-8 CSV containing a
+    zero-width space as Windows-1251, turning "An\u200bn" into "AnвЂ‹n"
+    and silently corrupting every non-ASCII value. The guesser is only
+    consulted when UTF-8 decoding fails (e.g. a Latin-1 export)."""
+    data = path.read_bytes()
+    # NUL bytes mean UTF-16/32 (BOM-less UTF-16 of ASCII text is also valid
+    # UTF-8, byte for byte), so those go to the guesser instead.
+    if b"\x00" not in data:
+        try:
+            data.decode("utf-8")
+            return "utf-8"
+        except UnicodeDecodeError:
+            pass
     result = from_path(str(path)).best()
     if result is None:
         return "utf-8"

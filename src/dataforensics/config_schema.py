@@ -34,6 +34,18 @@ def find_chained_keys(mapping: dict) -> list[str]:
     return sorted(set(non_identity.values()) & set(non_identity.keys()))
 
 
+def find_mapping_conflicts(missing_values: dict, category_mapping: dict) -> list[str]:
+    """Values that make applying a column's missing-value mapping and its
+    category mapping together ambiguous or non-idempotent. Both may apply
+    to one column -- missing-value codes first, then category merges (the
+    order apply_transformations uses) -- unless a value is a key in both
+    maps, or one map's output is a key the other would rewrite (e.g. -99
+    -> "Unknown" while the category merge maps "Unknown" -> "unknown").
+    Empty list means the two can safely be combined."""
+    shared = set(missing_values) & set(category_mapping)
+    return sorted(shared | set(find_chained_keys({**missing_values, **category_mapping})))
+
+
 def load_rules(path: Path) -> dict:
     try:
         raw = yaml.safe_load(path.read_text())
@@ -55,6 +67,28 @@ def load_rules(path: Path) -> dict:
     raw.setdefault("missing_values", {})
     raw.setdefault("category_mappings", {})
     raw.setdefault("weights_strata", {"columns": []})
+    # Optional sections written by the app's "Download rules" button:
+    # approved safe fixes (cleaning.py) and analyst-declared expectations
+    # (expectations.py). Validated here so a hand-edited file fails loudly
+    # instead of being partially applied.
+    raw.setdefault("safe_fixes", {})
+    raw.setdefault("expectations", [])
+    if raw["safe_fixes"] is None:
+        raw["safe_fixes"] = {}
+    if raw["expectations"] is None:
+        raw["expectations"] = []
+    if not isinstance(raw["safe_fixes"], dict):
+        raise RulesConfigError(f"Rules file {path}: 'safe_fixes' must be a YAML mapping (got {raw['safe_fixes']!r})")
+    # Imported here, not at module level: cleaning.clean_dataset uses this
+    # module's mapping checks, so a top-level import would be circular.
+    from dataforensics.cleaning import validate_fixes
+
+    try:
+        validate_fixes(raw["safe_fixes"])
+    except ValueError as exc:
+        raise RulesConfigError(f"Rules file {path}: safe_fixes: {exc}") from exc
+    if not isinstance(raw["expectations"], list) or not all(isinstance(e, dict) for e in raw["expectations"]):
+        raise RulesConfigError(f"Rules file {path}: 'expectations' must be a list of mappings")
 
     # A key present in the YAML with no entries under it (e.g.
     # "category_mappings:" with nothing indented beneath) parses to `None`,
@@ -121,13 +155,17 @@ def load_rules(path: Path) -> dict:
                 f"(got {col_rules['format']!r})"
             )
 
-    overlap = sorted(set(raw["missing_values"]) & set(raw["category_mappings"]))
-    if overlap:
-        cols = ", ".join(f"'{col}'" for col in overlap)
-        raise RulesConfigError(
-            f"Column(s) {cols} appear in both missing_values and category_mappings — "
-            "this ordering is ambiguous and not supported; use only one rule type per column"
-        )
+    for column in sorted(set(raw["missing_values"]) & set(raw["category_mappings"])):
+        missing_map, category_map = raw["missing_values"][column], raw["category_mappings"][column]
+        if not isinstance(missing_map, dict) or not isinstance(category_map, dict):
+            continue  # reported with a clearer message by the per-mapping checks below
+        conflicts = find_mapping_conflicts(missing_map, category_map)
+        if conflicts:
+            raise RulesConfigError(
+                f"Column '{column}': missing_values and category_mappings conflict on "
+                f"{', '.join(repr(c) for c in conflicts)} — a value can't be both, and one mapping's "
+                "output must not be rewritten by the other (missing values apply first)"
+            )
 
     # A mapping entry (category_mappings OR missing_values -- both apply a
     # single key->value substitution per row) whose targets (values) overlap

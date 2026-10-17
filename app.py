@@ -1,31 +1,48 @@
 import csv
+import hashlib
 import html
 import io
 import json
+import math
+import re
 import tempfile
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+import altair as alt
+import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
+import yaml
 
+from dataforensics.advanced_checks import find_free_text_personal_detail_rows
 from dataforensics.audit_report import (
     build_audit_report_html,
     build_investigation_findings,
     format_bytes,
 )
-from dataforensics.config_schema import find_chained_keys
+from dataforensics.cleaning import (
+    FIX_LABELS,
+    apply_safe_fixes,
+    clean_dataset,
+    unit_fix_params,
+)
+from dataforensics.codebook import CodebookError, parse_codebook
+from dataforensics.config_schema import find_chained_keys, find_mapping_conflicts
 from dataforensics.dictionary import (
-    build_data_dictionary,
-    count_stripped_footer_lines,
     find_outlier_evidence,
     find_top_code_evidence,
     read_rows,
 )
+from dataforensics.expectations import (
+    EXPECTATION_TYPES,
+    OPERATORS,
+    evaluate_expectation,
+    validate_expectation,
+)
 from dataforensics.harmonize import (
-    apply_transformations,
     column_union,
-    compute_safety_report,
     merge_files_on_key,
 )
 from dataforensics.ingest import (
@@ -37,48 +54,18 @@ from dataforensics.ingest import (
     list_excel_sheets,
 )
 from dataforensics.investigate import (
-    DATASET_PROFILES,
+    AUTO_PROFILE,
     analyze_key_cardinality,
     analyze_key_uniqueness,
-    analyze_temporal_freshness,
-    build_missingness_overview,
     check_referential_integrity,
     check_repeated_key_column_consistency,
-    classify_column_types,
     compare_fingerprints,
     compute_dataset_fingerprint,
     compute_key_coverage,
-    detect_age_columns_that_look_like_years,
-    detect_ambiguous_date_columns,
-    detect_candidate_sentinels,
-    detect_column_order_violations,
-    detect_conditional_column_violations,
-    detect_conflicting_id_records,
-    detect_duplicate_entities,
-    detect_duplicate_rows,
-    detect_encoding_corruption,
-    detect_fuzzy_duplicate_entities,
-    detect_invisible_characters,
-    detect_missingness_co_occurrence,
-    detect_missingness_concentration,
-    detect_numeric_representation_inconsistency,
-    detect_pii_content,
-    detect_similar_categories,
-    detect_survey_weight_columns,
-    detect_temporal_gaps,
-    detect_unit_inconsistency,
-    detect_value_shape_outliers,
-    detect_whitespace_anomalies,
     discover_shared_key_columns,
     find_ambiguous_date_evidence,
-    find_birth_date_after_other_date_evidence,
     find_category_value_evidence,
     find_encoding_corruption_evidence,
-    find_fips_like_columns,
-    find_future_date_evidence,
-    find_implausible_value_evidence,
-    find_invalid_fips_evidence,
-    find_invalid_zip_evidence,
     find_invisible_character_evidence,
     find_numeric_representation_evidence,
     find_pii_content_evidence,
@@ -87,139 +74,820 @@ from dataforensics.investigate import (
     find_value_shape_outlier_evidence,
     find_whitespace_anomaly_evidence,
     find_year_like_value_evidence,
-    find_zip_like_columns,
-    infer_semantic_role,
-    match_clinical_range_rule,
     reconcile_shared_records,
 )
-from dataforensics.quality_score import compute_quality_score
+from dataforensics.key_insights import build_key_insights
+from dataforensics.pipeline import run_investigation
 from dataforensics.report import render_html
+from dataforensics.summary import (
+    CHECKS,
+    build_audit_trail,
+    build_before_after,
+    build_check_reference,
+    rows_to_csv,
+)
 from dataforensics.typing_guards import COMMON_SENTINEL_STRINGS, is_pii_like_column
 from dataforensics.validation import validate
 
-st.set_page_config(page_title="DataForensics", layout="wide", page_icon="🧬")
+# One logo file for both the browser-tab favicon and the in-app brand mark.
+_LOGO_PATH = Path(__file__).parent / "assets" / "logo.svg"
+st.set_page_config(page_title="DataForensics", layout="wide", page_icon=str(_LOGO_PATH))
 
 st.markdown(
     '<link rel="preconnect" href="https://fonts.googleapis.com">'
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">',
+    '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500'
+    '&family=Source+Serif+4:opsz,wght@8..60,600&display=swap" rel="stylesheet">',
     unsafe_allow_html=True,
 )
 
+# A light, record-like theme: cool off-white paper, ink text, one muted ink
+# blue for "where you are", and red / green / amber only where they mean
+# error / passed / evidence. Flat surfaces and hairlines -- no gradients,
+# glows or shadows. Serif for page titles, Plex Sans for text, Plex Mono
+# for every value, count and row number. Base colors are mirrored in
+# .streamlit/config.toml so Streamlit's own widgets match.
 st.markdown(
     """
     <style>
+    :root {
+        --df-bg: #F3F5F7;
+        --df-surface: #FFFFFF;
+        --df-surface-2: #EEF2F6;
+        --df-border: #D5DCE3;
+        --df-border-strong: #B4C0CC;
+        --df-text: #15212B;
+        --df-muted: #5A6875;
+        --df-accent: #2C5D86;
+        --df-accent-soft: #E3ECF4;
+        --df-danger: #B3261E;
+        --df-danger-soft: #F8E9E7;
+        --df-warning: #8A5D06;
+        --df-warning-tag: #D99A1E;
+        --df-warning-soft: #FBF1DC;
+        --df-success: #2F6F4E;
+        --df-success-soft: #E4EFE8;
+        --df-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+        --df-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --df-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+    }
     #MainMenu, footer { visibility: hidden; }
-    .block-container { padding-top: 2rem; padding-bottom: 4rem; max-width: 1180px; }
+    header[data-testid="stHeader"] { background: transparent; height: 0; }
+    .block-container { padding-top: 4.25rem; padding-bottom: 4rem; max-width: 1180px; }
 
-    html, body, [class*="css"],
-    h1, h2, h3, h4, h5, h6,
-    [data-testid="stMarkdownContainer"] h1,
-    [data-testid="stMarkdownContainer"] h2,
+    html, body, [class*="css"], .stApp, button, input, textarea, select {
+        font-family: var(--df-sans) !important;
+    }
+    .stApp { background: var(--df-bg); color: var(--df-text); font-size: 15px; }
+    h1, h2, h3, [data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2,
     [data-testid="stMarkdownContainer"] h3 {
-        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+        font-family: var(--df-serif) !important; font-weight: 600 !important; color: var(--df-text); letter-spacing: -0.01em;
+    }
+    code { font-family: var(--df-mono) !important; }
+
+    /* ---- Top bar ---- */
+    .df-topbar {
+        position: fixed; top: 0; left: 0; right: 0; z-index: 1000001;
+        height: 56px; display: flex; align-items: center; gap: 1.5rem;
+        padding: 0 1.5rem; background: var(--df-surface); border-bottom: 1px solid var(--df-border);
+    }
+    /* The invisible home button laid over the brand in the fixed top bar. */
+    .st-key-dataforensics_home { position: fixed; top: 0; left: 0; width: 220px; height: 56px; z-index: 1000003; }
+    .st-key-dataforensics_home button { width: 100%; height: 56px; opacity: 0; cursor: pointer; }
+    .st-key-dataforensics_home:has(button:focus-visible) { outline: 2px solid var(--df-accent); outline-offset: -4px; }
+    /* The zero-height scroll-to-top helper takes no space in the page flow,
+       so the home page always lands in the same place. */
+    [data-testid="stElementContainer"]:has(> iframe[data-testid="stIFrame"]) { position: absolute; }
+    .df-brand { display: flex; align-items: center; gap: 0.6rem; color: var(--df-text) !important; text-decoration: none !important; }
+    .df-brand svg { flex-shrink: 0; }
+    .df-brand-text { font-family: var(--df-serif); font-weight: 600; font-size: 1.08rem; letter-spacing: -0.01em; }
+    .df-brand-text br { display: none; }
+
+    /* Streamlit's "open sidebar" button lives under the fixed top bar; once the
+       sidebar is collapsed it would be unreachable. Pin it just below the bar. */
+    [data-testid="stExpandSidebarButton"] {
+        position: fixed !important; top: 66px; left: 14px; z-index: 1000002;
+        background: var(--df-surface); border: 1px solid var(--df-border); border-radius: 3px;
     }
 
-    .stApp {
-        background-color: #FFFFFF;
-        background-image:
-            radial-gradient(ellipse 640px 320px at 18% -12%, rgba(79, 70, 229, 0.12), transparent 68%),
-            radial-gradient(rgba(15, 23, 42, 0.09) 1.1px, transparent 1.1px);
-        background-size: auto, 18px 18px;
+    /* ---- Sidebar ---- */
+    section[data-testid="stSidebar"] { background: var(--df-surface-2); border-right: 1px solid var(--df-border); }
+    section[data-testid="stSidebar"] > div:first-child { padding-top: 3.4rem; }
+    /* Insights (the last workspace) sits below a rule, apart from the cleaning workflow. */
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label:last-of-type {
+        margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px solid var(--df-border); }
+    /* Workspaces as a nav list: no radio dots, an ink bar on the active one. */
+    section[data-testid="stSidebar"] div[role="radiogroup"] { gap: 0.1rem; }
+    section[data-testid="stSidebar"] [data-testid="stRadioOption"] {
+        width: 100%; margin: 0; padding: 0.42rem 0.65rem; border-left: 2px solid transparent; border-radius: 0; cursor: pointer;
     }
+    section[data-testid="stSidebar"] [data-testid="stRadioOption"] > div > div > div:not([data-testid="stMarkdownContainer"]) {
+        display: none; }
+    section[data-testid="stSidebar"] [data-testid="stRadioOption"] p { font-size: 0.92rem; color: var(--df-muted); }
+    section[data-testid="stSidebar"] [data-testid="stRadioOption"]:hover p { color: var(--df-text); }
+    section[data-testid="stSidebar"] [data-testid="stRadioOption"][data-selected="true"] {
+        background: var(--df-surface); border-left-color: var(--df-accent); }
+    section[data-testid="stSidebar"] [data-testid="stRadioOption"][data-selected="true"] p { color: var(--df-text); font-weight: 600; }
+    section[data-testid="stSidebar"] [data-testid="stRadioOption"][data-focus-visible] {
+        outline: 2px solid var(--df-accent); outline-offset: -2px; }
+    /* The sidebar's closing note sits in its bottom-left corner: the sidebar's
+       block fills the height and the note's container takes the slack above it. */
+    [data-testid="stSidebarUserContent"] [data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"] .df-side-note) {
+        min-height: calc(100vh - 10rem); }
+    section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] { padding-bottom: 1.5rem; }
+    [data-testid="stElementContainer"]:has(.df-side-note) { margin-top: auto; }
+    .df-side-note { font-size: 0.8rem; line-height: 1.5; color: var(--df-muted); padding: 0.8rem 0.1rem 0;
+        border-top: 1px solid var(--df-border); }
+    .df-side-label { font-size: 0.78rem; font-weight: 600; color: var(--df-muted); margin: 1.2rem 0 0.35rem 0.1rem; }
+    .df-side-meta { font-size: 0.8rem; color: var(--df-muted); padding: 0 0.1rem; line-height: 1.55; overflow-wrap: anywhere; }
+    .df-side-meta b { color: var(--df-text); font-family: var(--df-mono); font-weight: 500; }
 
-    .dataforensics-hero { display: flex; align-items: center; gap: 0.9rem; margin-bottom: 0.15rem; }
-    .dataforensics-hero-badge {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 46px; height: 46px; border-radius: 12px;
-        background: linear-gradient(135deg, #4F46E5, #7C3AED);
-        font-size: 1.4rem;
+
+    /* ---- KPI cards ---- */
+    .df-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-bottom: 1.8rem;
+        border: 1px solid var(--df-border); border-radius: 4px; background: var(--df-surface); }
+    @media (max-width: 900px) {
+        .df-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .df-kpi:nth-child(2n) { border-right: 0; }
+        .df-kpi:nth-child(n+3) { border-top: 1px solid var(--df-border); }
     }
-    .dataforensics-hero h1 { font-size: 1.65rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    .df-kpi { padding: 1.1rem 1.2rem 1rem; border-right: 1px solid var(--df-border); position: relative; }
+    .df-kpi:last-child { border-right: 0; }
+    .df-kpi-label { font-size: 0.85rem; font-weight: 500; color: var(--df-muted); }
+    .df-kpi-value { font-family: var(--df-mono); font-size: 2.1rem; font-weight: 500; color: var(--df-text);
+        margin: 0.45rem 0 0.25rem; line-height: 1; font-variant-numeric: tabular-nums; }
+    .df-kpi-sub { font-size: 0.78rem; color: var(--df-muted); }
+    .df-kpi.warn .df-kpi-value { color: var(--df-warning); }
+    .df-kpi.good .df-kpi-value { color: var(--df-success); }
 
-    .dataforensics-workflow {
-        font-family: "IBM Plex Mono", ui-monospace, monospace;
-        font-size: 1.08rem; font-weight: 600; letter-spacing: 0.01em;
-        color: #4338CA; margin: 0.55rem 0 0.7rem 0;
-    }
-    .dataforensics-workflow .arrow { color: #A5B4FC; font-weight: 400; margin: 0 0.35rem; }
+    /* ---- Section headings (with anchor target) ---- */
+    .df-anchor { position: relative; top: -72px; visibility: hidden; display: block; height: 0; }
+    .df-section-title { font-family: var(--df-serif); font-size: 1.35rem; font-weight: 600; color: var(--df-text); margin: 2rem 0 0.2rem; }
+    .df-section-sub { color: var(--df-muted); font-size: 0.88rem; margin: 0 0 0.8rem; }
+    .df-table-title { font-size: 1.02rem; font-weight: 600; color: var(--df-text); margin: 0; padding-top: 0.35rem; }
 
-    .dataforensics-tagline { color: #64748B; font-size: 0.95rem; margin: 0 0 1.6rem 0; max-width: 760px; }
 
-    .dataforensics-steps { display: flex; gap: 0.5rem; margin-bottom: 1.8rem; }
-    .dataforensics-step {
-        flex: 1; padding: 0.55rem 0.9rem; border-radius: 10px;
-        background: #F1F5F9; border: 1px solid #E2E8F0;
-        font-size: 0.82rem; font-weight: 600; color: #94A3B8;
-        display: flex; align-items: center; gap: 0.5rem;
-    }
-    .dataforensics-step.active { background: #EEF2FF; border-color: #C7D2FE; color: #4338CA; }
-    .dataforensics-step.done { background: #F0FDF4; border-color: #BBF7D0; color: #15803D; }
-    .dataforensics-step-num {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 20px; height: 20px; border-radius: 50%; background: currentColor;
-        font-size: 0.7rem; flex-shrink: 0;
-    }
-    .dataforensics-step-num span { color: white; }
-
+    /* ---- Finding cards: a ruled record with a severity stripe ---- */
     .dataforensics-card {
-        border: 1px solid #E2E8F0; border-radius: 12px; padding: 1rem 1.2rem;
-        margin-bottom: 0.6rem; background: white;
+        border: 1px solid var(--df-border); border-left: 3px solid var(--df-border-strong); border-radius: 0;
+        padding: 0.8rem 1rem; margin-bottom: 0.5rem; background: var(--df-surface);
     }
-    .dataforensics-card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.15rem; }
-    .dataforensics-card-evidence { color: #64748B; font-size: 0.85rem; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+    .dataforensics-card:has(.dataforensics-badge-error) { border-left-color: var(--df-danger); }
+    .dataforensics-card:has(.dataforensics-badge-warning) { border-left-color: var(--df-warning-tag); }
+    .dataforensics-card:has(.dataforensics-badge-suggestion) { border-left-color: var(--df-accent); }
+    .dataforensics-card:has(.dataforensics-badge-high) { border-left-color: var(--df-success); }
+    /* Each finding on the Issues page is an exhibit: "Exhibit A", "Exhibit B", ... in page order. */
+    .block-container { counter-reset: exhibit; }
+    .dataforensics-card.df-exhibit { counter-increment: exhibit; }
+    .dataforensics-card.df-exhibit::before {
+        content: "Exhibit " counter(exhibit, upper-alpha); float: right; margin-left: 0.8rem;
+        font-family: var(--df-mono); font-size: 0.74rem; color: var(--df-muted);
+    }
+    .dataforensics-card-title { font-weight: 600; font-size: 0.97rem; margin: 0.3rem 0 0.15rem; color: var(--df-text); }
+    /* A one-line explanation under a title (prose) -- except inside a "Why was this flagged?" panel, where it
+       holds the evidence rows themselves and is set in mono. */
+    .dataforensics-card-evidence { color: var(--df-muted); font-size: 0.88rem; line-height: 1.55; }
+    div[data-testid="stExpander"] .dataforensics-card-evidence { font-family: var(--df-mono); font-size: 0.84rem; line-height: 1.65; }
 
+    /* Evidence tags: small mono labels, not pills */
     .dataforensics-badge {
-        display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px;
-        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase;
-        margin-right: 0.4rem;
+        display: inline-block; padding: 0.05rem 0.4rem; border-radius: 2px; font-family: var(--df-mono);
+        font-size: 0.72rem; font-weight: 500; margin-right: 0.4rem; border: 1px solid currentColor;
     }
-    .dataforensics-badge-error { background: #FEE2E2; color: #B91C1C; }
-    .dataforensics-badge-warning { background: #FEF3C7; color: #B45309; }
-    .dataforensics-badge-suggestion { background: #DBEAFE; color: #1D4ED8; }
-    .dataforensics-badge-high { background: #DCFCE7; color: #166534; }
-    .dataforensics-badge-medium { background: #FEF9C3; color: #854D0E; }
+    .dataforensics-badge-error { color: var(--df-danger); background: var(--df-danger-soft); }
+    .dataforensics-badge-warning, .dataforensics-badge-medium { color: var(--df-warning); background: var(--df-warning-soft); }
+    .dataforensics-badge-suggestion { color: var(--df-accent); background: var(--df-accent-soft); }
+    .dataforensics-badge-high { color: var(--df-success); background: var(--df-success-soft); }
 
-    .dataforensics-bucket-header { font-size: 1.05rem; font-weight: 700; margin: 1.6rem 0 0.5rem 0; display: flex; align-items: center; gap: 0.4rem; }
+    .dataforensics-bucket-header {
+        font-family: var(--df-serif); font-size: 1.2rem; font-weight: 600; margin: 2rem 0 0.7rem 0; padding-bottom: 0.4rem;
+        display: flex; align-items: center; gap: 0.5rem; border-bottom: 1px solid var(--df-text); color: var(--df-text);
+    }
 
-    div[data-testid="stMetric"] { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 0.75rem 0.9rem; }
+    /* ---- Summary of findings (Issues page) ---- */
+    .df-sev-strip { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 1.2rem; margin: 0 0 0.8rem; font-size: 0.9rem; }
+    .df-sev-strip b { font-family: var(--df-mono); font-weight: 500; font-size: 1.15rem; margin-right: 0.3rem; }
+    .df-sev-strip .sev-error b { color: var(--df-danger); }
+    .df-sev-strip .sev-warning b { color: var(--df-warning); }
+    .df-sev-strip .sev-note { color: var(--df-muted); font-size: 0.82rem; }
+    .df-sumrow { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr) auto; gap: 0.8rem; align-items: baseline;
+        padding: 0.55rem 0.9rem; margin-bottom: 0.5rem; background: var(--df-surface); border: 1px solid var(--df-border);
+        border-left: 3px solid var(--df-warning-tag); border-radius: 0; font-size: 0.92rem; }
+    .df-sumrow.sev-error { border-left-color: var(--df-danger); }
+    .df-sumrow-tag { font-family: var(--df-mono); font-size: 0.72rem; color: var(--df-warning); }
+    .df-sumrow.sev-error .df-sumrow-tag { color: var(--df-danger); }
+    .df-sumrow-label { color: var(--df-text); }
+    .df-sumrow-where { font-family: var(--df-mono); font-size: 0.72rem; color: var(--df-accent); white-space: nowrap; }
+
+    /* ---- Native Streamlit widgets ---- */
+    div[data-testid="stMetric"] { background: var(--df-surface); border: 1px solid var(--df-border); border-radius: 4px; padding: 0.8rem 0.95rem; }
+    div[data-testid="stMetricLabel"] p { color: var(--df-muted) !important; font-weight: 500; }
+    div[data-testid="stMetricValue"] { font-family: var(--df-mono) !important; font-weight: 500; }
+    div[data-testid="stExpander"] details { background: var(--df-surface); border: 1px solid var(--df-border) !important; border-radius: 3px; }
+    div[data-testid="stExpander"] summary { font-weight: 500; }
+    div[data-testid="stExpander"] summary:hover { color: var(--df-accent); }
+    div[data-testid="stDataFrame"] { border: 1px solid var(--df-border); border-radius: 3px; overflow: hidden; }
+    div[data-testid="stFileUploader"] section {
+        background: var(--df-surface); border: 1px dashed var(--df-border-strong); border-radius: 3px; padding: 1.1rem 1.2rem;
+    }
+    /* The dataset uploader on the first screen: the main call to action. */
+    .st-key-dataforensics_data_upload section[data-testid="stFileUploaderDropzone"] {
+        min-height: 5rem; padding: 1.1rem 1.6rem; display: flex; align-items: center; }
+    .st-key-dataforensics_data_upload [data-testid="stFileUploaderDropzoneInstructions"] span::after { font-size: 0.95rem !important; }
+    div[data-testid="stFileUploader"] section:hover { border-color: var(--df-accent); background: #FAFCFE; }
+    /* Replace Streamlit's "200MB per file • CSV, ..." with plainer wording (same limit and types). */
+    .st-key-dataforensics_data_upload [data-testid="stFileUploaderDropzoneInstructions"] span,
+    .st-key-dataforensics_codebook_upload [data-testid="stFileUploaderDropzoneInstructions"] span { font-size: 0 !important; }
+    .st-key-dataforensics_data_upload [data-testid="stFileUploaderDropzoneInstructions"] span::after {
+        content: "Drop a file here, or browse — CSV, TSV, JSON or Excel, up to 200 MB";
+        font-size: 0.86rem; color: var(--df-muted); }
+    .st-key-dataforensics_codebook_upload [data-testid="stFileUploaderDropzoneInstructions"] span::after {
+        content: "Codebook CSV: column, value, label"; font-size: 0.86rem; color: var(--df-muted); }
+    .stButton button, .stDownloadButton button { border-radius: 3px; font-weight: 500; box-shadow: none; }
+    .stDownloadButton button, .stButton button[kind="secondary"] {
+        background: var(--df-surface); border: 1px solid var(--df-border-strong); color: var(--df-text);
+    }
+    .stDownloadButton button:hover, .stButton button[kind="secondary"]:hover {
+        border-color: var(--df-accent); color: var(--df-accent); background: var(--df-surface);
+    }
+    .stButton button[kind="primary"] { background: var(--df-accent); border-color: var(--df-accent); color: #fff; }
+    .stButton button[kind="primary"]:hover { background: #234B6D; border-color: #234B6D; }
+    hr { border-color: var(--df-border) !important; }
+
+    /* ---- Icons ---- */
+    .df-icon { display: inline-block; vertical-align: middle; flex-shrink: 0; }
+    .df-icon-chip { display: inline-flex; align-items: center; color: var(--df-muted); }
+
+    /* ---- First screen (before a dataset is loaded): left-aligned, no box ---- */
+    .df-hero-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap: 3rem;
+        align-items: center; margin: 0 0 1.6rem; }
+    @media (max-width: 900px) { .df-hero-grid { grid-template-columns: 1fr; gap: 1.2rem; } }
+    .df-hero { padding: 1.2rem 0 0.6rem; }
+    .df-hero-grid .df-hero-title { font-size: 2.25rem !important; }
+
+    /* The sample exhibit on the first screen: a real finding, set like a record card */
+    .df-specimen { margin: 0; background: var(--df-surface); border: 1px solid var(--df-border);
+        border-left: 3px solid var(--df-accent); border-radius: 0; }
+    .df-specimen-head { display: flex; justify-content: space-between; gap: 1rem; padding: 0.55rem 1rem;
+        border-bottom: 1px solid var(--df-border); background: var(--df-surface-2);
+        font-family: var(--df-mono); font-size: 0.74rem; color: var(--df-muted); }
+    .df-specimen-body { padding: 0.9rem 1rem 0.8rem; }
+    .df-specimen-title { font-weight: 600; font-size: 1rem; color: var(--df-text); margin: 0.45rem 0 0.2rem; }
+    .df-specimen-sub { color: var(--df-muted); font-size: 0.86rem; line-height: 1.5; }
+    .df-specimen-table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 0.6rem; font-family: var(--df-mono);
+        font-size: 0.82rem; }
+    .df-specimen-table th { text-align: left; font-family: var(--df-sans); font-weight: 500; font-size: 0.76rem;
+        color: var(--df-muted); padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--df-text); }
+    .df-specimen-table td { padding: 0.32rem 0.5rem; border-bottom: 1px solid var(--df-border); color: var(--df-text); }
+    .df-specimen-table td:nth-child(1) { color: var(--df-danger); text-decoration: line-through; text-decoration-thickness: 1px;
+        white-space: pre; }
+    .df-specimen-table td:nth-child(2) { color: var(--df-muted); }
+    .df-specimen-table td:nth-child(3) { color: var(--df-success); }
+    .df-specimen-foot { font-size: 0.76rem; color: var(--df-muted); }
+    .df-hero-eyebrow { font-family: var(--df-mono); font-size: 0.78rem; color: var(--df-muted); margin-bottom: 0.7rem; }
+    .df-hero-title { font-family: var(--df-serif) !important; font-size: 2.6rem !important; line-height: 1.12 !important;
+        font-weight: 600 !important; letter-spacing: -0.02em; margin: 0 0 0.8rem !important; padding: 0 !important; color: var(--df-text); }
+    /* the one marked word: a highlighter stroke, like marked-up evidence */
+    .df-hero-title .df-hl { background: linear-gradient(transparent 62%, #F3D899 62%, #F3D899 92%, transparent 92%); }
+    .df-hero-sub { color: var(--df-muted); font-size: 1.05rem; line-height: 1.6; max-width: 640px; margin: 0 0 1.5rem; }
+    .df-hero-stats { display: flex; flex-wrap: wrap; gap: 0; margin-top: 0.4rem; }
+    .df-hero-stat { display: flex; align-items: baseline; gap: 0.4rem; padding: 0 1.1rem; border-left: 1px solid var(--df-border); }
+    .df-hero-stat:first-child { padding-left: 0; border-left: 0; }
+    .df-hero-stat b { font-family: var(--df-mono); font-weight: 500; font-size: 1.15rem; color: var(--df-text); font-variant-numeric: tabular-nums; }
+    .df-hero-stat span { font-size: 0.85rem; color: var(--df-muted); }
+
+    .df-path { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; font-family: var(--df-mono);
+        font-size: 0.84rem; color: var(--df-text); margin: 0 0 0.4rem; line-height: 1.7; }
+    .df-path span { white-space: nowrap; }
+    .df-path .df-path-arrow { color: var(--df-accent); }
+    @media (max-width: 900px) { .df-hero-title, .df-hero-grid .df-hero-title { font-size: 2rem !important; } }
+
+    .df-sample { padding: 0.15rem 0; }
+    .df-row-rule { border-top: 1px solid var(--df-border); margin: 0.2rem 0; }
+    .df-sample-tag { font-family: var(--df-mono); font-size: 0.74rem; color: var(--df-accent); }
+    .df-sample-title { font-weight: 600; font-size: 1rem; color: var(--df-text); margin: 0.2rem 0 0.15rem; }
+    .df-sample-text { color: var(--df-muted); font-size: 0.86rem; line-height: 1.55; }
+
+    /* ---- Dataset facts: a ruled strip of mono counts ---- */
+    .df-facts { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.4rem 0 1.2rem; }
+    .df-fact {
+        display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.35rem 0.7rem; border-radius: 3px;
+        background: var(--df-surface); border: 1px solid var(--df-border); color: var(--df-muted); font-size: 0.86rem;
+    }
+    .df-fact b { color: var(--df-text); font-family: var(--df-mono); font-weight: 500; font-variant-numeric: tabular-nums; }
+    .df-fact .df-icon { color: var(--df-muted); }
+    .df-fact.df-check-ok { border-color: #B9D3C3; }
+    .df-fact.df-check-ok .df-icon { color: var(--df-success); }
+    .df-fact.df-check-bad { border-color: #E5B8B4; }
+    .df-fact.df-check-bad .df-icon { color: var(--df-danger); }
+
+    /* ---- Page header (every step / tab): no box, a rule underneath ---- */
+    .df-page-banner { padding: 0.6rem 0 1.1rem; margin: 0.2rem 0 1.4rem; border-bottom: 1px solid var(--df-border); }
+    .df-banner-title { font-family: var(--df-serif) !important; font-size: 2rem !important; font-weight: 600 !important;
+        line-height: 1.2 !important; color: var(--df-text); letter-spacing: -0.015em; margin: 0 0 0.45rem !important; padding: 0 !important; }
+    .df-page-banner .df-hero-sub { margin-bottom: 0.9rem; font-size: 0.98rem; }
+    .df-banner-foot { margin-top: 0.8rem; font-size: 0.8rem; color: var(--df-muted); }
+
+    /* ---- Checks ---- */
+    .df-ref-category {
+        display: flex; align-items: center; gap: 0.55rem; font-family: var(--df-serif); font-size: 1.15rem; font-weight: 600;
+        color: var(--df-text); margin: 1.8rem 0 0.7rem;
+    }
+    .df-ref-category span { font-family: var(--df-mono); font-size: 0.78rem; font-weight: 400; color: var(--df-muted); }
+    .df-ref-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; }
+    @media (max-width: 1100px) { .df-ref-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 700px) { .df-ref-grid { grid-template-columns: 1fr; } }
+    .df-ref-card {
+        background: var(--df-surface); border: 1px solid var(--df-border); border-radius: 3px; padding: 0.9rem 1rem;
+        display: flex; flex-direction: column; gap: 0.2rem;
+    }
+    .df-ref-card:hover { border-color: var(--df-accent); }
+    .df-ref-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem; }
+    .df-ref-id { font-family: var(--df-mono); font-size: 0.76rem; color: var(--df-muted); }
+    .df-ref-badge { font-family: var(--df-mono); font-size: 0.72rem; padding: 0.05rem 0.4rem; border-radius: 2px; border: 1px solid currentColor; }
+    .df-ref-badge.fix { color: var(--df-success); background: var(--df-success-soft); }
+    .df-ref-badge.flag { color: var(--df-muted); background: var(--df-surface-2); }
+    .df-ref-name { font-weight: 600; color: var(--df-text); font-size: 0.97rem; margin-bottom: 0.3rem; line-height: 1.35; }
+    .df-ref-label { font-size: 0.76rem; font-weight: 600; color: var(--df-muted); margin-top: 0.45rem; }
+    .df-ref-text { color: var(--df-muted); font-size: 0.87rem; line-height: 1.55; }
+    .df-ref-text.why { color: var(--df-text); }
+    .df-ref-handling { margin-top: auto; padding-top: 0.6rem; font-size: 0.8rem; color: var(--df-muted);
+        border-top: 1px solid var(--df-border); }
+
+    /* ---- Bordered containers (insight cards, sample cards, approvals) ---- */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: var(--df-surface); border-color: var(--df-border) !important; border-radius: 4px !important;
+    }
+    .df-insight-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+    .df-insight-kind { font-family: var(--df-mono); font-size: 0.72rem; padding: 0.05rem 0.4rem; border-radius: 2px;
+        color: var(--df-accent); background: var(--df-accent-soft); border: 1px solid currentColor; }
+    .df-insight-kind.k-missing { color: var(--df-warning); background: var(--df-warning-soft); }
+    .df-insight-kind.k-higher { color: var(--df-success); background: var(--df-success-soft); }
+    .df-insight-kind.k-skip { color: var(--df-muted); background: var(--df-surface-2); }
+    .df-insight-kind.k-trend { color: var(--df-accent); background: var(--df-accent-soft); }
+    .df-insight-kind.k-concentration, .df-insight-kind.k-dominant { color: #7A3E5C; background: #F4E7EE; }
+    .df-insight-score { font-family: var(--df-mono); font-size: 0.74rem; color: var(--df-muted); }
+    .df-insight-title { font-size: 1.04rem; font-weight: 600; color: var(--df-text); line-height: 1.38; margin-bottom: 0.3rem; }
+    .df-insight-detail { color: var(--df-muted); font-size: 0.88rem; line-height: 1.55; margin-bottom: 0.3rem; }
+    .df-insight-why { display: flex; gap: 0.5rem; align-items: flex-start; color: var(--df-text); font-size: 0.86rem; line-height: 1.5;
+        border-left: 2px solid var(--df-accent); padding: 0.1rem 0 0.1rem 0.7rem; margin-top: 0.4rem; }
+    .df-insight-why .df-icon { display: none; }
+
+    /* ---- Stepper (segmented control at the top of Analyze & Clean) ---- */
+    div[data-testid="stButtonGroup"] button {
+        min-height: 42px; font-weight: 500; font-size: 0.9rem; border-color: var(--df-border) !important;
+        background: var(--df-surface); color: var(--df-muted); border-radius: 0 !important; box-shadow: none !important;
+    }
+    div[data-testid="stButtonGroup"] button[aria-checked="true"], div[data-testid="stButtonGroup"] button[kind$="Active"] {
+        background: var(--df-accent-soft) !important; color: var(--df-accent) !important;
+        border-color: var(--df-border) !important; box-shadow: inset 0 -2px 0 var(--df-accent) !important; font-weight: 600;
+    }
+    .df-step-nav-gap { height: 1.4rem; border-top: 1px solid var(--df-border); margin-top: 2rem; }
+    .df-field-label { font-size: 0.82rem; font-weight: 600; color: var(--df-text); margin: 0.2rem 0 0.2rem; }
+
+    /* ---- Charts in cards ---- */
+    .df-chart-title { font-weight: 600; color: var(--df-text); font-size: 1rem; }
+    .df-chart-sub { color: var(--df-muted); font-size: 0.84rem; margin: 0.15rem 0 0.6rem; line-height: 1.5; }
+    .df-empty { color: var(--df-muted); padding: 2rem 0; text-align: center; }
+
+    /* ---- Approval checkboxes ---- */
+    div[data-testid="stCheckbox"] label { padding: 0.3rem 0; }
+    div[data-testid="stCheckbox"] label > span:first-child,
+    div[data-testid="stCheckbox"] label div[data-baseweb="checkbox"] > span {
+        width: 20px !important; height: 20px !important; border-radius: 3px !important;
+        border: 1.5px solid #8A99A8 !important; background-color: var(--df-surface);
+    }
+    div[data-testid="stCheckbox"] input:checked + span,
+    div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] span[aria-checked="true"] {
+        background-color: var(--df-accent) !important; border-color: var(--df-accent) !important;
+    }
+
+    /* ---- File fingerprints on Results ---- */
+    .df-hashes { border: 1px solid var(--df-border); background: var(--df-surface); border-radius: 3px; margin: 0.6rem 0 1rem; }
+    .df-hashes div { display: flex; gap: 1rem; padding: 0.45rem 0.8rem; font-size: 0.84rem; flex-wrap: wrap; }
+    .df-hashes div + div { border-top: 1px solid var(--df-border); }
+    .df-hashes span { color: var(--df-muted); min-width: 11rem; }
+    .df-hashes code { background: none; color: var(--df-text); font-size: 0.8rem; word-break: break-all; padding: 0; }
+
+    /* ---- Quality ring ---- */
+    .df-ring { display: block; margin: 0.35rem auto 0.25rem; }
+    .df-ring-value { font-size: 1.7rem; font-weight: 500; fill: var(--df-text); font-family: var(--df-mono); }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    """
-    <div class="dataforensics-hero">
-        <div class="dataforensics-hero-badge">🧬</div>
-        <h1>DataForensics</h1>
-    </div>
-    <div class="dataforensics-workflow">
-        Understand<span class="arrow">→</span>Investigate<span class="arrow">→</span>Decide<span class="arrow">→</span>Clean<span class="arrow">→</span>Verify<span class="arrow">→</span>Document
-    </div>
-    <p class="dataforensics-tagline">
-        DataForensics helps analysts investigate unfamiliar research data before trusting it for analysis.
-        It automatically profiles the dataset, identifies potential problems such as duplicates, missing
-        values, inconsistent categories, unusual values, and conflicting records, and shows the evidence
-        behind every finding. Instead of making assumptions or silently changing the data, DataForensics
-        puts the analyst in control: review the evidence, decide what should change, and approve each
-        modification. The tool then verifies the cleaned dataset and records every change, creating a
-        transparent trail from the original data to the final analysis-ready version.
-    </p>
-    """,
-    unsafe_allow_html=True,
+# The same SVG as the favicon, sized for the top bar (comments stripped).
+_LOGO_SVG = re.sub(r"<!--.*?-->", "", _LOGO_PATH.read_text()).replace("<svg ", '<svg width="36" height="36" ', 1)
+
+
+# Line icons (24x24 viewBox, stroked with currentColor) used in place of
+# emoji, so every icon matches the theme's weight and color.
+_ICON_PATHS = {
+    "search": '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+    "calendar": '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/>',
+    "missing": '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+    "tag": '<path d="M3 12V3h9l9 9-9 9z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
+    "list": '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+    "ruler": '<path d="M3 17 17 3l4 4L7 21z"/><path d="m7 13 2 2m1-5 2 2m1-5 2 2"/>',
+    "shield": '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
+    "sparkle": '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
+    "scan": '<path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/>',
+    "wand": '<path d="m15 4 5 5L9 20l-5-5z"/><path d="M14 5l5 5"/>',
+    "check": '<path d="M20 6 9 17l-5-5"/>',
+    "audit": '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>',
+    "chart": '<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/>',
+    "database": '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+    "alert": '<path d="M12 3 2 21h20z"/><path d="M12 10v5M12 18h.01"/>',
+    "gauge": '<path d="M12 14l4-4"/><path d="M3.3 17a9 9 0 1 1 17.4 0"/>',
+}
+
+
+def _icon(name: str, size: int = 18) -> str:
+    return (
+        f'<svg class="df-icon" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{_ICON_PATHS[name]}</svg>'
+    )
+
+
+def _bucket_header(icon: str, title: str) -> str:
+    """Section header on the step pages. `title` is app-authored."""
+    return f'<div class="dataforensics-bucket-header"><span class="df-icon-chip">{_icon(icon, 16)}</span>{title}</div>'
+
+
+def _case_id() -> str | None:
+    """The loaded dataset's case number: the first 4 hex digits of its
+    SHA-256, so the same file always gets the same number and a changed
+    file gets a new one. None when nothing is loaded."""
+    data = st.session_state.get("dataforensics_data_bytes")
+    return hashlib.sha256(data).hexdigest()[:4].upper() if data is not None else None
+
+
+def _step_eyebrow(number: int, name: str) -> str:
+    """Page eyebrow for the Analyze steps: "Case 4F2A · Step 3 of 5 · Issues"."""
+    case = _case_id()
+    return (f"Case {case} · " if case else "") + f"Step {number} of {len(_STEPS)} · {name}"
+
+
+# A real finding from the bundled Messy CSV Example, shown on the first
+# screen so a visitor sees what the tool produces before uploading anything:
+# the sex column's 8 spellings of 2 categories (titled "gender" on the card),
+# and what the approved fixes
+# turn them into (category merge; " Male " via the whitespace trim). The
+# rows are the file's real values and counts;
+# test_home_specimen_matches_the_real_output keeps them honest.
+_SPECIMEN_ROWS = (
+    ("M", 2, "Male"), ("male", 2, "Male"), (" Male ", 1, "Male"),
+    ("F", 1, "Female"), ("FEMALE", 1, "Female"), ("female", 1, "Female"),
+)
+_SPECIMEN_HTML = (
+    '<figure class="df-specimen" aria-label="Example finding from the Messy CSV Example dataset">'
+    '<div class="df-specimen-head"><span>Sample output · messy_csv_example.csv</span><span>Exhibit A</span></div>'
+    '<div class="df-specimen-body">'
+    '<span class="dataforensics-badge dataforensics-badge-suggestion">Inconsistent categories</span>'
+    '<div class="df-specimen-title">gender: 8 spellings for 2 categories</div>'
+    '<table class="df-specimen-table"><thead><tr><th>Recorded</th><th>Rows</th><th>After approved fix</th></tr></thead><tbody>'
+    + "".join(
+        f"<tr><td>&quot;{html.escape(raw)}&quot;</td><td>{n}</td><td>{fixed}</td></tr>" for raw, n, fixed in _SPECIMEN_ROWS
+    )
+    + "</tbody></table>"
+    '<div class="df-specimen-foot">Changed only after approval · each of the '
+    f"{sum(n for _, n, _ in _SPECIMEN_ROWS)} changes logged in the audit trail</div>"
+    "</div></figure>"
 )
 
-def _step_bar(current: int) -> None:
-    labels = ["Upload", "Investigate", "Review & Approve", "Cleaned Dataset"]
-    parts = ['<div class="dataforensics-steps">']
-    for i, label in enumerate(labels, start=1):
-        cls = "done" if i < current else ("active" if i == current else "")
-        parts.append(
-            f'<div class="dataforensics-step {cls}"><span class="dataforensics-step-num"><span>{i}</span></span>{label}</div>'
+
+# The path shown on the first screen: what happens to a file, in order.
+_HOME_PATH = ("Upload", "Detect Issues", "Provide Insights", "Review &amp; Fix", "Cleaned Dataset")
+
+
+def _hero_html() -> str:
+    """First screen, before any dataset is loaded: the title, intro and path
+    on the left and a real sample exhibit on the right, kept short so the
+    upload box below is visible without scrolling."""
+    return (
+        '<div class="df-hero-grid"><div class="df-hero">'
+        '<div class="df-hero-eyebrow">DataForensics · Automated Data Cleaning Tool</div>'
+        '<h1 class="df-hero-title">Data Cleaning you can <span class="df-hl">Verify</span>.</h1>'
+        '<p class="df-hero-sub">Upload a CSV, Excel or JSON file. DataForensics finds data quality issues, fixes only '
+        "what you approve, and logs every change.</p>"
+        '<div class="df-path" aria-label="What happens to your file">'
+        + '<span class="df-path-arrow">→</span>'.join(f"<span>{step}</span>" for step in _HOME_PATH)
+        + "</div></div>"
+        + _SPECIMEN_HTML
+        + "</div>"
+    )
+
+
+def _top_bar() -> None:
+    """Fixed top bar: just the brand."""
+    st.markdown(
+        f'<div class="df-topbar">'
+        f'<div class="df-brand">{_LOGO_SVG}<span class="df-brand-text">Data<br>Forensics</span></div>'
+        "</div>"
+        f'<span id="top" class="df-anchor"></span>',
+        unsafe_allow_html=True,
+    )
+    # The logo is a real button laid over the brand (CSS), not a "#top"
+    # link: a link only jumps the scroll position, while this starts fresh
+    # on the home page (see _go_home).
+    st.button("DataForensics home", key="dataforensics_home", on_click=_go_home)
+    if st.session_state.pop("dataforensics_scroll_top", False):
+        components.html(
+            "<script>const d = window.parent.document;"
+            "for (const el of [d.querySelector('[data-testid=\"stMain\"]'), d.scrollingElement]) "
+            "{ if (el) el.scrollTo({top: 0}); }</script>",
+            height=0,
         )
-    parts.append("</div>")
-    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def _section(anchor: str, title: str, subtitle: str = "") -> None:
+    """A dashboard section heading with an in-page anchor the top bar and
+    sidebar link to. `title`/`subtitle` are app-authored text, never
+    uploaded data."""
+    sub = f'<div class="df-section-sub">{subtitle}</div>' if subtitle else ""
+    st.markdown(
+        f'<span id="{anchor}" class="df-anchor"></span><div class="df-section-title">{title}</div>{sub}',
+        unsafe_allow_html=True,
+    )
+
+
+_EXPECTATION_COLUMNS = [
+    "Rule", "Column", "Min", "Max", "Allowed values",
+    "If column", "If op", "If value", "Then column", "Then op", "Then value",
+]
+
+
+def _empty_expectations_frame() -> pd.DataFrame:
+    frame = pd.DataFrame({c: pd.Series(dtype="object") for c in _EXPECTATION_COLUMNS})
+    return frame.astype({"Min": "float64", "Max": "float64"})
+
+
+def _blank(value) -> bool:
+    return value is None or (isinstance(value, float) and math.isnan(value)) or str(value).strip() == ""
+
+
+def _expectation_spec(record: dict) -> dict:
+    """One expectations-editor row -> an expectations.py spec. Blank cells
+    become absent keys, so validate_expectation reports what's missing."""
+    kind = record["Rule"]
+    if kind == "conditional":
+        spec = {"type": kind}
+        for side in ("If", "Then"):
+            for field in ("column", "op", "value"):
+                value = record.get(f"{side} {field}")
+                if not _blank(value):
+                    spec[f"{side.lower()}_{field}"] = str(value).strip() if field == "value" else value
+        return spec
+    spec = {"type": kind, "column": None if _blank(record.get("Column")) else record["Column"]}
+    if kind == "range":
+        for field, key in (("Min", "min"), ("Max", "max")):
+            if not _blank(record.get(field)):
+                spec[key] = float(record[field])
+    if kind == "allowed_values":
+        raw = "" if _blank(record.get("Allowed values")) else str(record["Allowed values"])
+        spec["values"] = [v.strip() for v in raw.split(",") if v.strip()]
+    return spec
+
+
+def _expectation_table(results: list[dict]) -> list[dict]:
+    return [
+        {
+            "Expectation": r["rule"],
+            "Rows checked": r["evaluated"],
+            "Violations": r["violations"],
+            "Couldn't evaluate": r["not_evaluable"],
+            "Status": "Violated" if r["violations"] else ("Not evaluated" if not r["evaluated"] else "Holds"),
+        }
+        for r in results
+    ]
+
+
+# The theme's colors for places CSS can't reach (Altair charts, SVG, table
+# cell styles). Mirrors the --df-* tokens in the stylesheet above.
+_INK = "#15212B"
+_MUTED = "#5A6875"
+_ACCENT = "#2C5D86"
+_GRID = "#E3E8ED"
+_RULE = "#C9D2DA"
+# _FAIR is darker than the CSS amber tag (#D99A1E) so chart bars and the
+# score ring keep 3:1 contrast against the page.
+_GOOD, _FAIR, _POOR = "#2F6F4E", "#B07A12", "#B3261E"
+
+_STATUS_STYLES = {
+    "Flagged": "color: #8A5D06; font-weight: 600",
+    "Violated": f"color: {_POOR}; font-weight: 600",
+    "Passed": f"color: {_GOOD}",
+    "Holds": f"color: {_GOOD}",
+    "Not applicable": f"color: {_MUTED}",
+    "Not evaluated": f"color: {_MUTED}",
+}
+
+
+def _chart_theme(chart: alt.Chart, label_size: int = 11) -> alt.Chart:
+    """The shared look for every chart: transparent, hairline axes, muted labels."""
+    return (
+        chart.configure(background="transparent", font="IBM Plex Sans")
+        .configure_axis(labelColor=_MUTED, titleColor=_MUTED, gridColor=_GRID, domainColor=_RULE, tickColor=_RULE,
+                        labelFontSize=label_size, titleFontSize=11, titleFontWeight="normal")
+        .configure_view(strokeWidth=0)
+    )
+
+
+def _insight_chart(chart: dict) -> alt.Chart:
+    """A small, theme-matched Altair chart for one insight card."""
+    data = pd.DataFrame(chart["data"])
+    fmt = ".0%" if chart.get("percent") else ",.4~g"
+    if chart["type"] == "scatter":
+        base = alt.Chart(data).mark_circle(size=30, opacity=0.5, color=_ACCENT).encode(
+            x=alt.X("x:Q", title=chart["x"], scale=alt.Scale(zero=False)),
+            y=alt.Y("y:Q", title=chart["y"], scale=alt.Scale(zero=False)),
+        )
+        height = 220
+    elif chart["type"] == "line":
+        base = alt.Chart(data).mark_line(point=alt.OverlayMarkDef(color=_ACCENT, size=40), color=_ACCENT, strokeWidth=2).encode(
+            x=alt.X("label:O", title=chart["x"], axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("value:Q", title=chart["y"], axis=alt.Axis(format=fmt)),
+            tooltip=[alt.Tooltip("label:O", title=chart["x"]), alt.Tooltip("value:Q", title=chart["y"], format=fmt)],
+        )
+        height = 220
+    else:
+        # Counts get whole-number ticks (no "0.5 checks").
+        count_axis = alt.Axis(format="d", tickMinStep=1) if chart.get("integer") else alt.Axis(format=fmt)
+        base = alt.Chart(data).mark_bar(cornerRadiusEnd=1, color=_ACCENT).encode(
+            y=alt.Y("label:N", sort=None, title=chart["x"]),
+            x=alt.X("value:Q", title=chart["y"], axis=count_axis),
+            tooltip=[alt.Tooltip("label:N", title=chart["x"]), alt.Tooltip("value:Q", title=chart["y"], format=fmt)],
+        )
+        height = max(120, 30 * len(data) + 40)
+    return _chart_theme(base.properties(height=height))
+
+
+def _missing_map(
+    rows: list[dict], null_counts: dict[str, int], max_rows: int = 150, max_columns: int = 20
+) -> alt.Chart | None:
+    """Rows x columns grid with empty cells shaded: shows at a glance which
+    columns are empty together (a skip pattern, a break-off) rather than at
+    random. Rows are an even sample of up to `max_rows`, sorted by their
+    pattern of gaps so rows with the same gaps sit together; columns with no
+    gaps are left out. None when nothing is empty."""
+    def empty(row: dict, col: str) -> bool:
+        return row.get(col) in (None, "")
+
+    # Column choice uses the whole file's counts (already computed); only the
+    # sampled rows are scanned here, so this stays cheap on large files.
+    shown = sorted((c for c, n in null_counts.items() if n), key=lambda c: -null_counts[c])[:max_columns]
+    if not shown or not rows:
+        return None
+    # Evenly spaced across the whole file, so its end (where break-offs
+    # usually are) is never cut off.
+    n_picks = min(max_rows, len(rows))
+    picks = sorted({round(k * (len(rows) - 1) / max(1, n_picks - 1)) for k in range(n_picks)})
+    sample = [rows[i] for i in picks]
+    patterns = sorted((tuple(empty(r, c) for c in shown) for r in sample), key=lambda p: (-sum(p), [not x for x in p]))
+    data = pd.DataFrame(
+        [{"row": i, "column": c, "state": "Empty" if gap else "Filled"}
+         for i, pattern in enumerate(patterns) for c, gap in zip(shown, pattern, strict=True)]
+    )
+    chart = alt.Chart(data).mark_rect().encode(
+        x=alt.X("column:N", sort=shown, title=None, axis=alt.Axis(labelAngle=-40, labelLimit=110)),
+        y=alt.Y("row:O", title=f"{len(sample):,} rows (sorted by gap pattern)", axis=alt.Axis(labels=False, ticks=False)),
+        color=alt.Color("state:N", scale=alt.Scale(domain=["Empty", "Filled"], range=[_ACCENT, "#D5DEE7"]),
+                        legend=alt.Legend(title=None, orient="top")),
+        tooltip=[alt.Tooltip("column:N", title="Column"), alt.Tooltip("state:N", title="Cell")],
+    )
+    return _chart_theme(chart.properties(height=230))
+
+
+def _value_strip(
+    rows: list[dict], column: str, flagged_rows: set[int], flagged_label: str, other_label: str,
+    exclude: set[str] | None = None, max_points: int = 3000,
+) -> alt.Chart | None:
+    """One tick per value of a numeric column along a single axis, the
+    flagged rows in red: the picture behind an outlier or unit-mix exhibit
+    (two clusters, or a few values far from the rest). Missing-value codes
+    in `exclude` are left out so a 9999 doesn't stretch the axis."""
+    exclude = exclude or set()
+    points = []
+    for i, row in enumerate(rows):
+        raw = str(row.get(column, "") or "").strip()
+        if not raw or raw in exclude:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if math.isfinite(value):
+            points.append((i, value))
+    if len(points) < 3:
+        return None
+    # Thin both groups to about `max_points` in total, keeping the flagged
+    # group visible however small it is.
+    flagged = [p for p in points if p[0] in flagged_rows]
+    others = [p for p in points if p[0] not in flagged_rows]
+    budget = max(1, max_points // 2)
+    sample = flagged[:: max(1, len(flagged) // budget)] + others[:: max(1, len(others) // budget)]
+    data = pd.DataFrame(
+        [{"value": v, "group": flagged_label if i in flagged_rows else other_label, "row": i + 1} for i, v in sample]
+    )
+    chart = alt.Chart(data).mark_tick(thickness=2, size=26, opacity=0.85).encode(
+        x=alt.X("value:Q", title=column, scale=alt.Scale(zero=False)),
+        color=alt.Color("group:N", scale=alt.Scale(domain=[other_label, flagged_label], range=["#9FB1C2", _POOR]),
+                        legend=alt.Legend(title=None, orient="top")),
+        tooltip=[alt.Tooltip("row:Q", title="Row"), alt.Tooltip("value:Q", title=column), alt.Tooltip("group:N", title="")],
+    )
+    return _chart_theme(chart.properties(height=120))
+
+
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _date_timeline(rows: list[dict], column: str, gaps: list[dict]) -> alt.Chart | None:
+    """Each date in the column as a tick on a timeline, with the flagged
+    gaps shaded: the picture behind a coverage-gap exhibit."""
+    # Distinct YYYY-MM-DD values only -- the same values the gap detector
+    # uses -- so the chart stays small on large files and never has to
+    # reconcile time zones.
+    distinct = {v for r in rows if _ISO_DAY.match(v := str(r.get(column, "") or "").strip())}
+    dates = pd.to_datetime(pd.Series(sorted(distinct)), errors="coerce", format="%Y-%m-%d").dropna()
+    if dates.empty:
+        return None
+    ticks = alt.Chart(pd.DataFrame({"date": dates})).mark_tick(thickness=1.5, size=26, color=_ACCENT).encode(
+        x=alt.X("date:T", title=column)
+    )
+    spans = alt.Chart(pd.DataFrame(
+        [{"start": pd.Timestamp(g["after"]), "end": pd.Timestamp(g["before"]), "days": g["gap_days"]} for g in gaps]
+    )).mark_rect(color=_POOR, opacity=0.18).encode(
+        x="start:T", x2="end:T", tooltip=[alt.Tooltip("days:Q", title="Gap (days)", format=",.0f")]
+    )
+    return _chart_theme((spans + ticks).properties(height=120))
+
+
+_RULE_LABELS = {
+    **FIX_LABELS,
+    "missing_value_sentinel": "Map missing-value codes",
+    "category_mapping": "Merge category spellings",
+    "drop_exact_duplicate_row": "Remove exact duplicate rows",
+}
+
+
+def _changes_by_fix(mutations: list[dict]) -> alt.Chart | None:
+    """How many cells (or rows) each kind of approved fix changed."""
+    counts = Counter(m["transformation_rule"].split(":", 1)[0] for m in mutations)
+    if not counts:
+        return None
+    data = pd.DataFrame(
+        [{"label": _RULE_LABELS.get(rule, rule.replace("_", " ").capitalize()), "value": n} for rule, n in counts.most_common()]
+    )
+    bars = alt.Chart(data).mark_bar(cornerRadiusEnd=1, color=_ACCENT, height=16).encode(
+        y=alt.Y("label:N", sort=None, title=None, axis=alt.Axis(labelLimit=260, labelOverlap=False)),
+        x=alt.X("value:Q", title="Changes", axis=alt.Axis(format="d", tickMinStep=1)),
+        tooltip=[alt.Tooltip("label:N", title="Fix"), alt.Tooltip("value:Q", title="Changes")],
+    )
+    text = bars.mark_text(align="left", dx=6, fontSize=12, font="IBM Plex Mono").encode(
+        text="value:Q", color=alt.value(_INK)
+    )
+    return _chart_theme((bars + text).properties(height=max(110, 38 * len(data) + 40)), label_size=12)
+
+
+def _quality_ring(score: int) -> str:
+    """A circular gauge for the 0-100 quality score, colored by band."""
+    color = _GOOD if score >= 90 else _FAIR if score >= 70 else _POOR
+    circumference = 2 * 3.14159 * 34
+    filled = circumference * max(0, min(score, 100)) / 100
+    return (
+        '<svg class="df-ring" width="96" height="96" viewBox="0 0 80 80" role="img" '
+        f'aria-label="Quality score {score} out of 100">'
+        '<circle cx="40" cy="40" r="34" fill="none" stroke="#E3E8ED" stroke-width="6"/>'
+        f'<circle cx="40" cy="40" r="34" fill="none" stroke="{color}" stroke-width="6" stroke-linecap="butt" '
+        f'stroke-dasharray="{filled:.1f} {circumference:.1f}" transform="rotate(-90 40 40)"/>'
+        f'<text x="40" y="47" text-anchor="middle" class="df-ring-value">{score}</text></svg>'
+    )
+
+
+def _table_with_download(
+    title: str, rows: list[dict], file_name: str, key: str, status_column: str | None = None, **dataframe_kwargs
+) -> None:
+    """Screenshot-style table block: a title on the left, a Download (CSV)
+    button on the right, then the table itself."""
+    head, button = st.columns([5, 1], vertical_alignment="center")
+    head.markdown(f'<div class="df-table-title">{_esc(title)}</div>', unsafe_allow_html=True)
+    button.download_button(
+        "Download", data=rows_to_csv(rows), file_name=file_name, mime="text/csv",
+        key=key, width="stretch", disabled=not rows,
+    )
+    if rows:
+        data = pd.DataFrame(rows)
+        if status_column:
+            # Color-coded statuses (Flagged amber, Passed green, Not applicable grey).
+            data = data.style.map(lambda v: _STATUS_STYLES.get(v, ""), subset=[status_column])
+        st.dataframe(data, hide_index=True, width="stretch", **dataframe_kwargs)
+    else:
+        st.caption("Nothing to show.")
+
+def _n(count: float, word: str, spec: str = "") -> str:
+    """A count with its noun: "1 value", "3 values" -- not "3 value(s)"."""
+    return f"{count:{spec}} {word}{'' if count == 1 else 's'}"
 
 
 def _esc(value) -> str:
@@ -247,7 +915,7 @@ def _visualize_whitespace(value: str) -> str:
         return escaped
     marker = '<span style="background:#FEE2E2; color:#B91C1C;">&middot;</span>'
     visible = (marker * leading_ws) + _esc(stripped) + (marker * trailing_ws)
-    return f'{visible} <span style="color:#94A3B8; font-style:italic;">(hidden whitespace, {len(value)} chars total)</span>'
+    return f'{visible} <span style="color:#5A6875; font-style:italic;">(hidden whitespace, {len(value)} chars total)</span>'
 
 
 _PII_EVIDENCE_MASK = "[masked: potential identifier pattern detected]"
@@ -319,29 +987,17 @@ def _evidence_panel(
     *,
     rule: str,
     lines: list[str],
-    known: str,
     not_known: str,
     recommended_action: str,
     max_shown: int = 10,
 ) -> None:
-    """Render a "Why was this flagged?" expander: the specific rule that
-    fired, real evidence rows (never just a count), an explicit split
-    between what the system actually knows and what it does NOT know
-    (the honest boundary of the detection, not a confident-sounding
-    guess dressed up as a conclusion), the recommended next step, and a
-    statement that nothing was changed automatically. This is the
-    "evidence, not blind fixes" design principle applied at the UI
-    level, not just the underlying detection logic -- every finding
-    already carries real evidence internally (row indices, actual
-    values); this makes that evidence visible and traceable instead of
-    collapsing it into a count. "row N" is the Nth data row (1-indexed,
-    not counting the header), since no primary key has necessarily been
-    chosen yet at this point in the flow (that happens in Step 3, after
-    every finding here is shown).
+    """Render a "Why was this flagged?" expander: real evidence rows (never
+    just a count), what the check can't tell (the honest
+    limit of the detection), the next step, and the rule that fired.
+    "row N" is the Nth data row (1-indexed, not counting the header).
+    Nothing on the Issues page changes data; the page banner says so once.
     """
     with st.expander("Why was this flagged?"):
-        st.markdown(f"**Rule:**  \n{_esc(rule)}")
-        st.markdown("**Evidence:**")
         shown_lines = lines[:max_shown]
         st.markdown(
             f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in shown_lines)}</div>',
@@ -349,10 +1005,397 @@ def _evidence_panel(
         )
         if len(lines) > max_shown:
             st.caption(f"...and {len(lines) - max_shown} more row(s) not shown.")
-        st.markdown(f"**What the system knows:**  \n{_esc(known)}")
-        st.markdown(f"**What it does NOT know:**  \n{_esc(not_known)}")
-        st.markdown(f"**Recommended action:**  \n{_esc(recommended_action)}")
-        st.markdown("**Automatic modification:**  \nNONE — only applied if you approve it above and click *Apply approved changes*.")
+        st.markdown(f"**Can't tell:** {_esc(not_known)}")
+        st.markdown(f"**Next step:** {_esc(recommended_action)}")
+        st.caption(f"Rule: {_esc(rule)}")
+
+
+@st.cache_data(show_spinner="Running automated checks…", max_entries=8)
+def _cached_investigation(data_bytes: bytes, file_name: str, sheet: str | None, dataset_type: str, data_size: int) -> dict:
+    """run_investigation, cached on the file's bytes + options. Every widget
+    click reruns this script; without the cache, each click re-ran every
+    check over the whole file. The temp copy is needed because the
+    readers take a path; its location doesn't affect the result."""
+    return run_investigation(_write_temp(file_name, data_bytes), sheet=sheet, dataset_type=dataset_type, data_size=data_size)
+
+
+@st.cache_data(show_spinner="Finding patterns…", max_entries=16)
+def _cached_insight_cards(investigation_args: tuple, adjust_for: tuple[str, ...], codebook: bytes | None) -> list[dict]:
+    """Insight cards for the user's chosen confounders and codebook, built
+    from the cached investigation's inputs (only this step reruns when the
+    options change). The codebook was validated when it was stored."""
+    result = _cached_investigation(*investigation_args)
+    return build_key_insights(
+        **result["insight_inputs"],
+        adjust_for=list(adjust_for),
+        value_labels=parse_codebook(codebook) if codebook else None,
+    )
+
+
+def _adjustable_columns(result: dict) -> list[str]:
+    """Columns a pattern can be re-tested within: the grouping (category)
+    and numeric columns the insights already use."""
+    inputs = result["insight_inputs"]
+    return list(dict.fromkeys([*result["default_adjust_for"], *inputs["grouping_columns"], *inputs["continuous_columns"]]))
+
+
+def _insight_cards(investigation_args: tuple, result: dict) -> list[dict]:
+    """The cards for the current options: the confounders picked on the
+    Insights tab (age and sex by default) and the dataset's codebook."""
+    chosen = st.session_state.get("dataforensics_adjust_for")
+    if chosen is None or st.session_state.get("dataforensics_adjust_for_source") != investigation_args[1:]:
+        # Picked for a different sheet or profile (or never): the defaults.
+        chosen = result["default_adjust_for"]
+    allowed = set(_adjustable_columns(result))
+    codebook = st.session_state.get("dataforensics_codebook")
+    return _cached_insight_cards(
+        investigation_args, tuple(c for c in chosen if c in allowed), codebook["bytes"] if codebook else None
+    )
+
+
+def _store_codebook(name: str, data: bytes) -> str | None:
+    """Validate and keep a codebook for the current dataset; the error
+    message if it can't be read."""
+    try:
+        labels = parse_codebook(data)
+    except CodebookError as exc:
+        return str(exc)
+    st.session_state["dataforensics_codebook"] = {"name": name, "bytes": data, "columns": len(labels)}
+    return None
+
+
+def _remove_codebook() -> None:
+    st.session_state.pop("dataforensics_codebook", None)
+
+
+def _approval_buttons(recommended: list[str], every: list[str], where: str) -> None:
+    if not every:
+        return
+    b1, b2, _ = st.columns([2.2, 1.4, 1])
+    b1.button(
+        "Approve all recommended fixes",
+        icon=":material/done_all:",
+        key=f"approve_all_{where}",
+        on_click=_set_approvals,
+        args=(recommended, True),
+        disabled=not recommended,
+        help="Ticks every safe fix, duplicate removal, missing-value code and high-confidence spelling merge. "
+        "Date order (MM/DD vs DD/MM) and fuzzy spelling matches stay for you to decide.",
+    )
+    b2.button("Clear all approvals", key=f"clear_all_{where}", on_click=_set_approvals, args=(every, False))
+
+
+def _approval_model(
+    *,
+    source_key: str,
+    rows: list[dict],
+    columns: list[str],
+    column_types: dict,
+    id_like_defaults: list[str],
+    sentinels: dict,
+    ambiguous_dates: dict,
+    category_clusters: dict,
+    dup_rows: list,
+    whitespace_anomaly_counts: dict,
+    invisible_char_counts: dict,
+    encoding_corruption_counts: dict,
+    numeric_representation_findings: dict,
+    lost_leading_zero_findings: dict,
+    unit_inconsistency_findings: dict,
+    excel_serial_findings: dict,
+) -> dict:
+    """Everything the analyst has approved, read from session state with
+    the same defaults the Review & fix widgets use -- the single source of
+    truth for every page. (On the step pages the approval widgets are only
+    drawn on Review & fix, so approvals can't be read from widget return
+    values: the Results page has none.) Also returns the fix offers and the
+    approval-key lists the Approve-all / Clear-all buttons act on."""
+    state = st.session_state
+    primary_key = state.get(f"dataforensics_primary_key__{source_key}", id_like_defaults[:1] or columns[:1]) or columns[:1]
+    approved_sentinels: dict[str, dict[str, str]] = {}
+    approved_categories: dict[str, dict[str, str]] = {}
+    approved_date_formats: dict[str, str] = {}
+    approved_fixes: dict = {}
+    recommended: list[str] = []
+    every: list[str] = []
+
+    for col, values in sentinels.items():
+        for val in values:
+            key = f"sentinel__{source_key}__{col}__{val}"
+            every.append(f"{key}_on")
+            if col not in primary_key:
+                recommended.append(f"{key}_on")
+            if state.get(f"{key}_on", False):
+                default_label = "" if column_types.get(col) == "numeric" else "Missing"
+                approved_sentinels.setdefault(col, {})[val] = state.get(f"{key}_label", default_label)
+
+    for col in ambiguous_dates:
+        key = f"date__{source_key}__{col}"
+        every.append(f"{key}_on")
+        if state.get(f"{key}_on", False):
+            fmt = state.get(f"{key}_fmt", "MM/DD/YYYY")
+            approved_date_formats[col] = "%m/%d/%Y" if fmt == "MM/DD/YYYY" else "%d/%m/%Y"
+
+    for col, clusters in category_clusters.items():
+        for i, cluster in enumerate(clusters):
+            key = f"cat__{source_key}__{col}__{i}_on"
+            label_collision = col in sentinels and bool({"Missing", ""} & set(cluster["values"]))
+            default = cluster["confidence"] == "high" and not label_collision
+            every.append(key)
+            if default and col not in primary_key:
+                recommended.append(key)
+            if state.get(key, default):
+                for v in cluster["values"]:
+                    if v != cluster["suggested_canonical"]:
+                        approved_categories.setdefault(col, {})[v] = cluster["suggested_canonical"]
+
+    fix_offers: list[tuple[str, str, str, dict | int | str | None, list[tuple[int, str]]]] = []
+    for col, n in whitespace_anomaly_counts.items():
+        fix_offers.append(("whitespace", col, f"{_n(n, 'value', spec=',')} with extra spaces", None, find_whitespace_anomaly_evidence(rows, col)))
+    for col, n in invisible_char_counts.items():
+        fix_offers.append(("invisible", col, f"{_n(n, 'value', spec=',')} with hidden characters", None, find_invisible_character_evidence(rows, col)))
+    for col, n in encoding_corruption_counts.items():
+        fix_offers.append(("mojibake", col, f"{_n(n, 'value', spec=',')} with broken text encoding", None, find_encoding_corruption_evidence(rows, col)))
+    for col, f in numeric_representation_findings.items():
+        fix_offers.append(
+            ("numeric_format", col, f"{_n(f['decorated_count'], 'number', spec=',')} written as text ($, commas, k/M)", None,
+             find_numeric_representation_evidence(rows, col))
+        )
+    for col, info in lost_leading_zero_findings.items():
+        evidence = [
+            (i, v) for i, r in enumerate(rows)
+            if (v := str(r.get(col, "")).strip()).isdigit() and len(v) < info["width"]
+        ]
+        fix_offers.append(("leading_zeros", col, f"{_n(info['count'], 'code', spec=',')} shorter than {info['width']} digits", info["width"], evidence))
+    inseparable_unit_columns = [col for col, u in unit_inconsistency_findings.items() if not u["separable"]]
+    for col, u in unit_inconsistency_findings.items():
+        if not u["separable"]:
+            continue
+        minority_unit = u["unit_b"] if u["minority_side"] == "high" else u["unit_a"]
+        majority_unit = u["unit_a"] if u["minority_side"] == "high" else u["unit_b"]
+        minority_count = u["high_count"] if u["minority_side"] == "high" else u["low_count"]
+        fix_offers.append(
+            ("units", col, f"convert {_n(minority_count, 'value', spec=',')} that look like {minority_unit} to {majority_unit}",
+             unit_fix_params(u),
+             find_unit_inconsistency_evidence(rows, col, u["boundary"], u["minority_side"], (u["minority_min"], u["minority_max"])))
+        )
+    for col, serials in excel_serial_findings.items():
+        fix_offers.append(
+            ("excel_dates", col, f"{_n(len(serials), 'date', spec=',')} stored as Excel numbers (e.g. 45000 = 2023-03-15)", None,
+             [(i, v) for i, v, _ in serials])
+        )
+    for col, fmt in approved_date_formats.items():
+        fix_offers.append(("date_iso", col, "rewrite dates as YYYY-MM-DD using the format you declared", fmt,
+                           find_ambiguous_date_evidence(rows, col)))
+
+    for fix, col, _description, param, _evidence in fix_offers:
+        key = f"fix__{source_key}__{fix}__{col}"
+        every.append(key)
+        if col not in primary_key:
+            recommended.append(key)
+        if state.get(key, False):
+            if fix in ("leading_zeros", "date_iso", "units"):
+                approved_fixes.setdefault(fix, {})[col] = param
+            else:
+                approved_fixes.setdefault(fix, []).append(col)
+    if dup_rows:
+        key = f"fix__{source_key}__drop_duplicates"
+        every.append(key)
+        recommended.append(key)
+        if state.get(key, False):
+            approved_fixes["drop_exact_duplicate_rows"] = True
+
+    approved_count = (
+        sum(len(v) for v in approved_sentinels.values())
+        + len(approved_date_formats)
+        + sum(
+            1 for col, clusters in category_clusters.items() for i, c in enumerate(clusters)
+            if state.get(f"cat__{source_key}__{col}__{i}_on",
+                         c["confidence"] == "high" and not (col in sentinels and bool({"Missing", ""} & set(c["values"]))))
+        )
+        + sum(len(v) for v in approved_fixes.values() if isinstance(v, (list, dict)))
+        + (1 if approved_fixes.get("drop_exact_duplicate_rows") else 0)
+    )
+    return {
+        "approved_count": approved_count,
+        "primary_key": primary_key,
+        "approved_sentinels": approved_sentinels,
+        "approved_categories": approved_categories,
+        "approved_date_formats": approved_date_formats,
+        "approved_fixes": approved_fixes,
+        "fix_offers": fix_offers,
+        "inseparable_unit_columns": inseparable_unit_columns,
+        "recommended_keys": recommended,
+        "all_keys": every,
+    }
+
+
+def _expectation_specs(frame, columns: list[str]) -> tuple[list[dict], list[str]]:
+    """Valid expectation specs from the editor table, plus a message for
+    each row that was skipped as invalid."""
+    specs: list[dict] = []
+    problems: list[str] = []
+    if frame is None:
+        return specs, problems
+    for n, record in enumerate(frame.to_dict("records"), start=1):
+        if _blank(record.get("Rule")):
+            continue
+        spec = _expectation_spec(record)
+        try:
+            validate_expectation(spec, columns)
+        except ValueError as exc:
+            problems.append(f"Expectation row {n} skipped: {exc}")
+            continue
+        specs.append(spec)
+    return specs, problems
+
+
+_STEPS = {
+    "upload": "1 · Upload",
+    "overview": "2 · Overview",
+    "issues": "3 · Issues",
+    "review": "4 · Review & fix",
+    "results": "5 · Results",
+}
+
+
+def _go_to_step(step: str) -> None:
+    """Button callback: move to another step page (runs before widgets
+    render, so it can set the stepper's own key)."""
+    st.session_state["dataforensics_step"] = step
+
+
+def _go_home() -> None:
+    """Logo callback: a fresh start on the home page, scrolled to the top --
+    the same as reloading the page. Everything from this session (the file,
+    approvals, applied results) is cleared; nothing is kept anywhere."""
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.session_state["dataforensics_scroll_top"] = True
+
+
+def _open_workspace(label: str) -> None:
+    st.session_state["dataforensics_workspace"] = label
+
+
+def _approval_signature(source_key: str, primary_key: list[str], rules: dict, fixes: dict, specs: list[dict]) -> str:
+    """A fingerprint of exactly what is approved, so Results can tell
+    whether the approvals changed after Apply was clicked."""
+    return json.dumps(
+        [source_key, primary_key, rules.get("missing_values"), rules.get("category_mappings"), rules.get("columns"), fixes, specs],
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _apply_now() -> None:
+    """Apply button callback: mark the moment and show Results. What was
+    approved is recorded on the next run (see "apply_requested" below), once
+    any value submitted together with the click -- e.g. a "Map to" label
+    typed without pressing Enter -- has reached session state."""
+    st.session_state["dataforensics_apply_requested"] = True
+    st.session_state["dataforensics_applied"] = True
+    st.session_state["dataforensics_applied_at"] = datetime.now(UTC).isoformat()
+    st.session_state["dataforensics_step"] = "results"
+
+
+def _step_nav(current: str) -> None:
+    """Back / Next buttons at the bottom of a step page."""
+    keys = list(_STEPS)
+    i = keys.index(current)
+    st.markdown('<div class="df-step-nav-gap"></div>', unsafe_allow_html=True)
+    back, _, forward = st.columns([1.3, 2, 1.6])
+    if i > 0:
+        back.button(f"← {_STEPS[keys[i - 1]].split(' · ')[1]}", key=f"nav_back_{current}", on_click=_go_to_step,
+                    args=(keys[i - 1],), width="stretch")
+    if i < len(keys) - 1:
+        forward.button(f"Next: {_STEPS[keys[i + 1]].split(' · ')[1]} →", key=f"nav_next_{current}", type="primary",
+                       on_click=_go_to_step, args=(keys[i + 1],), width="stretch")
+
+
+def _page_banner(eyebrow: str, title: str, sub: str, chips: list[tuple[str, str]] | None = None, footnote: str = "") -> None:
+    """Page header. Callers escape any uploaded value they pass in."""
+    chip_html = "".join(f'<div class="df-hero-stat"><b>{v}</b><span>{label}</span></div>' for v, label in chips or [])
+    st.markdown(
+        f'<div class="df-page-banner"><div class="df-hero-eyebrow">{eyebrow}</div>'
+        f'<h1 class="df-banner-title">{title}</h1><p class="df-hero-sub">{sub}</p>'
+        + (f'<div class="df-hero-stats">{chip_html}</div>' if chip_html else "")
+        + (f'<div class="df-banner-foot">{footnote}</div>' if footnote else "")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _before_after_chart(before: dict, after: dict) -> alt.Chart:
+    """Grouped bars: each quality dimension before vs after cleaning."""
+    dims = [("overall", "Overall"), ("completeness", "Completeness"), ("consistency", "Consistency"),
+            ("validity", "Validity"), ("uniqueness", "Uniqueness"), ("structural_quality", "Structure")]
+    data = pd.DataFrame(
+        [{"Dimension": label, "When": when, "Score": scores[key]}
+         for key, label in dims for when, scores in (("Before", before), ("After", after))]
+    )
+    return _chart_theme(
+        alt.Chart(data).mark_bar(cornerRadiusEnd=1, height=12).encode(
+            y=alt.Y("Dimension:N", sort=[d[1] for d in dims], title=None),
+            yOffset=alt.YOffset("When:N", sort=["Before", "After"]),
+            x=alt.X("Score:Q", scale=alt.Scale(domain=[0, 100]), title=None),
+            color=alt.Color("When:N", sort=["Before", "After"], scale=alt.Scale(range=["#B4C0CC", _ACCENT]),
+                            legend=alt.Legend(title=None, orient="top", labelColor=_MUTED)),
+            tooltip=["Dimension:N", "When:N", "Score:Q"],
+        )
+        .properties(height=280),
+        label_size=12,
+    )
+
+
+def _score_bars(scores: list[tuple[str, int]]) -> alt.Chart:
+    """Horizontal 0-100 bars, colored by band (green 90+, amber 70+, red)."""
+    data = pd.DataFrame(
+        [{"label": k, "value": v, "band": "good" if v >= 90 else "fair" if v >= 70 else "poor"} for k, v in scores]
+    )
+    chart = alt.Chart(data).mark_bar(cornerRadiusEnd=1, height=16).encode(
+        y=alt.Y("label:N", sort=None, title=None),
+        x=alt.X("value:Q", title=None, scale=alt.Scale(domain=[0, 100])),
+        color=alt.Color("band:N", scale=alt.Scale(domain=["good", "fair", "poor"], range=[_GOOD, _FAIR, _POOR]), legend=None),
+        tooltip=[alt.Tooltip("label:N", title="Dimension"), alt.Tooltip("value:Q", title="Score")],
+    )
+    text = chart.mark_text(align="left", dx=6, fontSize=12, font="IBM Plex Mono").encode(
+        text="value:Q", color=alt.value(_INK)
+    )
+    return _chart_theme((chart + text).properties(height=190), label_size=12)
+
+
+def _set_approvals(keys: list[str], value: bool) -> None:
+    """Button callback: tick or untick a set of approval checkboxes. Runs
+    before the rerun, so the checkboxes render with the new values."""
+    for key in keys:
+        st.session_state[key] = value
+    # Changing approvals invalidates an already-applied result.
+    st.session_state["dataforensics_applied"] = False
+
+
+def _summary_row(label: str, severity: str, where: str = "exhibit") -> None:
+    """One line in the Issues page's summary of findings, for a finding whose
+    full evidence is elsewhere: an exhibit further down, or its fix on Review
+    & fix. `label` may contain column names, so it is escaped."""
+    tag = "Likely error" if severity == "error" else "Worth a look"
+    pointer = "see exhibit below" if where == "exhibit" else "fix on Review &amp; fix"
+    st.markdown(
+        f'<div class="df-sumrow sev-{severity}"><span class="df-sumrow-tag">{tag}</span>'
+        f'<span class="df-sumrow-label">{_esc(label)}</span><span class="df-sumrow-where">{pointer}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _blocking_card(title: str, detail: str) -> None:
+    """A red "Blocking" card for a problem that stops the analysis. Both
+    strings may contain uploaded file names, so both are escaped."""
+    st.markdown(
+        f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-error">Blocking</span>'
+        f'<div class="dataforensics-card-title">{_esc(title)}</div>'
+        f'<div class="dataforensics-card-evidence">{_esc(detail)}</div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _write_temp(name: str, content: bytes) -> Path:
@@ -407,7 +1450,76 @@ def _rewrite_with_deduplicated_header(path: Path) -> Path:
     return new_path
 
 
-tab_analyze, tab_multifile = st.tabs(["Analyze & Clean", "Multi-File Relationships"])
+# A step change requested outside a callback (loading a file or a sample)
+# is applied here, before the sidebar, top bar or stepper read the step.
+_pending_step = st.session_state.pop("dataforensics_pending_step", None)
+if _pending_step:
+    st.session_state["dataforensics_step"] = _pending_step
+if st.session_state.get("dataforensics_data_bytes") is not None:
+    st.session_state.setdefault("dataforensics_step", "overview")
+
+# Workspace switcher in the sidebar (replaces the old top-level st.tabs).
+# Rendering only the chosen workspace also means the Analyze flow's
+# st.stop() calls (e.g. "no file uploaded yet") can no longer blank out the
+# Multi-File workspace, which the shared-script tabs layout allowed.
+_WORKSPACES = {
+    "Analyze & Clean": "analyze",
+    "Checks": "reference",
+    "Multi-File Relationships": "multi",
+    "Insights": "insights",  # set apart below a rule in the sidebar (CSS)
+}
+with st.sidebar:
+    st.markdown('<div class="df-side-label">Workspace</div>', unsafe_allow_html=True)
+    workspace = _WORKSPACES[
+        st.radio("Workspace", list(_WORKSPACES.keys()), key="dataforensics_workspace", label_visibility="collapsed")
+    ]
+    # The domain-specific checks (clinical ranges, FIPS/ZIP, survey weights)
+    # are chosen from the file's own columns -- no profile to pick.
+    dataset_type = AUTO_PROFILE
+    # Pinned to the bottom of the sidebar by CSS (.df-side-note).
+    st.markdown(
+        f'<div class="df-side-note">{len(CHECKS)} automated checks for data quality issues such as missing-value '
+        "codes, duplicates, inconsistencies, mixed units, contradictions between columns and spreadsheet "
+        "damage.</div>",
+        unsafe_allow_html=True,
+    )
+
+_top_bar()
+
+# Streamlit discards a widget's stored value on any run where that widget
+# isn't drawn, and only one workspace is drawn at a time. While Multi-File
+# is open, re-store the Analyze workspace's review widgets as plain
+# session state so they survive the round trip -- otherwise switching back
+# would silently reset approvals, profile and primary key while the
+# "applied" flag survived, and the rebuilt audit trail would no longer
+# match what the user actually approved.
+_ANALYZE_WIDGET_KEY_PREFIXES = (
+    "dataforensics_step",  # the stepper: keep the open page across workspace switches
+    "fix__",
+    "sentinel__",
+    "date__",
+    "cat__",
+    "dataforensics_primary_key",
+    "dataforensics_sheet_choice",
+)
+# Same problem within Analyze: each step page draws only its own widgets.
+# The approval widgets live on Review & fix, the sheet picker on every page
+# after Upload, the profile picker in the sidebar.
+_current_step = st.session_state.get("dataforensics_step")
+if workspace != "analyze":
+    _restore_prefixes: tuple[str, ...] = _ANALYZE_WIDGET_KEY_PREFIXES
+else:
+    _restore_prefixes = ()
+    if _current_step != "review":
+        _restore_prefixes += ("fix__", "sentinel__", "date__", "cat__", "dataforensics_primary_key")
+    if _current_step == "upload":
+        _restore_prefixes += ("dataforensics_sheet_choice",)
+if workspace != "insights":
+    # The Insights tab's "re-test within" picker.
+    _restore_prefixes += ("dataforensics_adjust_for",)
+if _restore_prefixes:
+    for _key in [k for k in st.session_state if isinstance(k, str) and k.startswith(_restore_prefixes)]:
+        st.session_state[_key] = st.session_state[_key]
 
 # Two real, unmodified extracts from public U.S. government microdata --
 # each subsampled from a much larger official release to a demo-
@@ -425,6 +1537,8 @@ tab_analyze, tab_multifile = st.tabs(["Analyze & Clean", "Multi-File Relationshi
 _EXAMPLE_DATASETS = {
     "ACS PUMS (Census)": {
         "file": "acs_pums_person_dc.csv",
+        "tag": "Real · U.S. Census",
+        "short": "Washington, D.C. person records with real income top-coding and skip-pattern gaps.",
         "caption": (
             "U.S. Census Bureau, 2023 American Community Survey 1-Year PUMS — "
             "person records, Washington D.C. Real household/income microdata with "
@@ -434,6 +1548,8 @@ _EXAMPLE_DATASETS = {
     },
     "BRFSS (CDC)": {
         "file": "brfss_survey_sample.csv",
+        "tag": "Real · CDC",
+        "short": "Health survey responses with real 7 / 9 / 9999 missing-value codes and age top-coded at 80.",
         "caption": (
             "CDC, 2023 Behavioral Risk Factor Surveillance System — survey respondent "
             "sample. Real self-reported health survey data with textbook missing-value "
@@ -442,9 +1558,11 @@ _EXAMPLE_DATASETS = {
     },
     "Messy CSV Example": {
         "file": "messy_csv_example.csv",
+        "tag": "Synthetic · every fix",
+        "short": "An intake form built to trigger every fix: inconsistent spellings, mixed units, a duplicate patient.",
         "caption": (
             "Synthetic intake-form data — not real. Deliberately built to exercise the "
-            "full Review & Approve workflow: inconsistent category spellings, literal "
+            "full Review & fix workflow: inconsistent category spellings, literal "
             "missing-value codes, an ambiguous date, mixed measurement units, a "
             "near-duplicate patient, and more."
         ),
@@ -453,60 +1571,103 @@ _EXAMPLE_DATASETS = {
 _EXAMPLES_DIR = Path(__file__).parent / "fixtures" / "demos"
 
 
+def _forget_previous_analysis() -> None:
+    """A new dataset invalidates the last applied result and the Insights
+    tab's pointer to the last analysis (otherwise Insights would keep
+    showing the previous file if the new one can't be analyzed)."""
+    for key in ("dataforensics_dedup_choice_made", "dataforensics_applied", "dataforensics_applied_at",
+                "dataforensics_insight_args", "dataforensics_insight_name", "dataforensics_codebook",
+                "dataforensics_adjust_for", "dataforensics_adjust_for_source", "dataforensics_codebook_problem",
+                "dataforensics_codebook_seen"):
+        st.session_state.pop(key, None)
+
+
 def _load_example_dataset(label: str) -> None:
     info = _EXAMPLE_DATASETS[label]
     st.session_state["dataforensics_data_bytes"] = (_EXAMPLES_DIR / info["file"]).read_bytes()
     st.session_state["dataforensics_data_name"] = info["file"]
-    st.session_state.pop("dataforensics_dedup_choice_made", None)
-    st.session_state.pop("dataforensics_applied", None)
-    st.session_state.pop("dataforensics_applied_at", None)
+    _forget_previous_analysis()
+    # The real survey extracts come with their official code labels.
+    codebook = _EXAMPLES_DIR / info["file"].replace(".csv", ".codebook.csv")
+    if codebook.exists() and (problem := _store_codebook(codebook.name, codebook.read_bytes())):
+        st.session_state["dataforensics_codebook_problem"] = f"the bundled {codebook.name}: {problem}"
+    st.session_state["dataforensics_pending_step"] = "overview"
 
 
-with tab_analyze:
+if workspace == "analyze":
     # ------------------------------------------------------------------ #
-    # Step 1: Upload
+    # Step pages: Upload -> Overview -> Issues -> Review & fix -> Results.
+    # Only the current page renders. Approvals are read from session state
+    # (_approval_model), never from widgets drawn on another page.
     # ------------------------------------------------------------------ #
-    data_file = st.file_uploader(
-        "Upload a CSV/TSV/JSON/Excel file", type=["csv", "tsv", "json", "xlsx", "xls"], label_visibility="visible"
-    )
-
-    if data_file is not None and data_file.name != st.session_state.get("dataforensics_data_name"):
-        st.session_state["dataforensics_data_bytes"] = data_file.getvalue()
-        st.session_state["dataforensics_data_name"] = data_file.name
-        st.session_state.pop("dataforensics_dedup_choice_made", None)
-        st.session_state.pop("dataforensics_applied", None)
-        st.session_state.pop("dataforensics_applied_at", None)
-
-    with st.expander("Or try an example dataset — no upload needed"):
-        st.caption(
-            "ACS PUMS and BRFSS are real, unmodified extracts from a public U.S. "
-            "government release, subsampled to a demo-appropriate size. Messy CSV "
-            "Example is synthetic, built to show the full Review & Approve workflow."
+    has_dataset = st.session_state.get("dataforensics_data_bytes") is not None
+    if has_dataset:
+        st.segmented_control(
+            "Step",
+            list(_STEPS),
+            format_func=lambda key: _STEPS[key],
+            key="dataforensics_step",
+            required=True,
+            label_visibility="collapsed",
+            width="stretch",
         )
-        ex_cols = st.columns(3)
-        for ex_col, (label, info) in zip(ex_cols, _EXAMPLE_DATASETS.items()):
-            with ex_col:
-                # Fixed-height text block so all three "Load this dataset"
-                # buttons land on the same row regardless of how long each
-                # dataset's caption is.
-                with st.container(height=190, border=False):
-                    st.markdown(f"**{label}**")
-                    st.caption(info["caption"])
-                if st.button("Load this dataset", key=f"load_example_{label}", width="stretch"):
+        step = st.session_state.get("dataforensics_step") or "overview"
+    else:
+        step = "upload"
+
+    if step == "upload":
+        st.markdown(_hero_html(), unsafe_allow_html=True)
+        data_file = st.file_uploader(
+            "Open a dataset", type=["csv", "tsv", "json", "xlsx", "xls"], label_visibility="collapsed",
+            key="dataforensics_data_upload",
+        )
+        # Each new upload is processed once (by its upload id), so re-uploading
+        # an edited file with the same name is picked up too.
+        if data_file is not None and data_file.file_id != st.session_state.get("dataforensics_upload_seen"):
+            st.session_state["dataforensics_upload_seen"] = data_file.file_id
+            st.session_state["dataforensics_data_bytes"] = data_file.getvalue()
+            st.session_state["dataforensics_data_name"] = data_file.name
+            _forget_previous_analysis()
+            st.session_state["dataforensics_pending_step"] = "overview"
+            st.rerun()
+
+        st.markdown(
+            '<div class="df-section-title" style="font-size:1.1rem">Or start with a sample</div>'
+            '<div class="df-section-sub">Two real, unmodified U.S. government extracts and one deliberately messy '
+            "synthetic file.</div>",
+            unsafe_allow_html=True,
+        )
+        # A compact list: one ruled row per sample, with its actions on the right.
+        with st.container(border=True):
+            for index, (label, info) in enumerate(_EXAMPLE_DATASETS.items()):
+                if index:
+                    st.markdown('<div class="df-row-rule"></div>', unsafe_allow_html=True)
+                text_col, load_col, download_col = st.columns([5, 1.4, 1.3], vertical_alignment="center")
+                text_col.markdown(
+                    f'<div class="df-sample"><span class="df-sample-tag">{_esc(info["tag"])}</span>'
+                    f'<div class="df-sample-title">{_esc(label)}</div>'
+                    f'<div class="df-sample-text" title="{_esc(info["caption"])}">{_esc(info["short"])}</div></div>',
+                    unsafe_allow_html=True,
+                )
+                if load_col.button("Load this dataset", key=f"load_example_{label}", width="stretch", help=info["caption"]):
                     _load_example_dataset(label)
                     st.rerun()
-                st.download_button(
-                    f"⬇ Download {info['file']}",
+                download_col.download_button(
+                    "Download CSV",
+                    help=info["file"],
                     data=(_EXAMPLES_DIR / info["file"]).read_bytes(),
                     file_name=info["file"],
                     mime="text/csv",
                     width="stretch",
                     key=f"download_example_{label}",
+                    icon=":material/download:",
                 )
+        if has_dataset:
+            _step_nav("upload")
+        st.stop()
 
-    if not st.session_state.get("dataforensics_data_bytes"):
-        _step_bar(1)
-        st.info("Upload a file above to get started.")
+    if not st.session_state["dataforensics_data_bytes"].strip():
+        _blocking_card("This file is empty", f"{st.session_state['dataforensics_data_name']} has no content. Check the export and re-upload.")
         st.stop()
 
     raw_path = _write_temp(st.session_state["dataforensics_data_name"], st.session_state["dataforensics_data_bytes"])
@@ -518,7 +1679,6 @@ with tab_analyze:
         try:
             sheet_names = list_excel_sheets(raw_path)
         except IngestFormatError as exc:
-            _step_bar(1)
             st.markdown(
                 f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-error">Blocking</span>'
                 f'<div class="dataforensics-card-title">Can\'t read this file</div>'
@@ -540,7 +1700,6 @@ with tab_analyze:
         check_header_has_no_duplicates(_sniff_header(raw_path, sheet=sheet_choice))
         data_path = raw_path
     except DuplicateHeaderError as exc:
-        _step_bar(1)
         st.markdown(
             f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-error">Blocking</span>'
             f'<div class="dataforensics-card-title">Duplicate column names found</div>'
@@ -566,7 +1725,6 @@ with tab_analyze:
             st.write("Fix the duplicate column names in the source file and re-upload it above.")
             st.stop()
     except IngestFormatError as exc:
-        _step_bar(1)
         st.markdown(
             f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-error">Blocking</span>'
             f'<div class="dataforensics-card-title">Can\'t read this file</div>'
@@ -575,1599 +1733,150 @@ with tab_analyze:
         )
         st.stop()
 
-    # ------------------------------------------------------------------ #
-    # Step 2: Investigate — always runs, never mutates anything
-    # ------------------------------------------------------------------ #
-    _step_bar(2)
-    dictionary = build_data_dictionary(data_path, sheet=sheet_choice)
-    rows = read_rows(data_path, sheet=sheet_choice)
-    columns = list(dictionary.keys())
-    id_like_defaults = [c for c, f in dictionary.items() if f.get("category") == "id"]
-    column_types = classify_column_types(dictionary, rows)
-    # Computed once, shared by the "Suggested variable roles" expander
-    # further down AND the quasi-identifier / birth-date cross-column
-    # checks below -- both need to know which columns look like a name,
-    # date of birth, ZIP, etc., and re-deriving it twice risked exactly
-    # the kind of drift this app has hit before.
-    role_by_column = {col: infer_semantic_role(col, dictionary[col]) for col in columns}
+    investigation_args = (
+        # The uploaded bytes themselves unless the header had to be
+        # de-duplicated into a new file -- no second copy in session state.
+        st.session_state["dataforensics_data_bytes"] if data_path == raw_path else data_path.read_bytes(),
+        data_path.name,
+        sheet_choice,
+        dataset_type,
+        len(st.session_state["dataforensics_data_bytes"]),
+    )
+    investigation = _cached_investigation(*investigation_args)
+    # The Insights tab re-reads the same cached result with these arguments.
+    st.session_state["dataforensics_insight_args"] = investigation_args
+    st.session_state["dataforensics_insight_name"] = st.session_state["dataforensics_data_name"]
+    age_year_findings = investigation["age_year_findings"]
+    scientific_notation_findings = investigation["scientific_notation_findings"]
+    excel_serial_findings = investigation["excel_serial_findings"]
+    lost_leading_zero_findings = investigation["lost_leading_zero_findings"]
+    negative_value_findings = investigation["negative_value_findings"]
+    longitudinal_findings = investigation["longitudinal_findings"]
+    zip_state_findings = investigation["zip_state_findings"]
+    coordinate_findings = investigation["coordinate_findings"]
+    temperature_findings = investigation["temperature_findings"]
+    datetime_findings = investigation["datetime_findings"]
+    text_personal_findings = investigation["text_personal_findings"]
+    rare_combination_findings = investigation["rare_combination_findings"]
+    placeholder_findings = investigation["placeholder_findings"]
+    truncation_findings = investigation["truncation_findings"]
+    associations = investigation["associations"]
+    numeric_summary = investigation["numeric_summary"]
+    trends = investigation["trends"]
+    heaping_findings = investigation["heaping_findings"]
+    group_missingness = investigation["group_missingness"]
+    redundant_column_groups = investigation["redundant_column_groups"]
+    rare_category_findings = investigation["rare_category_findings"]
+    age_dob_findings = investigation["age_dob_findings"]
+    total_mismatch_findings = investigation["total_mismatch_findings"]
+    ambiguous_dates = investigation["ambiguous_dates"]
+    birth_date_findings = investigation["birth_date_findings"]
+    category_clusters = investigation["category_clusters"]
+    check_catalog = investigation["check_catalog"]
+    checks_flagged = investigation["checks_flagged"]
+    checks_run = investigation["checks_run"]
+    clinical_range_findings = investigation["clinical_range_findings"]
+    column_order_findings = investigation["column_order_findings"]
+    column_types = investigation["column_types"]
+    columns = investigation["columns"]
+    conditional_column_findings = investigation["conditional_column_findings"]
+    conflicting_id_findings = investigation["conflicting_id_findings"]
+    data_size = investigation["data_size"]
+    dictionary = investigation["dictionary"]
+    distribution_columns = investigation["distribution_columns"]
+    dup_rows = investigation["dup_rows"]
+    duplicate_entities = investigation["duplicate_entities"]
+    encoding_corruption_counts = investigation["encoding_corruption_counts"]
+    future_date_findings = investigation["future_date_findings"]
+    fuzzy_duplicate_entities = investigation["fuzzy_duplicate_entities"]
+    fuzzy_exact_columns = investigation["fuzzy_exact_columns"]
+    fuzzy_name_column = investigation["fuzzy_name_column"]
+    id_like_defaults = investigation["id_like_defaults"]
+    insights = investigation["insights"]
+    invalid_fips_findings = investigation["invalid_fips_findings"]
+    invalid_zip_findings = investigation["invalid_zip_findings"]
+    invisible_char_counts = investigation["invisible_char_counts"]
+    missingness_co_occurrence = investigation["missingness_co_occurrence"]
+    missingness_columns = investigation["missingness_columns"]
+    missingness_concentration = investigation["missingness_concentration"]
+    missingness_overview = investigation["missingness_overview"]
+    null_cells = investigation["null_cells"]
+    null_table = investigation["null_table"]
+    numeric_representation_findings = investigation["numeric_representation_findings"]
+    pii_content_findings = investigation["pii_content_findings"]
+    quality = investigation["quality"]
+    quasi_identifier_columns = investigation["quasi_identifier_columns"]
+    ragged_row_count = investigation["ragged_row_count"]
+    role_by_column = investigation["role_by_column"]
+    rows = investigation["rows"]
+    sentinels = investigation["sentinels"]
+    shape_outlier_findings = investigation["shape_outlier_findings"]
+    stripped_footer_count = investigation["stripped_footer_count"]
+    survey_weight_columns = investigation["survey_weight_columns"]
+    temporal_freshness = investigation["temporal_freshness"]
+    temporal_gap_findings = investigation["temporal_gap_findings"]
+    total_birth_date_rows = investigation["total_birth_date_rows"]
+    total_cells = investigation["total_cells"]
+    total_conditional_rows = investigation["total_conditional_rows"]
+    total_conflicting_records = investigation["total_conflicting_records"]
+    total_domain_findings = investigation["total_domain_findings"]
+    total_duplicate_entity_rows = investigation["total_duplicate_entity_rows"]
+    total_future_dates = investigation["total_future_dates"]
+    total_fuzzy_duplicate_entity_rows = investigation["total_fuzzy_duplicate_entity_rows"]
+    total_order_violation_rows = investigation["total_order_violation_rows"]
+    total_pii_content_hits = investigation["total_pii_content_hits"]
+    total_shape_outlier_rows = investigation["total_shape_outlier_rows"]
+    unit_inconsistency_findings = investigation["unit_inconsistency_findings"]
+    whitespace_anomaly_counts = investigation["whitespace_anomaly_counts"]
 
-    ragged_row_count = sum(1 for r in rows if "" in r)
-    if ragged_row_count and raw_format == "delimited":
-        st.warning(
-            f"⚠ {ragged_row_count} row(s) have more fields than the header — usually a data "
-            "row that genuinely has an extra field (e.g. a stray unquoted delimiter). The "
-            "overflow content is preserved under a column named \"\" rather than dropped, but "
-            "you may want to check the source file."
+    if not rows:
+        _blocking_card(
+            "No data rows to check",
+            f"{st.session_state['dataforensics_data_name']}"
+            + (f" (sheet {sheet_choice})" if sheet_choice else "")
+            + f" has {_n(len(columns), 'column')} but no data rows, so there is nothing to check or clean. "
+            "Check that the export included the data, not just the header.",
         )
+        st.stop()
 
-    if raw_format == "delimited":
-        stripped_footer_count = count_stripped_footer_lines(data_path)
-        if stripped_footer_count:
-            st.warning(
-                f"⚠ {stripped_footer_count} line(s) at the end of this file were treated as a "
-                "footer/non-data block and excluded from parsing — everything from the first "
-                "detected mismatch to end-of-file, not just one line (e.g. a CDC WONDER-style "
-                "\"Query Parameters:\" block, but this could also be a genuine data problem). "
-                "Open the source file and check what's there before trusting this dataset "
-                "is complete."
-            )
-
-    dup_rows = detect_duplicate_rows(rows)
-    # A column already classified "id" (a stable, system-assigned
-    # identifier) essentially never legitimately encodes a survey-style
-    # missing-value convention -- so it's exempted here, the same way an
-    # id-like column is already exempted from categorical/free_text
-    # classification elsewhere in this app. This uses a classification
-    # DataForensics has ALREADY computed (not a guess about the column's
-    # actual values), and avoids the false positive of a sequential id
-    # column's "99" being flagged as a probable missing-value code.
-    sentinel_columns = [c for c in columns if dictionary[c].get("category") != "id"]
-    sentinels = detect_candidate_sentinels(rows, sentinel_columns)
-    ambiguous_dates = detect_ambiguous_date_columns(rows, columns)
-    # Gated on column_types, not on dictionary.py's "categorical"
-    # classification. A column tips into "free_text" once its unique
-    # count exceeds cardinality_cap() -- which real messy data can do
-    # for a totally mundane reason: a handful of whitespace/casing
-    # variants of an otherwise-small set of values (e.g. 6 real cities
-    # plus 5 " City " typo variants = 11 unique values, just over a cap
-    # of 10) push it over the line. Gating on "categorical" would then
-    # silently stop looking for exactly the kind of duplicate-spelling
-    # noise that caused the reclassification in the first place.
-    # detect_similar_categories already has its own, more permissive
-    # cardinality ceiling (_MAX_CARDINALITY_FOR_FUZZY_MATCH) and returns
-    # [] past it, so nothing extra is needed to bound the cost.
-    #
-    # "identifier", "date", and "numeric" columns are excluded outright,
-    # not just "id" -- rapidfuzz's character-overlap similarity produces
-    # real false positives on those shapes (e.g. "2024-01-05" and
-    # "2024-01-15" are 85%+ similar as STRINGS despite being unrelated
-    # dates; "10" and "100" likewise for numeric-coded values). Fuzzy
-    # spelling-variant detection is only meaningful for genuinely
-    # free-text/categorical values.
-    category_clusters = {
-        col: detect_similar_categories([row.get(col, "") for row in rows])
-        for col in columns
-        if column_types.get(col) not in ("identifier", "date", "numeric")
-    }
-    category_clusters = {col: c for col, c in category_clusters.items() if c}
-
-    # --- Dataset type: optional, additive domain-specific checks ---
-    # These never feed the quality scorecard below (that stays comparable
-    # across datasets regardless of profile) and are purely detection --
-    # shown alongside outliers/duplicates in "Detected, left as-is by
-    # design" further down, never auto-applied to anything.
-    dataset_type = st.selectbox(
-        "Dataset type — optional, adds a few extra domain-specific checks",
-        list(DATASET_PROFILES.keys()),
-        index=0,
-        help=(
-            '"General" runs only the checks above. Survey / Clinical / Research / Geographic add '
-            "a small, clearly-labeled set of additional checks common to that kind of dataset — "
-            "still detection-only, still requiring your review before anything changes."
-        ),
-    )
-    profile_checks = DATASET_PROFILES[dataset_type]
-
-    clinical_range_findings: dict[str, dict] = {}
-    if "clinical_ranges" in profile_checks:
-        for col in columns:
-            rule = match_clinical_range_rule(col)
-            if rule:
-                evidence = find_implausible_value_evidence(rows, col, rule["min"], rule["max"])
-                if evidence:
-                    clinical_range_findings[col] = {"rule": rule, "evidence": evidence}
-
-    conflicting_id_findings: dict[str, list[dict]] = {}
-    if "conflicting_id_records" in profile_checks:
-        # Restrict to columns that are actually near-unique per row, not
-        # every column dictionary.py happened to classify "id" -- a shared
-        # grouping code like county_fips is legitimately "id"-shaped (a
-        # stable, short, non-numeric-looking code) but is EXPECTED to
-        # repeat across many rows, so running this check against it would
-        # flag nearly the entire dataset as "conflicting" for no reason.
-        conflicting_id_candidates = [
-            col for col in id_like_defaults if rows and dictionary[col]["unique_count"] >= 0.5 * len(rows)
-        ]
-        for col in conflicting_id_candidates:
-            conflicts = detect_conflicting_id_records(rows, col)
-            if conflicts:
-                conflicting_id_findings[col] = conflicts
-
-    invalid_fips_findings: dict[str, list[tuple[int, str]]] = {}
-    if "fips_format" in profile_checks:
-        for col in find_fips_like_columns(columns):
-            evidence = find_invalid_fips_evidence(rows, col)
-            if evidence:
-                invalid_fips_findings[col] = evidence
-
-    invalid_zip_findings: dict[str, list[tuple[int, str]]] = {}
-    if "zip_format" in profile_checks:
-        for col in find_zip_like_columns(columns):
-            evidence = find_invalid_zip_evidence(rows, col)
-            if evidence:
-                invalid_zip_findings[col] = evidence
-
-    survey_weight_columns: list[str] = []
-    if "survey_weight_columns" in profile_checks:
-        survey_weight_columns = detect_survey_weight_columns(columns)
-
-    # Always on, not tied to any dataset profile -- a general "does this
-    # value's format match the rest of the column" check (phone numbers,
-    # emails, names, or any other free_text column with a consistent
-    # convention). Self-gating: it only fires when a dominant shape covers
-    # >=80% of a column's values, so genuine free-text (notes, comments)
-    # never matches and is silently skipped -- no cost on a column this
-    # doesn't apply to.
-    shape_outlier_findings = detect_value_shape_outliers(rows, columns, dictionary)
-
-    # Always on -- format-integrity checks that apply to any column,
-    # regardless of dataset profile. Each is a distinct, independent
-    # signal from the shape-outlier check above: whitespace padding,
-    # invisible/control characters, and mojibake can all coexist with (or
-    # without) a value-shape problem.
-    whitespace_anomaly_counts = detect_whitespace_anomalies(rows, columns)
-    invisible_char_counts = detect_invisible_characters(rows, columns)
-    encoding_corruption_counts = detect_encoding_corruption(rows, columns)
-    numeric_representation_findings = detect_numeric_representation_inconsistency(rows, columns, dictionary)
-
-    # Always on -- flags an AGE-role column whose values look like
-    # calendar years rather than ages (e.g. full of 1978, 1990, 2001).
-    age_year_findings = detect_age_columns_that_look_like_years(rows, role_by_column)
-
-    # Always on -- flags a WEIGHT/HEIGHT/INCOME-role column whose values
-    # split into two clusters at a ratio matching a real unit-conversion
-    # factor (kg/lb, cm/in, m/ft, dollars/thousands). Requires the SPECIFIC
-    # conversion-factor match, not just "this distribution is bimodal" --
-    # a genuinely bimodal column (e.g. adult vs. child weight) has no
-    # reason to coincidentally land within 5% of one of those constants.
-    unit_inconsistency_findings = detect_unit_inconsistency(rows, role_by_column)
-
-    # Always on -- general "does column A ever exceed column B where their
-    # names suggest A should never exceed B" check (start/end, min/max,
-    # admission/discharge, ...). Complements (does not replace) the
-    # birth-date-specific check below, which is driven by inferred
-    # semantic role rather than naming convention.
-    column_order_findings = detect_column_order_violations(rows, columns)
-
-    # Always on -- same name-pattern-then-verify-against-values approach
-    # as column_order_findings above, but for "flag / dependent detail"
-    # pairs instead of "before / after" pairs (has_spouse=No but
-    # spouse_name is filled in).
-    conditional_column_findings = detect_conditional_column_violations(rows, columns)
-
-    # Always on -- scans cell VALUES (not just column names) for an
-    # SSN/email/phone shape, catching PII that leaked into an
-    # innocuously-named column (e.g. an email pasted into a "notes"
-    # field) that is_pii_like_column's name-based check can never see.
-    pii_content_findings = detect_pii_content(rows, columns)
-
-    # Always on -- freshness/timeliness of every date-shaped column (by
-    # actual value shape via classify_column_types, not just a
-    # name-pattern role), plus future-dated values and irregular gaps in
-    # coverage. Uses the column's OWN observed gap cadence rather than
-    # assuming a specific calendar frequency nobody declared.
-    date_typed_columns = [col for col, t in column_types.items() if t == "date"]
-    temporal_freshness = analyze_temporal_freshness(rows, date_typed_columns)
-    future_date_findings: dict[str, list[tuple[int, str]]] = {}
-    temporal_gap_findings: dict[str, dict] = {}
-    for col in date_typed_columns:
-        future_evidence = find_future_date_evidence(rows, col)
-        if future_evidence:
-            future_date_findings[col] = future_evidence
-        gap_result = detect_temporal_gaps(rows, col)
-        if gap_result:
-            temporal_gap_findings[col] = gap_result
-
-    # --- Cross-column reasoning: relationships BETWEEN columns, not just
-    # one column in isolation. Always on (not gated behind a dataset
-    # profile) -- both checks only fire when the relevant column roles
-    # are actually present, so there's no cost on a dataset without them. ---
-    birth_date_columns = [col for col, role in role_by_column.items() if role and role["role"] == "DATE_OF_BIRTH"]
-    other_date_columns = [col for col, role in role_by_column.items() if role and role["role"] == "DATE"]
-    birth_date_findings: dict[tuple[str, str], list] = {}
-    for birth_col in birth_date_columns:
-        for other_col in other_date_columns:
-            evidence = find_birth_date_after_other_date_evidence(rows, birth_col, other_col)
-            if evidence:
-                birth_date_findings[(birth_col, other_col)] = evidence
-
-    _QUASI_IDENTIFIER_ROLES = {"NAME", "DATE_OF_BIRTH", "SEX_OR_GENDER"}
-    # Cap each quasi-identifier signal to at most ONE contributing column.
-    # Two columns that both represent the same underlying fact (e.g. a
-    # real-world export with both "Zipcode" and a redundant legacy
-    # "DELETE - Zip Codes" column) are not two independent pieces of
-    # evidence -- they're the same fact recorded twice. Without this cap,
-    # a dataset with two zip-named columns and nothing else satisfied the
-    # "2+ signals" bar entirely on a single, weak geographic signal (a
-    # ZIP code identifies a neighborhood, not a person) -- on one real
-    # citywide dataset this flagged 247 groups covering 48,012 of 48,880
-    # rows as "potential duplicate entities" purely because pairs of rows
-    # happened to share a zip code, which thousands of unrelated
-    # addresses do.
-    quasi_identifier_roles_seen: set[str] = set()
-    quasi_identifier_columns: list[str] = []
-    for col, role in role_by_column.items():
-        if role and role["role"] in _QUASI_IDENTIFIER_ROLES and role["role"] not in quasi_identifier_roles_seen:
-            quasi_identifier_columns.append(col)
-            quasi_identifier_roles_seen.add(role["role"])
-    # ZIP specifically bypasses infer_semantic_role and uses the same
-    # dedicated name-matcher the Geographic profile's format check uses --
-    # a ZIP code column is very commonly classified "id" by dictionary.py
-    # (a short, structured, near-unique-looking code), and
-    # infer_semantic_role deliberately suppresses ALL role suggestions for
-    # an "id"-classified column. That's the right call for a role that's
-    # redundant with "id" -- but "this is a ZIP code" is additional,
-    # non-redundant information dictionary.py's "id" label doesn't carry,
-    # and quasi-identifier matching needs it. Only the first matching
-    # column is used, for the same one-signal-per-fact reason as above.
-    if "ZIP_OR_POSTAL" not in quasi_identifier_roles_seen:
-        zip_like_columns = find_zip_like_columns(columns)
-        if zip_like_columns:
-            quasi_identifier_columns.append(zip_like_columns[0])
-            quasi_identifier_roles_seen.add("ZIP_OR_POSTAL")
-    duplicate_entities: list[dict] = []
-    # Require 2+ DISTINCT signals -- a single weak signal (e.g. ZIP code
-    # alone) isn't enough evidence to suggest two IDs might be the same
-    # entity.
-    if len(quasi_identifier_columns) >= 2 and id_like_defaults:
-        duplicate_entities = detect_duplicate_entities(rows, quasi_identifier_columns, id_like_defaults[0])
-
-    # Fuzzy variant: the same idea, but for the harder, more common real
-    # case where one field (typically the name) has a genuine spelling
-    # variant rather than an exact match -- "Jon Smith" vs "John Smith"
-    # on the same birth date. Only offered when a NAME-role column was
-    # actually found among the quasi-identifiers; the rest (birth date,
-    # sex, ZIP) anchor the comparison ("blocking") and must still match
-    # exactly, keeping this tractable and precise.
-    fuzzy_name_column = next(
-        (c for c in quasi_identifier_columns if (role_by_column.get(c) or {}).get("role") == "NAME"), None
-    )
-    fuzzy_exact_columns = [c for c in quasi_identifier_columns if c != fuzzy_name_column]
-    fuzzy_duplicate_entities: list[dict] = []
-    if fuzzy_name_column and fuzzy_exact_columns and id_like_defaults:
-        fuzzy_duplicate_entities = detect_fuzzy_duplicate_entities(
-            rows, fuzzy_exact_columns, fuzzy_name_column, id_like_defaults[0]
-        )
-
-    outlier_cols_preview = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
-    top_code_cols_preview = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
-
-    # ================================================================== #
-    # Dataset Investigation -- a researcher's first-pass summary: what IS
-    # this dataset, what did DataForensics infer about its structure, and
-    # what deserves attention -- not a repeat of the row/column count.
-    # Every line here is either an inference ("2 columns appear to be
-    # identifiers") or a specific, itemized finding a human can expand
-    # for real evidence, never a vague aggregate count standing alone.
-    # ================================================================== #
-    st.markdown('<div class="dataforensics-bucket-header">🔎 Dataset investigation</div>', unsafe_allow_html=True)
-
-    data_size = len(st.session_state["dataforensics_data_bytes"])
-    st.markdown(
-        f'<div class="dataforensics-card" style="border-left:4px solid #4F46E5;">'
-        f'<div style="font-size:1.3rem; font-weight:700;">{len(rows):,} record(s) · {len(columns)} variable(s) · {format_bytes(data_size)}</div>'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("**Structure**")
-    type_counts = Counter(column_types.values())
-    structure_lines = []
-    if type_counts.get("numeric"):
-        n = type_counts["numeric"]
-        structure_lines.append(f"{n} numeric variable{'s' if n != 1 else ''}")
-    if type_counts.get("categorical"):
-        n = type_counts["categorical"]
-        structure_lines.append(f"{n} categorical variable{'s' if n != 1 else ''}")
-    if type_counts.get("date"):
-        n = type_counts["date"]
-        structure_lines.append(f"{n} date variable{'s' if n != 1 else ''}")
-    if type_counts.get("identifier"):
-        n = type_counts["identifier"]
-        structure_lines.append(f"{n} potential identifier variable{'s' if n != 1 else ''}")
-    if type_counts.get("mixed_uncertain"):
-        n = type_counts["mixed_uncertain"]
-        structure_lines.append(f"{n} variable{'s' if n != 1 else ''} with a mixed or uncertain type")
-    for line in structure_lines:
-        st.markdown(f"- {line}")
-
-    if temporal_freshness:
-        st.markdown("**Freshness**")
-        for col, f in temporal_freshness.items():
-            days = f["days_since_latest"]
-            if days < 0:
-                recency = f"most recent value is {abs(days):,} day{'s' if days != -1 else ''} in the future"
-            else:
-                recency = f"{days:,} day{'s' if days != 1 else ''} since the most recent value"
-            st.markdown(f"- **{col}**: {f['earliest']} to {f['latest']} ({recency}, {f['valid_date_count']:,} valid date value(s))")
-
-    # --- Requires attention: every finding itemized by TYPE (never
-    # collapsed into one opaque count), each expandable for real
-    # evidence -- not just "2 things worth reviewing," but which two
-    # things, and why. A structural finding (duplicate records,
-    # conflicting IDs, a same-entity suspicion, an impossible date
-    # ordering) outranks a review-worthy one (a possible missing-value
-    # code, an unusual distribution, an inconsistent spelling) in how
-    # urgently it deserves attention -- never in whether it's "wrong":
-    # an unusual distribution is not necessarily a data-quality problem
-    # (e.g. income is normally right-skewed), so that finding is phrased
-    # as "warrants review," never "is incorrect."
-    missingness_columns = [c for c, f in dictionary.items() if f.get("non_null_pct", 100) < 90]
-    missingness_overview = build_missingness_overview(dictionary)
-    # Candidate columns for concentration comparison: restricted to
-    # "free_text"-classified columns -- the same "high-enough-cardinality-
-    # to-look-continuous, numeric" eligibility rule already used for
-    # outlier/top-code detection and the quality score, applied here for
-    # the same reason. A "categorical"-classified column (sex, a 1/2
-    # code; smoked_100_cigarettes, a 1/2/7/9 code) is a small set of
-    # NOMINAL labels, not a continuum -- computing its "median" and
-    # reporting missingness as "concentrated where sex is higher" implies
-    # an ordinal relationship that doesn't exist for a nominal code.
-    # Regression: this used to allow any non-id, non-PII column, and
-    # produced exactly that nonsensical framing on real BRFSS/PUMS/NHANES
-    # data ("concentrated where sex is higher", median 2.00 vs 1.00).
-    numeric_concentration_candidates = [c for c in columns if dictionary[c]["category"] == "free_text"]
-    missingness_concentration: dict[str, list[dict]] = {}
-    for col in missingness_columns:
-        found = detect_missingness_concentration(rows, col, numeric_concentration_candidates)
-        if found:
-            missingness_concentration[col] = found
-    missingness_co_occurrence = detect_missingness_co_occurrence(rows, missingness_columns)
-    distribution_columns = sorted(set(outlier_cols_preview) | set(top_code_cols_preview))
-    total_conflicting_records = sum(len(v) for v in conflicting_id_findings.values())
-    total_birth_date_rows = sum(len(v) for v in birth_date_findings.values())
-    total_duplicate_entity_rows = sum(len(d["row_indices"]) for d in duplicate_entities)
-    total_fuzzy_duplicate_entity_rows = sum(len(d["row_indices"]) for d in fuzzy_duplicate_entities)
-    total_domain_findings = len(clinical_range_findings) + len(invalid_fips_findings) + len(invalid_zip_findings) + len(survey_weight_columns)
-
-    st.markdown("**Requires attention**")
-    any_attention_items = False
-
-    if dup_rows:
-        any_attention_items = True
-        with st.expander(f"🔴 {len(dup_rows)} potential duplicate record{'s' if len(dup_rows) != 1 else ''}"):
-            st.caption("Every field is identical to an earlier row — could be a genuine duplicate, or a legitimate repeated record.")
-            for d in dup_rows[:5]:
-                st.markdown(f"- row {d['row_index'] + 1:,} is identical to row {d['duplicate_of_row_index'] + 1:,}")
-            if len(dup_rows) > 5:
-                st.caption(f"...and {len(dup_rows) - 5} more, in Review & Approve below.")
-            st.caption("Approve or dismiss in **Review & Approve** below — DataForensics never auto-deletes rows.")
-
-    if conflicting_id_findings:
-        any_attention_items = True
-        cols_desc = ", ".join(conflicting_id_findings.keys())
-        with st.expander(f"🔴 {total_conflicting_records} record(s) with conflicting information under the same ID ({cols_desc})"):
-            st.caption("The same ID appears on 2+ rows where at least one other field differs between them.")
-            st.caption("Full evidence in **Review & Approve** below — DataForensics never guesses which row is correct.")
-
-    if duplicate_entities:
-        any_attention_items = True
-        id_col = id_like_defaults[0] if id_like_defaults else "id"
-        with st.expander(f"🔴 {len(duplicate_entities)} potential duplicate entit{'ies' if len(duplicate_entities) != 1 else 'y'} ({total_duplicate_entity_rows} record(s))"):
-            st.caption(f"Same {', '.join(quasi_identifier_columns)}, but different {id_col} — the same real-world entity may have been assigned more than one ID.")
-            st.caption("Full evidence in **Review & Approve** below — DataForensics never merges records.")
-
-    if fuzzy_duplicate_entities:
-        any_attention_items = True
-        id_col = id_like_defaults[0] if id_like_defaults else "id"
-        n = len(fuzzy_duplicate_entities)
-        with st.expander(f"🟠 {n} possible duplicate entit{'ies' if n != 1 else 'y'} ({total_fuzzy_duplicate_entity_rows} record(s)) — similar but not identical names"):
-            st.caption(f"Same {', '.join(fuzzy_exact_columns)} and a very similar (not identical) {fuzzy_name_column}, but different {id_col} — could be a spelling variant of the same real-world entity.")
-            st.caption("Weaker evidence than an exact match — full evidence in **Review & Approve** below. DataForensics never merges records.")
-
-    if birth_date_findings:
-        any_attention_items = True
-        with st.expander(f"🔴 {total_birth_date_rows} record(s) with an impossible date ordering"):
-            for (birth_col, other_col), evidence in birth_date_findings.items():
-                st.markdown(f"- {birth_col} is after {other_col} in {len(evidence)} row(s)")
-            st.caption("A birth date cannot come after another recorded date for the same person. Full evidence in **Review & Approve** below.")
-
-    if column_order_findings:
-        any_attention_items = True
-        total_order_violation_rows = sum(len(v) for v in column_order_findings.values())
-        with st.expander(f"🔴 {total_order_violation_rows} record(s) with an impossible column ordering"):
-            for (before_col, after_col), evidence in column_order_findings.items():
-                st.markdown(f"- {before_col} is after {after_col} in {len(evidence)} row(s)")
-            st.caption("The column names suggest one value should never exceed the other (start/end, min/max, admission/discharge, ...). Full evidence in **Review & Approve** below.")
-
-    if conditional_column_findings:
-        any_attention_items = True
-        total_conditional_rows = sum(len(v) for v in conditional_column_findings.values())
-        with st.expander(f"🔴 {total_conditional_rows} record(s) with a logically inconsistent pair of columns"):
-            for (flag_col, detail_col), evidence in conditional_column_findings.items():
-                st.markdown(f"- {flag_col} says \"no\" but {detail_col} is filled in, in {len(evidence)} row(s)")
-            st.caption("A negative flag column (has_X = No) paired with a non-empty dependent detail column (X filled in). Full evidence in **Review & Approve** below.")
-
-    if pii_content_findings:
-        any_attention_items = True
-        total_pii_content_hits = sum(sum(counts.values()) for counts in pii_content_findings.values())
-        with st.expander(f"🔴 {total_pii_content_hits} possible personal identifier(s) found in a column not named as PII"):
-            for col, counts in pii_content_findings.items():
-                kinds = ", ".join(f"{count} {label}(s)" for label, count in counts.items())
-                st.markdown(f"- **{col}**: {kinds}")
-            st.caption("A cell value shaped like an SSN, email address, or phone number, in a column whose name gave no indication it holds personal data. Full evidence in **Review & Approve** below.")
-
-    if future_date_findings:
-        any_attention_items = True
-        total_future_dates = sum(len(v) for v in future_date_findings.values())
-        with st.expander(f"🔴 {total_future_dates} value(s) dated in the future"):
-            for col, evidence in future_date_findings.items():
-                st.markdown(f"- **{col}**: {len(evidence)} value(s) after today")
-            st.caption("A date after today in this kind of column is almost always a data-entry error (wrong year, wrong century). Full evidence in **Review & Approve** below.")
-
-    if temporal_gap_findings:
-        any_attention_items = True
-        n = len(temporal_gap_findings)
-        with st.expander(f"🟠 {n} date column{'s' if n != 1 else ''} with an irregular coverage gap"):
-            for col, g in temporal_gap_findings.items():
-                st.markdown(f"- **{col}**: {len(g['gaps'])} gap(s) at least 2x this column's own median spacing ({g['median_gap_days']:,.0f} day(s))")
-            st.caption("A gap much larger than this column's typical spacing between observations — could be a real reporting gap or expected (e.g. a facility closure). Full evidence in **Review & Approve** below.")
-
-    if shape_outlier_findings:
-        any_attention_items = True
-        total_shape_outlier_rows = sum(f["outlier_count"] for f in shape_outlier_findings.values())
-        n = len(shape_outlier_findings)
-        with st.expander(f"🟠 {total_shape_outlier_rows} value(s) across {n} column{'s' if n != 1 else ''} that don't match the column's own format"):
-            for col, f in shape_outlier_findings.items():
-                st.markdown(f"- **{col}**: {f['outlier_count']} of {f['total_count']} value(s) don't match the dominant format")
-            st.caption("Most values in each column share one consistent shape (e.g. every phone number formatted the same way) — these don't. Full evidence in **Review & Approve** below.")
-
-    if whitespace_anomaly_counts:
-        any_attention_items = True
-        n = sum(whitespace_anomaly_counts.values())
-        with st.expander(f"🟠 {n} value(s) with leading/trailing or doubled whitespace"):
-            for col, count in whitespace_anomaly_counts.items():
-                st.markdown(f"- **{col}**: {count} value(s)")
-            st.caption('"California" and " California " look identical but are different strings — this silently breaks exact-match joins and category counts. Full evidence in **Review & Approve** below.')
-
-    if invisible_char_counts:
-        any_attention_items = True
-        n = sum(invisible_char_counts.values())
-        with st.expander(f"🟠 {n} value(s) with a hidden/invisible character"):
-            for col, count in invisible_char_counts.items():
-                st.markdown(f"- **{col}**: {count} value(s)")
-            st.caption("A zero-width space, non-breaking space, or control character that renders invisibly but is a real, different character. Full evidence in **Review & Approve** below.")
-
-    if encoding_corruption_counts:
-        any_attention_items = True
-        n = sum(encoding_corruption_counts.values())
-        with st.expander(f"🟠 {n} value(s) that look like encoding corruption (mojibake)"):
-            for col, count in encoding_corruption_counts.items():
-                st.markdown(f"- **{col}**: {count} value(s)")
-            st.caption('Text that looks like it was UTF-8 but got decoded as Windows-1252/Latin-1 somewhere (e.g. "JosÃ©" instead of "José"). Full evidence in **Review & Approve** below.')
-
-    if numeric_representation_findings:
-        any_attention_items = True
-        n = sum(f["decorated_count"] for f in numeric_representation_findings.values())
-        with st.expander(f"🟠 {n} value(s) that are numbers written in a different format than the rest of their column"):
-            for col, f in numeric_representation_findings.items():
-                st.markdown(f"- **{col}**: {f['decorated_count']} value(s) (vs. {f['clean_count']} plain numbers)")
-            st.caption('A currency symbol, thousands separator, or k/m/b suffix ("$50,000", "50k") on an otherwise plain-number column. Full evidence in **Review & Approve** below.')
-
-    if age_year_findings:
-        any_attention_items = True
-        with st.expander(f"🟠 {len(age_year_findings)} column(s) labeled as age but shaped like calendar years"):
-            for col, f in age_year_findings.items():
-                st.markdown(f"- **{col}**: {f['year_like_count']} of {f['total_count']} value(s) look like a year (e.g. 1978, 1990), not an age")
-            st.caption("Most of this column's values are 4-digit numbers in a plausible birth-year range — possibly a birth-year column labeled as age. Full evidence in **Review & Approve** below.")
-
-    if unit_inconsistency_findings:
-        any_attention_items = True
-        with st.expander(f"🟠 {len(unit_inconsistency_findings)} column(s) that may mix two measurement units"):
-            for col, f in unit_inconsistency_findings.items():
-                st.markdown(
-                    f"- **{col}**: {f['low_count']} value(s) around {f['low_median']:,.1f} and "
-                    f"{f['high_count']} value(s) around {f['high_median']:,.1f} — a ratio of "
-                    f"{f['observed_ratio']:.2f}, close to the {f['unit_a']}-to-{f['unit_b']} conversion factor ({f['expected_factor']:.2f})"
-                )
-            st.caption("Two clusters of values whose ratio matches a real unit-conversion factor — possibly some rows recorded in a different unit. Full evidence in **Review & Approve** below.")
-
-    if distribution_columns:
-        any_attention_items = True
-        n = len(distribution_columns)
-        with st.expander(f"🟠 {n} variable{'s' if n != 1 else ''} ha{'ve' if n != 1 else 's'} distributions that warrant review"):
-            st.caption("Unusual is not the same as incorrect — e.g. income is normally right-skewed. Worth a human look, not evidence of an error.")
-            for c in distribution_columns:
-                f = dictionary[c]
-                outliers = f.get("outliers") or {}
-                top_code = f.get("top_code_spike")
-                st.markdown(f"**{c}**")
-                stat_line = []
-                if "median" in outliers:
-                    stat_line.append(f"Median {outliers['median']:,.2f}")
-                    stat_line.append(f"IQR {outliers['iqr']:,.2f}")
-                    stat_line.append(f"Maximum {outliers['max']:,.2f}")
-                if outliers.get("outlier_count"):
-                    stat_line.append(f"Flagged {outliers['outlier_count']} observation(s) outside the IQR range")
-                if top_code:
-                    stat_line.append(f"{top_code['fraction']:.1%} of values sit at the observed max ({top_code['value']:,.2f})")
-                if stat_line:
-                    st.markdown(f'<div class="dataforensics-card-evidence">{" · ".join(stat_line)}</div>', unsafe_allow_html=True)
-            st.caption("Full evidence and evidence panels in **Review & Approve** below.")
-
-    if sentinels:
-        any_attention_items = True
-        n = sum(len(v) for v in sentinels.values())
-        with st.expander(f"🟠 {n} possible missing-value code{'s' if n != 1 else ''} ({', '.join(sentinels.keys())})"):
-            for col, values in sentinels.items():
-                st.markdown(f"- {col}: {', '.join(repr(v) for v in values)}")
-            st.caption("Matches a common missing-value convention — review and map to an explicit label in **Review & Approve** below, or leave as-is if genuine.")
-
-    if ambiguous_dates:
-        any_attention_items = True
-        n = len(ambiguous_dates)
-        with st.expander(f"🟠 {n} variable{'s' if n != 1 else ''} with ambiguous date format{'s' if n != 1 else ''} ({', '.join(ambiguous_dates.keys())})"):
-            st.caption("Date-shaped values with no way to tell Month/Day from Day/Month — declare the format in **Review & Approve** below.")
-
-    if category_clusters:
-        any_attention_items = True
-        n = sum(len(v) for v in category_clusters.values())
-        with st.expander(f"🟠 {n} possible standardization{'s' if n != 1 else ''} ({', '.join(category_clusters.keys())})"):
-            st.caption("Values that look like the same category written inconsistently — review and approve a merge in **Review & Approve** below.")
-
-    if missingness_columns:
-        any_attention_items = True
-        n = len(missingness_columns)
-        n_patterns = len(missingness_concentration) + len(missingness_co_occurrence)
-        pattern_suffix = f" — {n_patterns} pattern(s) detected" if n_patterns else ""
-        with st.expander(f"🟠 {n} variable{'s' if n != 1 else ''} with substantial missingness{pattern_suffix}"):
-            st.markdown("**Missingness overview** (every column, not just these)")
-            overview_rows = [
-                {"Variable": r["column"], "Missing %": f"{r['missing_pct']:.1f}%", "Non-null %": f"{r['non_null_pct']:.1f}%"}
-                for r in missingness_overview
-            ]
-            st.dataframe(overview_rows, width="stretch", hide_index=True)
-            if missingness_concentration or missingness_co_occurrence:
-                st.markdown("**Patterns detected**")
-                for col, findings in missingness_concentration.items():
-                    for f in findings[:3]:
-                        st.markdown(
-                            f"- **{col}** missingness is concentrated where **{f['column']}** is {f['direction']} "
-                            f"(median {f['median_when_missing']:,.2f} when {col} is missing vs. "
-                            f"{f['median_when_present']:,.2f} when present)"
-                        )
-                for f in missingness_co_occurrence[:5]:
-                    st.markdown(
-                        f"- **{f['column_a']}** and **{f['column_b']}** are frequently missing together "
-                        f"({f['both_missing_count']} of {min(f['column_a_missing_count'], f['column_b_missing_count'])} "
-                        f"of the smaller gap's rows, {f['overlap_fraction']:.0%})"
-                    )
-                st.caption(
-                    "These are plain comparisons, not a statistical significance test. Missingness pattern "
-                    "detected; statistical handling (e.g. multiple imputation) requires analyst judgment — "
-                    "DataForensics never imputes. Full evidence in **Review & Approve** below."
-                )
-            else:
-                for c in missingness_columns:
-                    st.markdown(f"- {c}: {dictionary[c]['non_null_pct']:.1f}% non-null")
-
-    if total_domain_findings:
-        any_attention_items = True
-        domain_cols = sorted(
-            set(clinical_range_findings) | set(invalid_fips_findings) | set(invalid_zip_findings) | set(survey_weight_columns)
-        )
-        with st.expander(f"🟠 {total_domain_findings} finding(s) from the {dataset_type} profile ({', '.join(domain_cols)})"):
-            st.caption("Full evidence in **Review & Approve** below.")
-
-    if not any_attention_items:
-        st.success("No findings — every column looks clean by the checks above.")
-
-    n_high_priority = (
-        (1 if dup_rows else 0)
-        + len(conflicting_id_findings)
-        + (1 if duplicate_entities else 0)
-        + len(birth_date_findings)
-        + len(column_order_findings)
-        + len(future_date_findings)
-        + len(conditional_column_findings)
-        + len(pii_content_findings)
-    )
-    n_worth_reviewing = (
-        sum(len(v) for v in sentinels.values())
-        + len(ambiguous_dates)
-        + sum(len(v) for v in category_clusters.values())
-        + len(distribution_columns)
-        + len(missingness_columns)
-        + len(shape_outlier_findings)
-        + len(whitespace_anomaly_counts)
-        + len(invisible_char_counts)
-        + len(encoding_corruption_counts)
-        + len(numeric_representation_findings)
-        + len(temporal_gap_findings)
-        + len(age_year_findings)
-        + len(unit_inconsistency_findings)
-        + total_domain_findings
-        + len(fuzzy_duplicate_entities)
-    )
-    st.markdown("**Overall**")
-    total_findings = n_high_priority + n_worth_reviewing
-    if total_findings:
-        st.markdown(f"{total_findings} finding{'s' if total_findings != 1 else ''} require review before analysis.")
-    else:
-        st.markdown("No findings require review before analysis.")
-    st.caption("DataForensics never deletes or modifies anything automatically — every change requires your approval below.")
-
-    with st.expander("📋 Full data dictionary (every column, every computed field)"):
-        # "levels" is None, a list, OR a string (the PII-masked-value
-        # sentinel), and "outliers"/"top_code_spike" are None or a dict --
-        # a real dataset mixing a categorical column with a PII-masked
-        # column (a very common combination: an SSN/name column alongside
-        # any demographic categorical) puts all three of those types into
-        # the SAME dataframe column across different rows here, which
-        # pyarrow cannot serialize as one Arrow column and previously
-        # crashed the render with an ArrowTypeError. Stringify these three
-        # fields uniformly for DISPLAY ONLY -- build_data_dictionary's own
-        # return contract (a list for genuine levels, tested elsewhere)
-        # stays exactly as-is; nothing else reads this dict's "levels" /
-        # "outliers" / "top_code_spike" keys after this point.
-        display_rows = []
-        for c, f in dictionary.items():
-            row = dict(f)
-            if isinstance(row.get("levels"), list):
-                row["levels"] = ", ".join(row["levels"])
-            row["outliers"] = str(row["outliers"]) if row.get("outliers") is not None else None
-            row["top_code_spike"] = str(row["top_code_spike"]) if row.get("top_code_spike") is not None else None
-            display_rows.append({"column": c, **row})
-        st.dataframe(display_rows, use_container_width=True)
-
-    # --- Data quality scorecard: a deterministic summary of the findings
-    # above, never a judgment about whether the dataset is fit for any
-    # particular analysis. See quality_score.py's docstring for the exact
-    # formula behind each sub-score. ---
-    sentinel_flagged_cell_count = sum(
-        len(find_sentinel_evidence(rows, col, val)) for col, vals in sentinels.items() for val in vals
-    )
-    outlier_flagged_cell_count = sum((f.get("outliers") or {}).get("outlier_count", 0) for f in dictionary.values())
-    top_code_flagged_cell_count = sum(
-        len(find_top_code_evidence(rows, c, f["top_code_spike"]["value"])) for c, f in top_code_cols_preview.items()
-    )
-    ambiguous_date_cell_count = sum(ambiguous_dates.values())
-    category_inconsistent_cell_count = sum(
-        len(find_category_value_evidence(rows, col, v))
-        for col, clusters in category_clusters.items()
-        for cluster in clusters
-        for v in cluster["values"]
-    )
-    # Outlier/top-code detection only ever runs on "free_text"-classified
-    # columns (dictionary.py's own numeric-eligible category), and
-    # category-inconsistency clustering only ever runs on "categorical"-
-    # classified columns -- these counts tell compute_quality_score how
-    # many cells were actually eligible for each check, so a severely
-    # affected numeric or categorical column isn't diluted by columns
-    # neither check could ever have touched. Non-null counts, not raw row
-    # counts: a null cell was never a candidate to be flagged as an
-    # outlier or a miscapitalized category either.
-    numeric_eligible_cell_count = sum(
-        len(rows) - f["null_count"] for f in dictionary.values() if f["category"] == "free_text"
-    )
-    categorical_eligible_cell_count = sum(
-        len(rows) - f["null_count"] for f in dictionary.values() if f["category"] == "categorical"
-    )
-    # Only the three format-integrity checks that are objectively true or
-    # false about a value (whitespace padding, an invisible/control
-    # character, a demonstrable encoding round-trip) feed the score.
-    # value-shape outliers, unit-mixing, and an age column shaped like
-    # birth years are deliberately excluded -- those are "Low confidence"
-    # heuristics that can fire on a coincidence, and folding a
-    # coincidence-based suggestion into a hard 0-100 score would overstate
-    # its certainty.
-    format_integrity_flagged_cell_count = (
-        sum(whitespace_anomaly_counts.values())
-        + sum(invisible_char_counts.values())
-        + sum(encoding_corruption_counts.values())
-    )
-
-    quality = compute_quality_score(
-        row_count=len(rows),
-        column_count=len(columns),
-        null_cell_count=sum(f["null_count"] for f in dictionary.values()),
-        duplicate_row_count=len(dup_rows),
-        zero_variance_column_count=sum(1 for f in dictionary.values() if f["is_zero_variance"]),
-        ragged_row_count=ragged_row_count,
-        sentinel_flagged_cell_count=sentinel_flagged_cell_count,
-        outlier_flagged_cell_count=outlier_flagged_cell_count,
-        top_code_flagged_cell_count=top_code_flagged_cell_count,
-        ambiguous_date_cell_count=ambiguous_date_cell_count,
-        category_inconsistent_cell_count=category_inconsistent_cell_count,
-        numeric_eligible_cell_count=numeric_eligible_cell_count,
-        categorical_eligible_cell_count=categorical_eligible_cell_count,
-        format_integrity_flagged_cell_count=format_integrity_flagged_cell_count,
-    )
-
-    # Findings summary table -- reused by the downloadable audit report in
-    # Step 4 so the report's "Findings" table matches exactly what was
-    # shown here, rather than being independently recomputed.
-    findings_summary = [
-        row
-        for row in [
-            {"Issue": "Duplicate rows", "Count": len(dup_rows), "Severity": "High"},
-            {"Issue": "Candidate missing-value codes", "Count": sentinel_flagged_cell_count, "Severity": "Medium"},
-            {"Issue": "Ambiguous dates", "Count": ambiguous_date_cell_count, "Severity": "Medium"},
-            {"Issue": "Statistical outliers", "Count": outlier_flagged_cell_count, "Severity": "Review"},
-            {"Issue": "Possible top-coding", "Count": top_code_flagged_cell_count, "Severity": "Review"},
-            {"Issue": "Inconsistent category values", "Count": category_inconsistent_cell_count, "Severity": "Low"},
-        ]
-        if row["Count"]
-    ]
-
-    st.markdown('<div class="dataforensics-bucket-header">🔥 Dataset quality score</div>', unsafe_allow_html=True)
-    sq1, sq2, sq3, sq4, sq5, sq6 = st.columns(6)
-    sq1.metric("Overall", f"{quality['overall']}/100")
-    sq2.metric("Completeness", quality["completeness"])
-    sq3.metric("Consistency", quality["consistency"])
-    sq4.metric("Validity", quality["validity"])
-    sq5.metric("Uniqueness", quality["uniqueness"])
-    sq6.metric("Structural quality", quality["structural_quality"])
-    st.caption(
-        f"{quality['overall']}/100 does not mean \"good data.\" It summarizes the findings above "
-        "according to documented, rule-based checks — see each finding's \"Why was this flagged?\" "
-        "panel for exactly what was measured. It is not a judgment of whether this dataset is fit "
-        "for any particular analysis."
-    )
-
-    # --- Suggested variable roles (informational only — never drives any transformation) ---
-    role_suggestions = {col: role for col, role in role_by_column.items() if role is not None}
-    if role_suggestions:
-        with st.expander(f"🧭 Suggested variable roles ({len(role_suggestions)}) — informational only"):
-            st.caption("Based on column naming conventions only. Never applied to anything — for your reference.")
-            st.dataframe(
-                [{"column": c, "suggested role": r["role"], "confidence": r["confidence"], "evidence": r["evidence"]} for c, r in role_suggestions.items()],
-                use_container_width=True,
-            )
-
-    # --- Dataset fingerprint: compare against a previous version, fully stateless ---
-    # The downloadable bundle embeds the full per-column dictionary alongside the
-    # fingerprint hashes -- not just the hashes -- so that re-uploading it later
-    # gives compare_fingerprints() real previous-version stats to diff against,
-    # rather than an empty stand-in that would misreport every column as changed.
-    fingerprint = compute_dataset_fingerprint(dictionary, len(rows))
-    fingerprint_bundle = {"fingerprint": fingerprint, "dictionary": dictionary}
-    with st.expander("🔗 Dataset fingerprint — compare against a previous version of this file"):
-        st.caption(
-            "Fully stateless: DataForensics keeps no history on its own. Download this fingerprint now; "
-            "next time you analyze a newer version of this dataset, upload today's fingerprint "
-            "here to see exactly what changed."
-        )
-        st.download_button(
-            "⬇ Download this fingerprint (.json)",
-            data=json.dumps(fingerprint_bundle, indent=2),
-            file_name=f"fingerprint_{st.session_state['dataforensics_data_name']}.json",
-            mime="application/json",
-        )
-        prev_fp_file = st.file_uploader("Upload a previous fingerprint.json to compare", type="json", key="fp_upload")
-        if prev_fp_file is not None:
-            try:
-                prev_bundle = json.loads(prev_fp_file.getvalue())
-                prev_fp = prev_bundle["fingerprint"]
-                prev_dict = prev_bundle["dictionary"]
-            except (json.JSONDecodeError, KeyError, TypeError) as exc:
-                st.error(f"Not a valid dataforensics fingerprint file: {exc}")
-                prev_fp = None
-            if prev_fp is not None:
-                if prev_fp.get("schema_fingerprint") == fingerprint["schema_fingerprint"] and prev_fp.get("value_fingerprint") == fingerprint["value_fingerprint"]:
-                    st.success("Identical to the previous version — no structural or distributional change detected.")
-                else:
-                    st.warning("⚠ This dataset has changed since the uploaded fingerprint.")
-                    diff = compare_fingerprints(prev_fp, fingerprint, prev_dict, dictionary)
-                    if diff["possible_renames"]:
-                        for r in diff["possible_renames"]:
-                            st.caption(f"↔ {r['removed']} and {r['added']} have identical dtype, category, cardinality, and missingness — possibly the same column renamed, not truly added/removed.")
-                    if diff["columns_added"]:
-                        st.write(f"**+{len(diff['columns_added'])} column(s):** {', '.join(diff['columns_added'])}")
-                    if diff["columns_removed"]:
-                        st.write(f"**-{len(diff['columns_removed'])} column(s):** {', '.join(diff['columns_removed'])}")
-                    st.write(f"**Row count:** {'+' if diff['row_count_delta'] >= 0 else ''}{diff['row_count_delta']}")
-                    if diff["changed_columns"]:
-                        st.write("**Changed columns:**")
-                        st.dataframe(
-                            [{"column": c["column"], **{f"{k} (before → after)": f"{v['before']} → {v['after']}" for k, v in c["changes"].items()}} for c in diff["changed_columns"]],
-                            use_container_width=True,
-                        )
-                    if diff["distribution_drift"]:
-                        st.write("**Distribution drift:**")
-                        for d in diff["distribution_drift"]:
-                            if d["kind"] == "numeric_median":
-                                st.markdown(f"- **{d['column']}**: median {d['before']:,.2f} → {d['after']:,.2f} ({d['relative_change']:+.0%})")
-                            else:
-                                bits = []
-                                if d["values_added"]:
-                                    bits.append(f"+{', '.join(d['values_added'])}")
-                                if d["values_removed"]:
-                                    bits.append(f"-{', '.join(d['values_removed'])}")
-                                st.markdown(f"- **{d['column']}**: category values changed ({'; '.join(bits)})")
-                        st.caption("A change worth investigating, not automatically an error — a median or category set can legitimately shift between real dataset versions.")
-
-    # ------------------------------------------------------------------ #
-    # Step 3: Review & Approve
-    # ------------------------------------------------------------------ #
-    st.divider()
-    _step_bar(3)
-    st.markdown("Each finding below is a **suggestion with evidence** — nothing is applied until you click *Apply approved changes*.")
-
-    primary_key = st.multiselect(
-        "Primary key column(s) — used to detect duplicate/conflicting records",
-        options=columns,
-        default=id_like_defaults[:1] or columns[:1],
-    )
-
-    approved_sentinels: dict[str, dict[str, str]] = {}
-    approved_categories: dict[str, dict[str, str]] = {}
-    approved_date_formats: dict[str, str] = {}
-
-    # Namespace every approval widget's key by the current file + sheet, so
-    # switching to a different upload (or a different sheet of the same
-    # Excel workbook) starts with a clean slate instead of carrying over a
-    # checked box from a previous dataset whose column/value names happened
-    # to coincide (Streamlit session state is keyed by widget key, not by
-    # what's currently displayed under that key).
+    # Namespace every approval key by the current file + sheet, so a new
+    # upload (or another sheet of the same workbook) starts with a clean
+    # slate instead of inheriting a ticked box whose column/value names
+    # happen to coincide.
     _source_key = f"{st.session_state.get('dataforensics_data_name', '')}::{sheet_choice or ''}"
-
-    if sentinels:
-        st.markdown('<div class="dataforensics-bucket-header">🔎 Candidate missing-value codes</div>', unsafe_allow_html=True)
-        for col, values in sentinels.items():
-            for val in values:
-                key = f"sentinel__{_source_key}__{col}__{val}"
-                c1, c2, c3 = st.columns([0.5, 2.5, 2])
-                checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
-                c2.markdown(
-                    f'<div class="dataforensics-card-title">{_esc(col)} = "{_visualize_whitespace(val)}"</div>'
-                    f'<div class="dataforensics-card-evidence">looks like a common missing-value convention</div>',
-                    unsafe_allow_html=True,
-                )
-                label = c3.text_input("Map to", value="Missing", key=f"{key}_label", label_visibility="collapsed")
-                sentinel_evidence_rows = find_sentinel_evidence(rows, col, val)
-                non_null_count = len(rows) - dictionary[col].get("null_count", 0)
-                sentinel_share = len(sentinel_evidence_rows) / non_null_count if non_null_count else 0.0
-                _evidence_panel(
-                    rule=(
-                        f'"{val}" case-insensitively matches a common missing-value convention: '
-                        + ", ".join(f'"{s}"' for s in sorted(COMMON_SENTINEL_STRINGS))
-                    ),
-                    lines=_evidence_lines(col, [(i, val) for i in sentinel_evidence_rows]),
-                    known=(
-                        f'"{val}" case-insensitively matches a common missing-value convention used across '
-                        f"research/survey data, and accounts for {sentinel_share:.1%} of {col}'s non-null values."
-                    ),
-                    not_known=f'Whether "{val}" is actually being used as a missing-value code here, or is a genuine {col} value that happens to match the pattern.',
-                    recommended_action='Map to an explicit missing-value label above, or leave the checkbox unchecked if this is a real value.',
-                )
-                if checked:
-                    approved_sentinels.setdefault(col, {})[val] = label
-
-    if ambiguous_dates:
-        st.markdown('<div class="dataforensics-bucket-header">📅 Ambiguous dates</div>', unsafe_allow_html=True)
-        for col, count in ambiguous_dates.items():
-            key = f"date__{_source_key}__{col}"
-            c1, c2, c3 = st.columns([0.5, 2.5, 2])
-            checked = c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
-            c2.markdown(
-                f'<div class="dataforensics-card-title">{_esc(col)}</div>'
-                f'<div class="dataforensics-card-evidence">{count} value(s) shaped like MM/DD or DD/MM with no way to '
-                f"tell which — never parsed automatically</div>",
-                unsafe_allow_html=True,
-            )
-            fmt_label = c3.selectbox(
-                "Format", ["MM/DD/YYYY", "DD/MM/YYYY"], key=f"{key}_fmt", label_visibility="collapsed"
-            )
-            _evidence_panel(
-                rule=(
-                    "A date-shaped value matching MM/DD/YYYY or DD/MM/YYYY (1-2 digit month/day, "
-                    "4-digit year, slash- or dash-separated) with no declared format is ambiguous "
-                    "and is never parsed automatically."
-                ),
-                lines=_evidence_lines(col, find_ambiguous_date_evidence(rows, col)),
-                known="This value is shaped like a date, with month and day both being valid numbers (so neither order can be ruled out on shape alone).",
-                not_known="Whether this is Month/Day or Day/Month — that requires knowing the source system's date convention, which nothing in the file states.",
-                recommended_action="Declare the correct format above, or leave the checkbox unchecked if you're not sure.",
-            )
-            if checked:
-                approved_date_formats[col] = "%m/%d/%Y" if fmt_label == "MM/DD/YYYY" else "%d/%m/%Y"
-
-    if missingness_concentration or missingness_co_occurrence:
-        st.markdown('<div class="dataforensics-bucket-header">🕳️ Missingness patterns</div>', unsafe_allow_html=True)
-        st.caption("Informational only — nothing to approve here. DataForensics never imputes; these are plain comparisons, not a significance test.")
-        for col, findings in missingness_concentration.items():
-            for f in findings:
-                st.markdown(
-                    f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Concentration</span>'
-                    f'<div class="dataforensics-card-title">{_esc(col)} missingness is concentrated where {_esc(f["column"])} is {f["direction"]}</div>'
-                    f'<div class="dataforensics-card-evidence">median {_esc(f["column"])} {f["median_when_missing"]:,.2f} when {_esc(col)} is missing '
-                    f'vs. {f["median_when_present"]:,.2f} when present</div></div>',
-                    unsafe_allow_html=True,
-                )
-                with st.expander("Why was this flagged?"):
-                    st.markdown(
-                        f"**Rule:**  \nAmong rows where {_esc(col)} is missing ({f['missing_group_size']} row(s) "
-                        f"with a parseable {_esc(f['column'])} value) vs. rows where it's present "
-                        f"({f['present_group_size']} row(s)), {_esc(f['column'])}'s median differs by "
-                        f"{f['relative_gap']:.0%} — at or above the 20% relative-gap threshold used to surface this."
-                    )
-                    st.markdown(
-                        f"**What the system knows:**  \nWhen {_esc(col)} is missing, {_esc(f['column'])}'s median "
-                        f"is {f['median_when_missing']:,.2f}; when {_esc(col)} is present, it's "
-                        f"{f['median_when_present']:,.2f}."
-                    )
-                    st.markdown(
-                        "**What it does NOT know:**  \nWhether this reflects a real cause (e.g. a measurement "
-                        "that becomes harder to collect for one group), a coincidence in this sample, or a "
-                        "confound with a third variable — this is a median comparison, not a statistical test."
-                    )
-                    st.markdown(
-                        "**Recommended action:**  \nMissingness pattern detected; statistical handling (e.g. "
-                        "multiple imputation, a missing-data mechanism analysis) requires analyst judgment. "
-                        "DataForensics never imputes."
-                    )
-                    st.markdown("**Automatic modification:**  \nNONE.")
-        for f in missingness_co_occurrence:
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Co-occurrence</span>'
-                f'<div class="dataforensics-card-title">{_esc(f["column_a"])} and {_esc(f["column_b"])} are frequently missing together</div>'
-                f'<div class="dataforensics-card-evidence">{f["both_missing_count"]} row(s) missing both — '
-                f'{f["overlap_fraction"]:.0%} of the smaller gap</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    f"**Rule:**  \n{_esc(f['column_a'])} is missing on {f['column_a_missing_count']} row(s), "
-                    f"{_esc(f['column_b'])} on {f['column_b_missing_count']} row(s); {f['both_missing_count']} "
-                    "row(s) are missing both — that's at or above the 50% overlap-of-the-smaller-gap threshold "
-                    "used to surface this."
-                )
-                st.markdown(
-                    f"**What the system knows:**  \n{_esc(f['column_a'])} and {_esc(f['column_b'])} are blank on "
-                    "the same records far more often than the smaller gap's size alone would suggest."
-                )
-                st.markdown(
-                    "**What it does NOT know:**  \nWhether these gaps share a real cause (e.g. the same survey "
-                    "section skipped, the same non-response), or are coincidentally correlated in this sample — "
-                    "this is a raw overlap count, not an independence test."
-                )
-                st.markdown(
-                    "**Recommended action:**  \nMissingness pattern detected; statistical handling requires "
-                    "analyst judgment. DataForensics never imputes."
-                )
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-    if category_clusters:
-        st.markdown('<div class="dataforensics-bucket-header">🏷️ Inconsistent categories</div>', unsafe_allow_html=True)
-        for col, clusters in category_clusters.items():
-            for i, cluster in enumerate(clusters):
-                key = f"cat__{_source_key}__{col}__{i}"
-                badge_cls = "dataforensics-badge-high" if cluster["confidence"] == "high" else "dataforensics-badge-medium"
-                c1, c2 = st.columns([0.5, 4])
-                checked = c1.checkbox("approve", key=f"{key}_on", value=(cluster["confidence"] == "high"), label_visibility="collapsed")
-                values_str = " / ".join(f'"{_visualize_whitespace(v)}"' for v in cluster["values"])
-                c2.markdown(
-                    f'<span class="dataforensics-badge {badge_cls}">{_esc(cluster["confidence"])} confidence</span>'
-                    f'<div class="dataforensics-card-title">{_esc(col)}: {values_str}</div>'
-                    f'<div class="dataforensics-card-evidence">would merge onto "{_visualize_whitespace(cluster["suggested_canonical"])}"</div>',
-                    unsafe_allow_html=True,
-                )
-                confidence_basis = (
-                    "identical after trimming whitespace and lowercasing"
-                    if cluster["confidence"] == "high"
-                    else "85%+ similar by fuzzy string match (rapidfuzz ratio)"
-                )
-                cluster_evidence = sorted(
-                    (row_idx, v) for v in cluster["values"] for row_idx in find_category_value_evidence(rows, col, v)
-                )
-                _evidence_panel(
-                    rule=f"Values in this cluster are {confidence_basis}, suggesting the same real-world category written inconsistently.",
-                    lines=_evidence_lines(col, cluster_evidence),
-                    known=f"These values are {confidence_basis}.",
-                    not_known=(
-                        f'Whether they all represent the same real-world category as "{cluster["suggested_canonical"]}", '
-                        "or whether one of these variants was intentionally distinct — that needs domain context "
-                        "this system doesn't have."
-                    ),
-                    recommended_action="Approve the merge above to standardize onto the suggested canonical value, or leave unchecked if these are genuinely different categories.",
-                )
-                if checked:
-                    approved_categories.setdefault(col, {})
-                    for v in cluster["values"]:
-                        if v != cluster["suggested_canonical"]:
-                            approved_categories[col][v] = cluster["suggested_canonical"]
-
-    outlier_cols = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
-    top_code_cols = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
-    any_domain_findings = bool(
-        clinical_range_findings or conflicting_id_findings or invalid_fips_findings
-        or invalid_zip_findings or survey_weight_columns
+    model = _approval_model(
+        source_key=_source_key,
+        rows=rows,
+        columns=columns,
+        column_types=column_types,
+        id_like_defaults=id_like_defaults,
+        sentinels=sentinels,
+        ambiguous_dates=ambiguous_dates,
+        category_clusters=category_clusters,
+        dup_rows=dup_rows,
+        whitespace_anomaly_counts=whitespace_anomaly_counts,
+        invisible_char_counts=invisible_char_counts,
+        encoding_corruption_counts=encoding_corruption_counts,
+        numeric_representation_findings=numeric_representation_findings,
+        lost_leading_zero_findings=lost_leading_zero_findings,
+        unit_inconsistency_findings=unit_inconsistency_findings,
+        excel_serial_findings=excel_serial_findings,
     )
-    any_cross_column_findings = bool(
-        birth_date_findings or duplicate_entities or fuzzy_duplicate_entities
-        or column_order_findings or conditional_column_findings
+    primary_key = model["primary_key"]
+    approved_sentinels = model["approved_sentinels"]
+    approved_categories = model["approved_categories"]
+    approved_date_formats = model["approved_date_formats"]
+    approved_fixes = model["approved_fixes"]
+    fix_offers = model["fix_offers"]
+    inseparable_unit_columns = model["inseparable_unit_columns"]
+    expectation_specs, _ = _expectation_specs(st.session_state.get(f"dataforensics_expect_latest__{_source_key}"), columns)
+    expectation_results = [evaluate_expectation(rows, spec) for spec in expectation_specs]
+    # Stamped once per loaded dataset, so the run date doesn't tick forward
+    # on every widget interaction (each one reruns this script).
+    run_started_at = st.session_state.setdefault(
+        f"dataforensics_run_at::{st.session_state['dataforensics_data_name']}",
+        datetime.now(UTC).strftime("%Y-%m-%d %I:%M:%S %p"),
     )
-    any_format_integrity_findings = bool(
-        shape_outlier_findings or whitespace_anomaly_counts or invisible_char_counts
-        or encoding_corruption_counts or numeric_representation_findings or age_year_findings
-        or unit_inconsistency_findings
-    )
-    any_temporal_findings = bool(future_date_findings or temporal_gap_findings)
-    any_privacy_findings = bool(pii_content_findings)
-    if (
-        outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings
-        or any_format_integrity_findings or any_temporal_findings or any_privacy_findings
-    ):
-        st.markdown('<div class="dataforensics-bucket-header">📊 Detected, left as-is by design</div>', unsafe_allow_html=True)
-        st.caption("Outliers and duplicate rows are never auto-deleted, capped, or imputed — review them yourself.")
-        for c, f in outlier_cols.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(c)}: {f["outliers"]["outlier_count"]} statistical outlier(s)</div>'
-                f'<div class="dataforensics-card-evidence">IQR method — statistically unusual, not necessarily wrong</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule="IQR method: flagged if the value falls below Q1 − 1.5×(Q3−Q1) or above Q3 + 1.5×(Q3−Q1), computed over this column's own non-null values.",
-                lines=_evidence_lines(c, find_outlier_evidence(rows, c)),
-                known="This value falls outside the IQR-based statistical range of this column's other values.",
-                not_known="Whether this is a data-entry error, a genuine rare observation, or the correct value for a legitimately unusual case.",
-                recommended_action="Review manually. DataForensics never auto-corrects, caps, or removes outliers.",
-            )
-        for c, f in top_code_cols.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(c)}: possible top-coding at {_esc(f["top_code_spike"]["value"])}</div>'
-                f'<div class="dataforensics-card-evidence">{f["top_code_spike"]["fraction"]:.1%} of values sit at the observed max</div></div>',
-                unsafe_allow_html=True,
-            )
-            top_value = f["top_code_spike"]["value"]
-            _evidence_panel(
-                rule=(
-                    f"{f['top_code_spike']['fraction']:.1%} of this column's non-null values sit exactly at its "
-                    f"observed maximum ({top_value}), suggesting a survey/export ceiling rather than a genuine "
-                    "natural maximum."
-                ),
-                lines=_evidence_lines(c, find_top_code_evidence(rows, c, top_value)),
-                known="A disproportionate share of this column's non-null values sit exactly at its observed maximum.",
-                not_known="Whether this ceiling reflects a genuine natural maximum, or a survey/export cap where the true value could actually be higher.",
-                recommended_action="Review manually. DataForensics never assumes or corrects a top-coding ceiling.",
-            )
-        for col, f in shape_outlier_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {f["outlier_count"]} of {f["total_count"]} value(s) don\'t match the column\'s dominant format</div>'
-                f'<div class="dataforensics-card-evidence">{f["dominant_count"]} of {f["total_count"]} value(s) ({f["dominant_count"] / f["total_count"]:.0%}) share one shape</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=(
-                    f"{f['dominant_count']} of {f['total_count']} non-null values in {_esc(col)} "
-                    f"({f['dominant_count'] / f['total_count']:.0%}) reduce to the same character-pattern "
-                    "shape (digits/letters/spacing/punctuation) — a dominant format, not a declared rule. "
-                    "Values reducing to a different shape are flagged."
-                ),
-                lines=_evidence_lines(col, find_value_shape_outlier_evidence(rows, col, f["dominant_shape"])),
-                known="This value's character pattern (digits, letters, spacing, punctuation) doesn't match the format most other values in this column share.",
-                not_known="Whether this is a genuine formatting error, a legitimately different but valid format (e.g. an international phone number), or the correct value for an edge case.",
-                recommended_action="Review manually — DataForensics never reformats or corrects a value automatically.",
-            )
-        for col, count in whitespace_anomaly_counts.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {count} value(s) with leading/trailing or doubled whitespace</div>'
-                f'<div class="dataforensics-card-evidence">e.g. "California" vs " California " — different strings, same apparent value</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=f"{_esc(col)} has a value with leading/trailing whitespace or 2+ consecutive internal spaces.",
-                lines=_evidence_lines(col, find_whitespace_anomaly_evidence(rows, col)),
-                known="This value has whitespace padding or doubled internal spacing that a visually identical value elsewhere may lack.",
-                not_known="Whether this whitespace was intentional, or an export/copy-paste artifact.",
-                recommended_action="Review manually — DataForensics never trims or reformats a value automatically.",
-            )
-        for col, count in invisible_char_counts.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {count} value(s) with a hidden/invisible character</div>'
-                f'<div class="dataforensics-card-evidence">a zero-width space, non-breaking space, or control character that renders invisibly</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=f"{_esc(col)} has a value containing a zero-width space, non-breaking space, embedded byte-order mark, or other invisible/control character.",
-                lines=_invisible_char_evidence_lines(col, find_invisible_character_evidence(rows, col)),
-                known="This value contains a character that renders invisibly (or nearly so) but is a real, different character from a normal space or nothing at all.",
-                not_known="Whether this was introduced by a copy-paste from a web page/PDF, an export tool, or is otherwise intentional.",
-                recommended_action="Review manually — DataForensics never strips or replaces a character automatically.",
-            )
-        for col, count in encoding_corruption_counts.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {count} value(s) that look like encoding corruption</div>'
-                f'<div class="dataforensics-card-evidence">e.g. "JosÃ©" instead of "José" — a UTF-8/Windows-1252 mismatch</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=(
-                    f"{_esc(col)} has a value that round-trips cleanly through \"encode as Windows-1252, decode "
-                    "as UTF-8\" into a different string containing a non-ASCII character — the standard "
-                    "signature of text that was genuinely UTF-8 but got decoded as Windows-1252/Latin-1 "
-                    "somewhere in its history."
-                ),
-                lines=_evidence_lines(col, find_encoding_corruption_evidence(rows, col)),
-                known="This value's byte pattern matches the classic signature of UTF-8 text that was mis-decoded as a different encoding.",
-                not_known="The exact tool/step in this file's history that introduced the mis-decoding, or whether re-decoding it would perfectly recover the original text in every case.",
-                recommended_action="Review manually — DataForensics never re-encodes or corrects a value automatically.",
-            )
-        for col, f in numeric_representation_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {f["decorated_count"]} value(s) formatted differently than the rest of the column</div>'
-                f'<div class="dataforensics-card-evidence">{f["clean_count"]} plain number(s) vs. {f["decorated_count"]} decorated (currency/comma/suffix) value(s)</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=(
-                    f"{f['clean_count']} of {f['clean_count'] + f['decorated_count']} numeric-looking values in "
-                    f"{_esc(col)} parse as a plain number; the rest use a currency symbol, thousands separator, "
-                    "or k/m/b magnitude suffix instead."
-                ),
-                lines=_evidence_lines(col, find_numeric_representation_evidence(rows, col)),
-                known="This value represents a number but in a different textual format than most of this column's other values.",
-                not_known="Whether this formatting difference reflects a different data source/entry method, or was simply typed differently by mistake.",
-                recommended_action="Review manually — DataForensics never reformats or reparses a value automatically.",
-            )
-        for col, f in age_year_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {f["year_like_count"]} of {f["total_count"]} value(s) look like a calendar year, not an age</div>'
-                f'<div class="dataforensics-card-evidence">column name matches the "age" convention, but most values are 4-digit numbers in a plausible birth-year range</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=(
-                    f"{f['year_like_count']} of {f['total_count']} non-null values in {_esc(col)} "
-                    f"({f['year_like_count'] / f['total_count']:.0%}) are 4-digit numbers between 1900 and the "
-                    "current year — implausible as ages, but exactly the shape of a birth year."
-                ),
-                lines=_evidence_lines(col, find_year_like_value_evidence(rows, col)),
-                known="Most of this column's values fall in a plausible calendar-year range rather than a plausible age range.",
-                not_known="Whether this column is actually a birth year mislabeled as age, or a genuine age column with an unrelated data issue.",
-                recommended_action="Review manually — confirm what this column actually represents before analyzing it as age.",
-            )
-        for col, f in unit_inconsistency_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: possible {_esc(f["unit_a"])}/{_esc(f["unit_b"])} unit mix</div>'
-                f'<div class="dataforensics-card-evidence">{f["low_count"]} value(s) around {f["low_median"]:,.1f}, {f["high_count"]} value(s) around {f["high_median"]:,.1f} — ratio {f["observed_ratio"]:.2f}</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=(
-                    f"{_esc(col)}'s values split into two clusters (around {f['low_median']:,.1f} and "
-                    f"{f['high_median']:,.1f}) whose ratio ({f['observed_ratio']:.3f}) is within 5% of the real "
-                    f"{_esc(f['unit_a'])}-to-{_esc(f['unit_b'])} conversion factor ({f['expected_factor']:.3f}) — "
-                    "not just any two-humped distribution, but one matching a specific known unit conversion."
-                ),
-                lines=_evidence_lines(
-                    col, find_unit_inconsistency_evidence(rows, col, f["boundary"], f["minority_side"])
-                ),
-                known=f"This value sits in the smaller of two clusters whose ratio matches the {_esc(f['unit_a'])}-to-{_esc(f['unit_b'])} conversion factor almost exactly.",
-                not_known=f"Whether this value is genuinely in {_esc(f['unit_b']) if f['minority_side'] == 'high' else _esc(f['unit_a'])}, or the two clusters reflect a real subpopulation difference that happens to land near this ratio by coincidence.",
-                recommended_action="Review manually — confirm which unit each row was actually recorded in before analyzing this column.",
-            )
-        for col, counts in pii_content_findings.items():
-            kinds = ", ".join(f"{count} {label}(s)" for label, count in counts.items())
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Privacy</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {kinds} found in cell values</div>'
-                f'<div class="dataforensics-card-evidence">this column\'s name gave no indication it holds personal data</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=(
-                    f"{_esc(col)} is not name-flagged as a PII-like column, but at least one cell value contains "
-                    "a substring shaped like an SSN (###-##-####), an email address, or a phone number with "
-                    "standard separators."
-                ),
-                lines=_pii_content_evidence_lines(find_pii_content_evidence(rows, col)),
-                known="This cell's value contains a substring matching the shape of a personal identifier.",
-                not_known="Whether this is genuinely someone's personal information, a coincidental format match, or placeholder/test data.",
-                recommended_action="Review manually — consider masking this column in any report or export if it does contain real personal data. DataForensics never redacts a value automatically.",
-            )
-        if dup_rows:
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Warning</span>'
-                f'<div class="dataforensics-card-title">{len(dup_rows)} exact duplicate row(s)</div>'
-                f'<div class="dataforensics-card-evidence">DataForensics never auto-deletes rows — could be a data-entry duplicate '
-                f"or a legitimate repeated record (e.g. a second visit)</div></div>",
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown("**Rule:**  \nEvery field in this row is identical to an earlier row (an exact full-row duplicate, not just a shared key).")
-                st.markdown("**Evidence:**")
-                dup_lines = [
-                    f"row {d['row_index'] + 1:,} is identical to row {d['duplicate_of_row_index'] + 1:,}"
-                    for d in dup_rows[:10]
-                ]
-                st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in dup_lines)}</div>',
-                    unsafe_allow_html=True,
-                )
-                if len(dup_rows) > 10:
-                    st.caption(f"...and {len(dup_rows) - 10} more row(s) not shown.")
-                st.markdown("**What the system knows:**  \nThese two rows are byte-for-byte identical across every column.")
-                st.markdown("**What it does NOT know:**  \nWhether this is a genuine data-entry duplicate, or a legitimate repeated record (e.g. a second identical visit) that just happens to match on every field.")
-                st.markdown("**Recommended action:**  \nReview manually. DataForensics never auto-deletes rows.")
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-        for col, finding in clinical_range_findings.items():
-            rule = finding["rule"]
-            unit_suffix = f" {rule['unit']}" if rule["unit"] else ""
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Clinical range</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {len(finding["evidence"])} value(s) outside the plausible {rule["label"]} range</div>'
-                f'<div class="dataforensics-card-evidence">expected {rule["min"]}–{rule["max"]}{unit_suffix}</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=f'{col} matches the "{rule["label"]}" naming convention; plausible range is {rule["min"]}–{rule["max"]}{unit_suffix} (Clinical / Research dataset profile).',
-                lines=_evidence_lines(col, finding["evidence"]),
-                known=f"These values fall outside the configured plausible {rule['label']} range ({rule['min']}–{rule['max']}{unit_suffix}).",
-                not_known="Whether this is a data-entry error, a unit mismatch (e.g. months recorded where years were expected), or a genuinely unusual but real value.",
-                recommended_action="Human review — DataForensics never auto-corrects or removes an implausible value.",
-            )
-
-        for col, conflicts in conflicting_id_findings.items():
-            total_conflicted_rows = sum(len(c["row_indices"]) for c in conflicts)
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Conflicting records</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {len(conflicts)} id value(s) with conflicting field(s) across rows</div>'
-                f'<div class="dataforensics-card-evidence">same {_esc(col)}, different other field(s) — not an exact duplicate</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    f"**Rule:**  \nThe same {_esc(col)} value appears on 2+ rows where at least one other "
-                    "field differs (Clinical / Research dataset profile)."
-                )
-                st.markdown("**Evidence:**")
-                pii = is_pii_like_column(col)
-                conflict_lines = [
-                    f"{col} = {_PII_EVIDENCE_MASK if pii else c['id_value']} → rows "
-                    + ", ".join(str(i + 1) for i in c["row_indices"])
-                    for c in conflicts[:10]
-                ]
-                st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in conflict_lines)}</div>',
-                    unsafe_allow_html=True,
-                )
-                if len(conflicts) > 10:
-                    st.caption(f"...and {len(conflicts) - 10} more id value(s) not shown.")
-                st.markdown(
-                    f"**What the system knows:**  \nThe same {_esc(col)} value appears on 2+ rows where at "
-                    "least one other field differs between them."
-                )
-                st.markdown(
-                    "**What it does NOT know:**  \nWhether this is a genuine data-entry conflict (the same "
-                    "participant recorded inconsistently), or a legitimate repeated visit with a real field "
-                    "change — and if it IS a conflict, which row holds the correct value."
-                )
-                st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which row is correct.")
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-        for col, evidence in invalid_fips_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Geographic format</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {len(evidence)} value(s) not shaped like a FIPS code</div>'
-                f'<div class="dataforensics-card-evidence">expected a 2-digit (state) or 5-digit (state+county) numeric code</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=(
-                    f'{col} matches the "fips" naming convention (Geographic dataset profile); a valid FIPS code '
-                    "is a 2-digit (state) or 5-digit (state+county) numeric string, e.g. \"06\" or \"06037\"."
-                ),
-                lines=_evidence_lines(col, evidence),
-                known="These values don't match the standard 2- or 5-digit numeric US Census FIPS code shape.",
-                not_known="Whether this is a formatting issue (e.g. a stripped leading zero), a non-US or non-FIPS geographic code, or genuinely invalid data.",
-                recommended_action="Review manually — check for truncated leading zeros or a non-FIPS value.",
-            )
-
-        for col, evidence in invalid_zip_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Geographic format</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {len(evidence)} value(s) not shaped like a ZIP code</div>'
-                f'<div class="dataforensics-card-evidence">expected a 5-digit ZIP or ZIP+4</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=(
-                    f'{col} matches the "zip" naming convention (Geographic dataset profile); a valid ZIP code '
-                    "is 5 digits, or 5 digits + hyphen + 4 digits (ZIP+4)."
-                ),
-                lines=_evidence_lines(col, evidence),
-                known="These values don't match the standard 5-digit ZIP or ZIP+4 shape.",
-                not_known="Whether this is a formatting issue (e.g. a stripped leading zero), a non-US postal code, or genuinely invalid data.",
-                recommended_action="Review manually — check for a truncated leading zero or a non-ZIP value.",
-            )
-
-        if survey_weight_columns:
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Survey weight</span>'
-                f'<div class="dataforensics-card-title">{len(survey_weight_columns)} possible survey/sampling weight column(s): {", ".join(_esc(c) for c in survey_weight_columns)}</div>'
-                f'<div class="dataforensics-card-evidence">column name matches a common weight-variable convention</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    "**Rule:**  \nColumn name matches a common survey/sampling weight naming convention "
-                    "(e.g. \"wt\", \"wgt\", \"weight\") (Survey dataset profile)."
-                )
-                st.markdown("**What the system knows:**  \nThis column's name matches a common survey/sampling weight naming convention.")
-                st.markdown(
-                    "**What it does NOT know:**  \nWhether this column IS actually a sampling weight — that's a "
-                    "study-design fact only the study documentation can confirm. If it is, treating it as an "
-                    "ordinary numeric variable (flagging it for outliers, averaging it directly) usually "
-                    "produces a meaningless result."
-                )
-                st.markdown("**Recommended action:**  \nConfirm this is really a sampling weight before analyzing it as a regular column.")
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-        for (birth_col, other_col), evidence in birth_date_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Temporal inconsistency</span>'
-                f'<div class="dataforensics-card-title">{len(evidence)} row(s) where {_esc(birth_col)} is AFTER {_esc(other_col)}</div>'
-                f'<div class="dataforensics-card-evidence">a birth date cannot come after another event in the same record</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    f"**Rule:**  \n{_esc(birth_col)} matches the \"date of birth\" naming convention and "
-                    f"{_esc(other_col)} matches the generic \"date\" naming convention; a birth date can never "
-                    "be later than another recorded date for the same person."
-                )
-                st.markdown("**Evidence:**")
-                birth_pii = is_pii_like_column(birth_col)
-                other_pii = is_pii_like_column(other_col)
-                birth_lines = [
-                    f"row {i + 1:,} → {birth_col} = {_PII_EVIDENCE_MASK if birth_pii else b} is after "
-                    f"{other_col} = {_PII_EVIDENCE_MASK if other_pii else o}"
-                    for i, b, o in evidence[:10]
-                ]
-                st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in birth_lines)}</div>',
-                    unsafe_allow_html=True,
-                )
-                if len(evidence) > 10:
-                    st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
-                st.markdown(f"**What the system knows:**  \nIn these rows, {_esc(birth_col)}'s date value is chronologically after {_esc(other_col)}'s.")
-                st.markdown(
-                    "**What it does NOT know:**  \nWhich of the two dates is wrong (or whether the columns "
-                    "were mislabeled/swapped) — only that both cannot be correct as recorded."
-                )
-                st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which date is correct.")
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-        for (before_col, after_col), evidence in column_order_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Ordering inconsistency</span>'
-                f'<div class="dataforensics-card-title">{len(evidence)} row(s) where {_esc(before_col)} is AFTER {_esc(after_col)}</div>'
-                f'<div class="dataforensics-card-evidence">column names suggest {_esc(before_col)} should never exceed {_esc(after_col)}</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    f"**Rule:**  \n{_esc(before_col)} and {_esc(after_col)} differ only by a \"before\"/\"after\" "
-                    "naming keyword (start/end, min/max, admission/discharge, ...); compared as ISO dates or as "
-                    f"numbers, {_esc(before_col)}'s value should never exceed {_esc(after_col)}'s in the same row."
-                )
-                st.markdown("**Evidence:**")
-                before_pii = is_pii_like_column(before_col)
-                after_pii = is_pii_like_column(after_col)
-                order_lines = [
-                    f"row {i + 1:,} → {before_col} = {_PII_EVIDENCE_MASK if before_pii else b} is after "
-                    f"{after_col} = {_PII_EVIDENCE_MASK if after_pii else a}"
-                    for i, b, a in evidence[:10]
-                ]
-                st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in order_lines)}</div>',
-                    unsafe_allow_html=True,
-                )
-                if len(evidence) > 10:
-                    st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
-                st.markdown(f"**What the system knows:**  \nIn these rows, {_esc(before_col)}'s value is greater than {_esc(after_col)}'s.")
-                st.markdown(
-                    "**What it does NOT know:**  \nWhich value is wrong (or whether the columns were "
-                    "mislabeled/swapped) — only that both cannot be correct as recorded given their names."
-                )
-                st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which value is correct.")
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-        for (flag_col, detail_col), evidence in conditional_column_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Logical inconsistency</span>'
-                f'<div class="dataforensics-card-title">{len(evidence)} row(s) where {_esc(flag_col)} = "No" but {_esc(detail_col)} is filled in</div>'
-                f'<div class="dataforensics-card-evidence">{_esc(flag_col)} names a negative-value flag that {_esc(detail_col)} appears to depend on</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    f"**Rule:**  \n{_esc(flag_col)} looks like a yes/no flag by name (has_/is_/_flag/_status) and "
-                    f"{_esc(detail_col)} shares that same stem; when {_esc(flag_col)} holds a clearly negative "
-                    f"value (\"No\", \"False\", \"0\", \"Never\", ...), {_esc(detail_col)} should logically be empty."
-                )
-                st.markdown("**Evidence:**")
-                flag_pii = is_pii_like_column(flag_col)
-                detail_pii = is_pii_like_column(detail_col)
-                conditional_lines = [
-                    f"row {i + 1:,} → {flag_col} = {_PII_EVIDENCE_MASK if flag_pii else fv}, "
-                    f"{detail_col} = {_PII_EVIDENCE_MASK if detail_pii else dv}"
-                    for i, fv, dv in evidence[:10]
-                ]
-                st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in conditional_lines)}</div>',
-                    unsafe_allow_html=True,
-                )
-                if len(evidence) > 10:
-                    st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
-                st.markdown(f"**What the system knows:**  \nIn these rows, {_esc(flag_col)} holds a negative value while {_esc(detail_col)} is non-empty.")
-                st.markdown(
-                    "**What it does NOT know:**  \nWhich of the two fields is wrong (or whether the flag and "
-                    "detail column are actually related the way their names suggest)."
-                )
-                st.markdown("**Recommended action:**  \nHuman review — DataForensics never guesses which field is correct.")
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-        for col, evidence in future_date_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Future date</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {len(evidence)} value(s) dated after today</div>'
-                f'<div class="dataforensics-card-evidence">a date this far in the future is almost always a data-entry error</div></div>',
-                unsafe_allow_html=True,
-            )
-            _evidence_panel(
-                rule=f"{_esc(col)} has an ISO date value later than today's date.",
-                lines=_evidence_lines(col, evidence),
-                known="This date is chronologically after today.",
-                not_known="Whether this is a mistyped year/century, a genuinely scheduled future date (e.g. a planned follow-up visit), or a placeholder value.",
-                recommended_action="Review manually — confirm whether a future date is expected for this column.",
-            )
-
-        for col, g in temporal_gap_findings.items():
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
-                f'<div class="dataforensics-card-title">{_esc(col)}: {len(g["gaps"])} coverage gap(s) well beyond this column\'s typical spacing</div>'
-                f'<div class="dataforensics-card-evidence">median spacing between observations is {g["median_gap_days"]:,.0f} day(s)</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    f"**Rule:**  \nThe median gap between consecutive distinct dates in {_esc(col)} is "
-                    f"{g['median_gap_days']:,.0f} day(s); a gap at least 2x that is flagged as irregular, "
-                    "adapting to this column's own observed cadence rather than assuming a fixed calendar frequency."
-                )
-                st.markdown("**Evidence:**")
-                gap_lines = [f"{gap['after']} → {gap['before']} ({gap['gap_days']:,} day(s))" for gap in g["gaps"][:10]]
-                st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in gap_lines)}</div>',
-                    unsafe_allow_html=True,
-                )
-                if len(g["gaps"]) > 10:
-                    st.caption(f"...and {len(g['gaps']) - 10} more gap(s) not shown.")
-                st.markdown(f"**What the system knows:**  \nThis gap is at least twice {_esc(col)}'s own median spacing between observations.")
-                st.markdown(
-                    "**What it does NOT know:**  \nWhether this reflects a real reporting gap, an expected pause "
-                    "(e.g. a facility closure, a seasonal program), or simply a naturally uneven observation schedule."
-                )
-                st.markdown("**Recommended action:**  \nReview manually — confirm whether this gap is expected.")
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-        if duplicate_entities:
-            total_flagged_rows = sum(len(d["row_indices"]) for d in duplicate_entities)
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Potential duplicate entity</span>'
-                f'<div class="dataforensics-card-title">{len(duplicate_entities)} group(s), {total_flagged_rows} row(s) — same {", ".join(_esc(c) for c in quasi_identifier_columns)}, different {_esc(id_like_defaults[0])}</div>'
-                f'<div class="dataforensics-card-evidence">the same apparent real-world entity may have been assigned more than one ID — DataForensics does not merge these</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    f"**Rule:**  \n2+ rows share the same value (case/whitespace-normalized) across every one of "
-                    f"{', '.join(_esc(c) for c in quasi_identifier_columns)}, but have different "
-                    f"{_esc(id_like_defaults[0])} values."
-                )
-                st.markdown("**Evidence:**")
-                pii_cols = [c for c in quasi_identifier_columns if is_pii_like_column(c)]
-                entity_lines = []
-                for d in duplicate_entities[:10]:
-                    sample_row = rows[d["row_indices"][0]]
-                    key_desc = ", ".join(
-                        f"{c}={_PII_EVIDENCE_MASK if c in pii_cols else sample_row.get(c)}" for c in quasi_identifier_columns
-                    )
-                    entity_lines.append(
-                        f"{key_desc} → {id_like_defaults[0]} values {', '.join(d['id_values'])} "
-                        f"(rows {', '.join(str(i + 1) for i in d['row_indices'])})"
-                    )
-                st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in entity_lines)}</div>',
-                    unsafe_allow_html=True,
-                )
-                if len(duplicate_entities) > 10:
-                    st.caption(f"...and {len(duplicate_entities) - 10} more group(s) not shown.")
-                st.markdown(
-                    f"**What the system knows:**  \nThese rows match on every one of "
-                    f"{', '.join(_esc(c) for c in quasi_identifier_columns)}, but carry different "
-                    f"{_esc(id_like_defaults[0])} values."
-                )
-                st.markdown(
-                    "**What it does NOT know:**  \nWhether this is genuinely the same real-world entity "
-                    "recorded under two IDs (e.g. a re-registration), a coincidental match, or two different "
-                    "people who happen to share these attributes."
-                )
-                st.markdown("**Recommended action:**  \nHuman review — DataForensics never merges records.")
-                st.markdown("**Automatic modification:**  \nNONE.")
-
-        if fuzzy_duplicate_entities:
-            total_fuzzy_flagged_rows = sum(len(d["row_indices"]) for d in fuzzy_duplicate_entities)
-            st.markdown(
-                f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Possible duplicate entity</span>'
-                f'<div class="dataforensics-card-title">{len(fuzzy_duplicate_entities)} group(s), {total_fuzzy_flagged_rows} row(s) — same {", ".join(_esc(c) for c in fuzzy_exact_columns)}, similar {_esc(fuzzy_name_column)}, different {_esc(id_like_defaults[0])}</div>'
-                f'<div class="dataforensics-card-evidence">a spelling variant, not an exact match — weaker evidence than an exact duplicate entity</div></div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why was this flagged?"):
-                st.markdown(
-                    f"**Rule:**  \n2+ rows share the same value (case/whitespace-normalized) across every one of "
-                    f"{', '.join(_esc(c) for c in fuzzy_exact_columns)}, and {_esc(fuzzy_name_column)} is a close "
-                    f"but not exact match (rapidfuzz token-sort similarity ≥90%), but the rows have different "
-                    f"{_esc(id_like_defaults[0])} values."
-                )
-                st.markdown("**Evidence:**")
-                fuzzy_pii_cols = [c for c in [*fuzzy_exact_columns, fuzzy_name_column] if is_pii_like_column(c)]
-                fuzzy_entity_lines = []
-                for d in fuzzy_duplicate_entities[:10]:
-                    row_x, row_y = rows[d["row_indices"][0]], rows[d["row_indices"][1]]
-                    name_x = _PII_EVIDENCE_MASK if fuzzy_name_column in fuzzy_pii_cols else row_x.get(fuzzy_name_column)
-                    name_y = _PII_EVIDENCE_MASK if fuzzy_name_column in fuzzy_pii_cols else row_y.get(fuzzy_name_column)
-                    exact_desc = ", ".join(
-                        f"{c}={_PII_EVIDENCE_MASK if c in fuzzy_pii_cols else row_x.get(c)}" for c in fuzzy_exact_columns
-                    )
-                    fuzzy_entity_lines.append(
-                        f"{exact_desc}, {fuzzy_name_column}: {name_x!r} vs {name_y!r} ({d['similarity']}% similar) → "
-                        f"{id_like_defaults[0]} values {', '.join(d['id_values'])} "
-                        f"(rows {', '.join(str(i + 1) for i in d['row_indices'])})"
-                    )
-                st.markdown(
-                    f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in fuzzy_entity_lines)}</div>',
-                    unsafe_allow_html=True,
-                )
-                if len(fuzzy_duplicate_entities) > 10:
-                    st.caption(f"...and {len(fuzzy_duplicate_entities) - 10} more group(s) not shown.")
-                st.markdown(
-                    f"**What the system knows:**  \nThese rows match exactly on {', '.join(_esc(c) for c in fuzzy_exact_columns)} "
-                    f"and are a close (not exact) match on {_esc(fuzzy_name_column)}, but carry different "
-                    f"{_esc(id_like_defaults[0])} values."
-                )
-                st.markdown(
-                    "**What it does NOT know:**  \nWhether this is genuinely a spelling variant of the same "
-                    "real-world entity, or two different people who happen to have similar-sounding names and "
-                    "share the exact-matched fields by coincidence — weaker evidence than an exact match on "
-                    "every field."
-                )
-                st.markdown("**Recommended action:**  \nHuman review — DataForensics never merges records.")
-                st.markdown("**Automatic modification:**  \nNONE.")
 
     rules = {
         "version": 1,
@@ -2177,218 +1886,2161 @@ with tab_analyze:
         "category_mappings": approved_categories,
         "weights_strata": {"columns": []},
     }
-
-    st.divider()
-    overlap_columns = set(approved_sentinels) & set(approved_categories)
-    # Same idempotency-chain check load_rules() runs on a file-based rules
-    # YAML (e.g. {"99": "Refused", "Refused": "Unknown"} -- a value already
-    # mapped to "Refused" would map again on a second run). This app builds
-    # its rules dict from checkbox/text-input state instead of a file, so
-    # it needs the identical check rather than skipping it just because
-    # there's no YAML to validate -- a hand-typed "Map to" label that
-    # collides with another approved sentinel's raw value in the same
-    # column would otherwise apply a silently non-idempotent mapping with
-    # no warning at all.
-    chained_columns = {
-        col: chained
-        for source in (approved_sentinels, approved_categories)
-        for col, mapping in source.items()
-        if (chained := find_chained_keys(mapping))
-    }
-    if overlap_columns:
-        st.warning(
-            f"You approved both a missing-value mapping and a category mapping for the same "
-            f"column(s) ({', '.join(sorted(overlap_columns))}) — which one applies first is "
-            "ambiguous, so DataForensics refuses this combination rather than guess. Un-check one of the "
-            "two for each column listed before applying."
-        )
-        st.session_state["dataforensics_applied"] = False
-    elif chained_columns:
-        details = "; ".join(
-            f"{_esc(col)} ({', '.join(repr(v) for v in vals)})" for col, vals in sorted(chained_columns.items())
-        )
-        st.warning(
-            f"⚠ Some approved \"Map to\" labels would chain in the same column ({details}) — a "
-            "value mapped to one of these would map again the next time this ran, so the result "
-            "would keep changing instead of stabilizing. DataForensics refuses this combination "
-            "rather than guess which mapping should apply first. Change the \"Map to\" label(s) "
-            "so no mapped-to value matches another mapped-from value in the same column."
-        )
-        st.session_state["dataforensics_applied"] = False
-    else:
-        if st.button("✅ Apply approved changes", type="primary"):
-            st.session_state["dataforensics_applied"] = True
-            st.session_state["dataforensics_applied_at"] = datetime.now(UTC).isoformat()
-
-    # ------------------------------------------------------------------ #
-    # Step 4: Cleaned dataset + audit report
-    # ------------------------------------------------------------------ #
-    # Gated on session_state (set once, when the button is actually
-    # clicked) rather than the button's transient True-only-on-the-click-
-    # frame return value -- otherwise clicking any of the three download
-    # buttons below triggers a rerun on which the button reads False again,
-    # collapsing this whole section back to just the "Apply approved
-    # changes" button and losing the results the user just clicked to get.
-    if st.session_state.get("dataforensics_applied"):
-        _step_bar(4)
-        try:
-            report = validate(rows, rules)
-        except Exception as exc:
-            st.error(f"Could not validate with the current rules: {exc}")
-            st.stop()
-
-        transformed_rows, mutations = apply_transformations(
-            rows, rules, reason="Approved by user during interactive review"
+    # Record exactly what Apply applied (see _apply_now); Results refuses to
+    # show a cleaned file if the approvals change afterwards.
+    if st.session_state.pop("dataforensics_apply_requested", False):
+        st.session_state["dataforensics_applied_signature"] = _approval_signature(
+            _source_key, primary_key, rules, approved_fixes, expectation_specs
         )
 
-        # The same row/column-preservation guarantee the CLI's harmonize
-        # commands already enforce (and refuse to write on failure) --
-        # computed and shown here explicitly rather than only ever
-        # existing as an internal assumption, since apply_transformations
-        # was previously called from this app with no safety net at all.
-        safety = compute_safety_report(rows, transformed_rows, primary_key or columns[:1])
-
-        st.markdown('<div class="dataforensics-bucket-header">🛡️ Safety checks</div>', unsafe_allow_html=True)
-        sc1, sc2, sc3 = st.columns(3)
-        sc1.metric("Rows", f"{safety['row_count']['before']:,} → {safety['row_count']['after']:,}")
-        sc2.metric("Columns", f"{safety['column_count']['before']} → {safety['column_count']['after']}")
-        sc3.metric(
-            "Unique primary keys",
-            f"{safety['primary_key_uniqueness']['before']:,} → {safety['primary_key_uniqueness']['after']:,}",
-        )
-        checks = [
-            ("Row count preserved", safety["row_count"]["passed"]),
-            ("Column set preserved", safety["column_count"]["passed"]),
-            ("No primary-key values collapsed together", safety["primary_key_uniqueness"]["passed"]),
-        ]
-        for label, passed in checks:
-            (st.success if passed else st.error)(f"{'✓' if passed else '✗'} {label}")
-        if safety["unmodified_columns"]:
-            st.caption(
-                f"Unmodified columns (byte/value equivalent, verified row-by-row): "
-                f"{', '.join(safety['unmodified_columns'])}"
-            )
-
-        if not safety["all_passed"]:
-            st.error(
-                "⛔ A safety check failed — refusing to offer the cleaned dataset for download, "
-                "the same way the CLI refuses to write output when this check fails. This should "
-                "never happen from approving findings through this UI; please report it as a bug "
-                "if you see this."
-            )
-            st.stop()
-
-        # Every mutation records the same timestamp -- the moment the Apply
-        # button was actually clicked (persisted in session_state, not
-        # re-read from the clock on every rerun this section now survives)
-        # -- rather than a per-row clock read that would imply an ordering
-        # precision this batch operation doesn't have.
-        applied_at = st.session_state["dataforensics_applied_at"]
-        for mutation in mutations:
-            mutation["timestamp_utc"] = applied_at
-
-        buffer = io.StringIO()
-        # column_union scans every row, not just row 0 -- a ragged input row
-        # (more fields than the header, usually an unescaped delimiter inside
-        # a free-text value) can add a stray "" key to just THAT row, which
-        # row-0-only fieldnames would miss entirely and crash on later.
-        fieldnames = column_union(transformed_rows) if transformed_rows else columns
-        writer = csv.DictWriter(buffer, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(transformed_rows)
-        if "" in fieldnames:
+    if step == "overview":
+        if ragged_row_count and raw_format == "delimited":
             st.warning(
-                "⚠ At least one row had more fields than the header (usually an unescaped "
-                "comma/delimiter inside a text value) — the overflow content was preserved "
-                "under a column literally named \"\" rather than being dropped. Open the "
-                "cleaned CSV and check that column; you may want to fix the source file's "
-                "quoting and re-run."
+                f"{_n(ragged_row_count, 'row')} have more fields than the header — usually a data "
+                "row that genuinely has an extra field (e.g. a stray unquoted delimiter). The "
+                "overflow content is preserved under a column named \"\" rather than dropped, but "
+                "you may want to check the source file."
             )
 
-        st.success(f"Done — {len(mutations)} approved change(s) applied and logged.")
+        if stripped_footer_count:
+            st.warning(
+                f"{_n(stripped_footer_count, 'line')} at the end of this file were treated as a "
+                "footer/non-data block and excluded from parsing — everything from the first "
+                "detected mismatch to end-of-file, not just one line (e.g. a CDC WONDER-style "
+                "\"Query Parameters:\" block, but this could also be a genuine data problem). "
+                "Open the source file and check what's there before trusting this dataset "
+                "is complete."
+            )
 
-        # DataForensics Audit Report: one canonical findings list (shared
-        # by Investigation Findings, Recommended Actions, Remaining
-        # Review, and Analysis Readiness, so they can't drift out of
-        # sync with each other), fed into the full 10-section report.
-        audit_findings = build_investigation_findings(
-            rows=rows,
-            dup_rows=dup_rows,
-            sentinels=sentinels,
-            approved_sentinels=approved_sentinels,
-            ambiguous_dates=ambiguous_dates,
-            category_clusters=category_clusters,
-            distribution_columns=distribution_columns,
-            dictionary=dictionary,
-            missingness_columns=missingness_columns,
-            clinical_range_findings=clinical_range_findings,
-            conflicting_id_findings=conflicting_id_findings,
-            invalid_fips_findings=invalid_fips_findings,
-            invalid_zip_findings=invalid_zip_findings,
-            survey_weight_columns=survey_weight_columns,
-            duplicate_entities=duplicate_entities,
-            fuzzy_duplicate_entities=fuzzy_duplicate_entities,
-            fuzzy_exact_columns=fuzzy_exact_columns,
-            fuzzy_name_column=fuzzy_name_column,
-            birth_date_findings=birth_date_findings,
-            quasi_identifier_columns=quasi_identifier_columns,
-            id_like_defaults=id_like_defaults,
-            column_types=column_types,
-            mutations=mutations,
-            missingness_concentration=missingness_concentration,
-            missingness_co_occurrence=missingness_co_occurrence,
-            shape_outlier_findings=shape_outlier_findings,
-            whitespace_anomaly_counts=whitespace_anomaly_counts,
-            invisible_char_counts=invisible_char_counts,
-            encoding_corruption_counts=encoding_corruption_counts,
-            numeric_representation_findings=numeric_representation_findings,
-            age_year_findings=age_year_findings,
-            unit_inconsistency_findings=unit_inconsistency_findings,
-            future_date_findings=future_date_findings,
-            temporal_gap_findings=temporal_gap_findings,
-            column_order_findings=column_order_findings,
-            conditional_column_findings=conditional_column_findings,
-            pii_content_findings=pii_content_findings,
+        recommended_count = len(model["recommended_keys"])
+        null_pct = 100.0 * null_cells / total_cells if total_cells else 0.0
+        if checks_flagged:
+            headline = f"{checks_flagged} of {checks_run} checks found something worth a look"
+            sub = (
+                f"{recommended_count} recommended fix{'es' if recommended_count != 1 else ''} can be applied in one click on "
+                "<b>Review &amp; fix</b>. Everything else is explained, with evidence, on <b>Issues</b>."
+                if recommended_count
+                else "None of them can be fixed automatically — see <b>Issues</b> for the evidence behind each one."
+            )
+        else:
+            headline = f"All {checks_run} checks passed"
+            sub = "No issues detected by the checks performed. See <b>Insights</b> for patterns in the data."
+        _page_banner(
+            _step_eyebrow(2, "Overview"),
+            headline,
+            sub,
+            footnote=(
+                f"{_esc(st.session_state['dataforensics_data_name'])} · {_esc(format_bytes(data_size))} · "
+                f"{_esc(' + '.join(investigation['detected_profiles']))} checks · analyzed {run_started_at} UTC"
+            ),
         )
-        audit_report_html = build_audit_report_html(
-            file_name=st.session_state["dataforensics_data_name"],
-            file_size_bytes=data_size,
-            rows=rows,
-            transformed_rows=transformed_rows,
-            columns=columns,
-            column_types=column_types,
-            dictionary=dictionary,
-            findings=audit_findings,
-            mutations=mutations,
-            safety=safety,
-            validation_report=report,
-            applied_at=applied_at,
-            dataset_type=dataset_type,
+        st.markdown(
+            '<div class="df-kpis">'
+            f'<div class="df-kpi"><div class="df-kpi-label">Records</div>'
+            f'<div class="df-kpi-value">{len(rows):,}</div><div class="df-kpi-sub">{len(columns)} columns</div></div>'
+            f'<div class="df-kpi"><div class="df-kpi-label">Empty cells</div>'
+            f'<div class="df-kpi-value">{null_cells:,}</div><div class="df-kpi-sub">{null_pct:.2f}% of cells</div></div>'
+            f'<div class="df-kpi{" warn" if checks_flagged else " good"}">'
+            f'<div class="df-kpi-label">Checks flagged</div>'
+            f'<div class="df-kpi-value">{checks_flagged}</div><div class="df-kpi-sub">of {checks_run} checks run</div></div>'
+            f'<div class="df-kpi"><div class="df-kpi-label">Quality score</div>'
+            f'{_quality_ring(quality["overall"])}<div class="df-kpi-sub">out of 100</div></div>'
+            "</div>",
+            unsafe_allow_html=True,
         )
 
-        dl1, dl2, dl3 = st.columns(3)
-        dl1.download_button(
-            "⬇ Cleaned CSV (analysis-ready)", data=buffer.getvalue(),
-            file_name=f"cleaned_{st.session_state['dataforensics_data_name']}", mime="text/csv", width="stretch",
+        chart_left, chart_right = st.columns(2)
+        with chart_left, st.container(border=True):
+            st.markdown(
+                '<div class="df-chart-title">Quality by dimension</div>'
+                '<div class="df-chart-sub">0–100 per rule-based dimension; the overall weights the weakest. It sums up '
+                "the checks — it doesn't say whether the data fits your analysis.</div>",
+                unsafe_allow_html=True,
+            )
+            st.altair_chart(
+                _score_bars([
+                    ("Completeness", quality["completeness"]),
+                    ("Consistency", quality["consistency"]),
+                    ("Validity", quality["validity"]),
+                    ("Uniqueness", quality["uniqueness"]),
+                    ("Structure", quality["structural_quality"]),
+                ]),
+                width="stretch",
+            )
+        with chart_right, st.container(border=True):
+            flagged_by_category = Counter(c["Category"] for c in check_catalog if c["Status"] == "Flagged")
+            st.markdown(
+                '<div class="df-chart-title">Where the issues are</div>'
+                '<div class="df-chart-sub">Number of checks that flagged something, by kind of problem.</div>',
+                unsafe_allow_html=True,
+            )
+            if flagged_by_category:
+                st.altair_chart(
+                    _insight_chart({
+                        "type": "bar", "x": "", "y": "Checks flagged", "percent": False, "integer": True,
+                        "data": [{"label": k, "value": v} for k, v in flagged_by_category.most_common()],
+                    }),
+                    width="stretch",
+                )
+            else:
+                st.markdown('<div class="df-empty">Nothing flagged.</div>', unsafe_allow_html=True)
+
+        if null_table:
+            gaps_left, gaps_right = st.columns(2)
+            with gaps_left, st.container(border=True):
+                st.markdown(
+                    '<div class="df-chart-title">Missing values by column</div>'
+                    '<div class="df-chart-sub">Share of rows that are empty. Missing-value codes such as 9999 are '
+                    "counted separately on Issues until you approve mapping them.</div>",
+                    unsafe_allow_html=True,
+                )
+                st.altair_chart(
+                    _insight_chart({
+                        "type": "bar", "x": "", "y": "Share of rows empty", "percent": True,
+                        "data": [{"label": r["Column"], "value": r["Null %"] / 100} for r in null_table[:10]],
+                    }),
+                    width="stretch",
+                )
+            missing_map = _missing_map(rows, {c: dictionary[c].get("null_count", 0) or 0 for c in columns})
+            if missing_map is not None:
+                with gaps_right, st.container(border=True):
+                    st.markdown(
+                        '<div class="df-chart-title">Where the gaps are</div>'
+                        '<div class="df-chart-sub">Each row of the file as a line, empty cells shaded. Blocks that line '
+                        "up across columns are gaps that happen together — a skipped question or an unfinished "
+                        "record, not random noise.</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.altair_chart(missing_map, width="stretch")
+
+        all_insight_cards = _insight_cards(investigation_args, investigation)
+        key_insights = [c for c in all_insight_cards if not c.get("hidden")]
+        held_back_count = len(all_insight_cards) - len(key_insights)
+        st.markdown(
+            '<div class="df-ref-category">Top insights</div>'
+            '<div class="df-chart-sub" style="margin-top:-0.4rem">The strongest, least obvious patterns in the data.</div>',
+            unsafe_allow_html=True,
         )
-        dl2.download_button(
-            "⬇ data_dictionary.html", data=render_html("Data Dictionary", dictionary),
-            file_name="data_dictionary.html", mime="text/html", width="stretch",
+        if key_insights:
+            st.markdown(
+                '<div class="df-ref-grid">'
+                + "".join(
+                    '<div class="df-ref-card">'
+                    f'<div class="df-insight-head"><span class="df-insight-kind k-{_esc(c["kind"].split()[0].lower())}">{_esc(c["kind"])}</span></div>'
+                    f'<div class="df-ref-name">{_esc(c["title"])}</div><div class="df-ref-text">{_esc(c["detail"])}</div></div>'
+                    for c in key_insights[:3]
+                )
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            st.button("See all insights with charts", icon=":material/insights:", on_click=_open_workspace, args=("Insights",))
+        elif held_back_count:
+            st.caption(
+                "Every pattern found was held back as obvious or misleading (for example, explained by age) — "
+                "the Insights tab lists them with the reason."
+            )
+        else:
+            st.caption("No strong patterns to report — insights need enough rows per group (30+) to be trustworthy.")
+
+        st.markdown('<div class="df-ref-category">Details</div>', unsafe_allow_html=True)
+        with st.expander(f"All {len(check_catalog)} checks and their results", icon=":material/checklist:"):
+            _table_with_download(
+                f"Automated Checks ({checks_run} run, {checks_flagged} flagged)",
+                check_catalog,
+                "automated_checks.csv",
+                key="download_check_catalog",
+                height=min(38 + 35 * len(check_catalog), 520),
+                column_config={"Items flagged": st.column_config.NumberColumn(format="%d")},
+                status_column="Status",
+            )
+            st.caption(
+                "A flagged item is a candidate for review, not a confirmed error. \"Not applicable\" means the check "
+                "needs columns this dataset doesn't have, or belongs to a profile that isn't selected. See "
+                "Checks in the sidebar for what each check looks for."
+            )
+        if null_table:
+            with st.expander("Missing values by column (table)", icon=":material/table_view:"):
+                _table_with_download(
+                    "NULL Values by Column", null_table, "null_values_by_column.csv", key="download_null_table",
+                    column_config={"Null %": st.column_config.NumberColumn(format="%.1f%%")},
+                )
+        if insights:
+            with st.expander(f"Data-quality patterns ({len(insights)})", icon=":material/pattern:"):
+                _table_with_download(
+                    "Patterns & Insights", insights, "insights.csv", key="download_insights",
+                    column_config={
+                        "Type": st.column_config.TextColumn(width="small"),
+                        "Insight": st.column_config.TextColumn(width="large"),
+                    },
+                )
+        _step_nav("overview")
+
+    if step == "issues":
+        _page_banner(
+            _step_eyebrow(3, "Issues"),
+            "What's wrong, and the evidence",
+            "Every finding from the checks, most serious first. Red items are likely errors; amber items deserve a "
+            "look. Open any line to see the exact rows behind it. Nothing has been changed.",
+            chips=[(str(checks_flagged), "checks flagged"), (f"{quality['overall']}", "quality score / 100")],
         )
-        dl3.download_button(
-            "⬇ audit_report.html", data=audit_report_html,
-            file_name="audit_report.html", mime="text/html", width="stretch",
+        # ================================================================== #
+        # Dataset Investigation -- a researcher's first-pass summary: what IS
+        # this dataset, what did DataForensics infer about its structure, and
+        # what deserves attention -- not a repeat of the row/column count.
+        # Every line here is either an inference ("2 columns appear to be
+        # identifiers") or a specific, itemized finding a human can expand
+        # for real evidence, never a vague aggregate count standing alone.
+        # ================================================================== #
+        _section("investigation", "What we found")
+
+        type_counts = Counter(column_types.values())
+        facts = [
+            ("database", f"<b>{len(rows):,}</b> records"),
+            ("list", f"<b>{len(columns)}</b> columns"),
+            ("audit", f"<b>{_esc(format_bytes(data_size))}</b>"),
+        ]
+        for key, label, icon in (
+            ("numeric", "numeric", "chart"),
+            ("categorical", "categorical", "tag"),
+            ("date", "date", "calendar"),
+            ("identifier", "identifier", "search"),
+            ("mixed_uncertain", "mixed-type", "alert"),
+        ):
+            if type_counts.get(key):
+                facts.append((icon, f"<b>{type_counts[key]}</b> {label}"))
+        st.markdown(
+            '<div class="df-facts">' + "".join(f'<span class="df-fact">{_icon(i, 16)}{t}</span>' for i, t in facts) + "</div>",
+            unsafe_allow_html=True,
         )
 
-with tab_multifile:
+        if temporal_freshness:
+            freshness_box = st.expander(
+                f"Date coverage ({len(temporal_freshness)} date column{'s' if len(temporal_freshness) != 1 else ''})",
+                icon=":material/calendar_month:",
+            )
+            for col, f in temporal_freshness.items():
+                days = f["days_since_latest"]
+                if days < 0:
+                    recency = f"most recent value is {abs(days):,} day{'s' if days != -1 else ''} in the future"
+                else:
+                    recency = f"{days:,} day{'s' if days != 1 else ''} since the most recent value"
+                freshness_box.markdown(
+                    f"- **{_esc(col)}**: {f['earliest']} to {f['latest']} ({recency}, {f['valid_date_count']:,} valid date value(s))"
+                )
+
+        # --- Requires attention: every finding itemized by TYPE (never
+        # collapsed into one opaque count), each expandable for real
+        # evidence -- not just "2 things worth reviewing," but which two
+        # things, and why. A structural finding (duplicate records,
+        # conflicting IDs, a same-entity suspicion, an impossible date
+        # ordering) outranks a review-worthy one (a possible missing-value
+        # code, an unusual distribution, an inconsistent spelling) in how
+        # urgently it deserves attention -- never in whether it's "wrong":
+        # an unusual distribution is not necessarily a data-quality problem
+        # (e.g. income is normally right-skewed), so that finding is phrased
+        # as "warrants review," never "is incorrect."
+
+        st.markdown(_bucket_header("list", "Summary of findings"), unsafe_allow_html=True)
+        summary_strip = st.empty()
+        # Every finding type is registered here with its severity; the ones with
+        # an exhibit further down get a single summary line pointing to it.
+        attention_log: list[str] = []
+
+        if dup_rows:
+            attention_log.append("error")
+            _summary_row(f"{len(dup_rows)} potential duplicate record{'s' if len(dup_rows) != 1 else ''}", "error")
+        if conflicting_id_findings:
+            attention_log.append("error")
+            cols_desc = ", ".join(conflicting_id_findings.keys())
+            _summary_row(f"{_n(total_conflicting_records, 'record')} with conflicting information under the same ID ({cols_desc})", "error")
+        if duplicate_entities:
+            attention_log.append("error")
+            _summary_row(f"{len(duplicate_entities)} potential duplicate entit{'ies' if len(duplicate_entities) != 1 else 'y'} ({_n(total_duplicate_entity_rows, 'record')})", "error")
+        if fuzzy_duplicate_entities:
+            attention_log.append("warning")
+            n = len(fuzzy_duplicate_entities)
+            _summary_row(f"{n} possible duplicate entit{'ies' if n != 1 else 'y'} ({_n(total_fuzzy_duplicate_entity_rows, 'record')}) — similar but not identical names", "warning")
+        if birth_date_findings:
+            attention_log.append("error")
+            _summary_row(f"{_n(total_birth_date_rows, 'record')} with an impossible date ordering", "error")
+        if column_order_findings:
+            attention_log.append("error")
+            total_order_violation_rows = sum(len(v) for v in column_order_findings.values())
+            _summary_row(f"{_n(total_order_violation_rows, 'record')} with an impossible column ordering", "error")
+        if conditional_column_findings:
+            attention_log.append("error")
+            total_conditional_rows = sum(len(v) for v in conditional_column_findings.values())
+            _summary_row(f"{_n(total_conditional_rows, 'record')} with a logically inconsistent pair of columns", "error")
+        if pii_content_findings:
+            attention_log.append("error")
+            total_pii_content_hits = sum(sum(counts.values()) for counts in pii_content_findings.values())
+            _summary_row(f"{_n(total_pii_content_hits, 'possible personal identifier')} in a column not named as personal data", "error")
+        if future_date_findings:
+            attention_log.append("error")
+            total_future_dates = sum(len(v) for v in future_date_findings.values())
+            _summary_row(f"{_n(total_future_dates, 'value')} dated in the future", "error")
+        if temporal_gap_findings:
+            attention_log.append("warning")
+            n = len(temporal_gap_findings)
+            _summary_row(f"{n} date column{'s' if n != 1 else ''} with an irregular coverage gap", "warning")
+        if shape_outlier_findings:
+            attention_log.append("warning")
+            total_shape_outlier_rows = sum(f["outlier_count"] for f in shape_outlier_findings.values())
+            n = len(shape_outlier_findings)
+            _summary_row(f"{_n(total_shape_outlier_rows, 'value')} across {n} column{'s' if n != 1 else ''} that don't match the column's own format", "warning")
+        if whitespace_anomaly_counts:
+            attention_log.append("warning")
+            n = sum(whitespace_anomaly_counts.values())
+            _summary_row(f"{_n(n, 'value')} with leading/trailing or doubled whitespace", "warning")
+        if invisible_char_counts:
+            attention_log.append("warning")
+            n = sum(invisible_char_counts.values())
+            _summary_row(f"{_n(n, 'value')} with a hidden/invisible character", "warning")
+        if encoding_corruption_counts:
+            attention_log.append("warning")
+            n = sum(encoding_corruption_counts.values())
+            _summary_row(f"{_n(n, 'value')} that look like encoding corruption (mojibake)", "warning")
+        if numeric_representation_findings:
+            attention_log.append("warning")
+            n = sum(f["decorated_count"] for f in numeric_representation_findings.values())
+            _summary_row(f"{_n(n, 'value')} that are numbers written in a different format than the rest of their column", "warning")
+        if age_year_findings:
+            attention_log.append("warning")
+            _summary_row(f"{_n(len(age_year_findings), 'column')} labeled as age but shaped like calendar years", "warning")
+        if unit_inconsistency_findings:
+            attention_log.append("warning")
+            _summary_row(f"{_n(len(unit_inconsistency_findings), 'column')} that may mix two measurement units", "warning")
+        if distribution_columns:
+            attention_log.append("warning")
+            n = len(distribution_columns)
+            _summary_row(f"{n} variable{'s' if n != 1 else ''} ha{'ve' if n != 1 else 's'} distributions that warrant review", "warning")
+        if sentinels:
+            attention_log.append("warning")
+            n = sum(len(v) for v in sentinels.values())
+            _summary_row(f"{n} possible missing-value code{'s' if n != 1 else ''} ({', '.join(sentinels.keys())})", "warning", where="review")
+        if ambiguous_dates:
+            attention_log.append("warning")
+            n = len(ambiguous_dates)
+            _summary_row(f"{n} variable{'s' if n != 1 else ''} with ambiguous date format{'s' if n != 1 else ''} ({', '.join(ambiguous_dates.keys())})", "warning", where="review")
+        if category_clusters:
+            attention_log.append("warning")
+            n = sum(len(v) for v in category_clusters.values())
+            _summary_row(f"{n} possible standardization{'s' if n != 1 else ''} ({', '.join(category_clusters.keys())})", "warning", where="review")
+        if missingness_columns:
+            attention_log.append("warning")
+            n = len(missingness_columns)
+            n_patterns = len(missingness_concentration) + len(missingness_co_occurrence)
+            pattern_suffix = f" — {_n(n_patterns, 'pattern')} detected" if n_patterns else ""
+            with st.expander(f"{n} variable{'s' if n != 1 else ''} with substantial missingness{pattern_suffix}", icon=":material/warning:"):
+                st.markdown("**Missingness overview** (every column, not just these)")
+                overview_rows = [
+                    {"Variable": r["column"], "Missing %": f"{r['missing_pct']:.1f}%", "Non-null %": f"{r['non_null_pct']:.1f}%"}
+                    for r in missingness_overview
+                ]
+                st.dataframe(overview_rows, width="stretch", hide_index=True)
+                if missingness_concentration or missingness_co_occurrence:
+                    st.markdown("**Patterns detected**")
+                    for col, findings in missingness_concentration.items():
+                        for f in findings[:3]:
+                            st.markdown(
+                                f"- **{col}** missingness is concentrated where **{f['column']}** is {f['direction']} "
+                                f"(median {f['median_when_missing']:,.2f} when {col} is missing vs. "
+                                f"{f['median_when_present']:,.2f} when present)"
+                            )
+                    for f in missingness_co_occurrence[:5]:
+                        st.markdown(
+                            f"- **{f['column_a']}** and **{f['column_b']}** are frequently missing together "
+                            f"({f['both_missing_count']} of {min(f['column_a_missing_count'], f['column_b_missing_count'])} "
+                            f"of the smaller gap's rows, {f['overlap_fraction']:.0%})"
+                        )
+                    st.caption(
+                        "These are plain comparisons, not a statistical significance test. Missingness pattern "
+                        "detected; statistical handling (e.g. multiple imputation) requires analyst judgment — "
+                        "DataForensics never imputes. The rows behind each pattern are under Missing-data patterns at the end of "
+                        "this page."
+                    )
+                else:
+                    for c in missingness_columns:
+                        st.markdown(f"- {c}: {dictionary[c]['non_null_pct']:.1f}% non-null")
+
+        if total_domain_findings:
+            attention_log.append("warning")
+            domain_cols = sorted(
+                set(clinical_range_findings) | set(invalid_fips_findings) | set(invalid_zip_findings) | set(survey_weight_columns)
+            )
+            _summary_row(f"{_n(total_domain_findings, 'finding')} from the {' / '.join(investigation['detected_profiles'])} checks ({', '.join(domain_cols)})", "warning")
+        if age_dob_findings:
+            # One line (and one count) per column pair.
+            for (age_col, dob_col, ref_col), ev in age_dob_findings.items():
+                attention_log.append("error")
+                with st.expander(f"{_n(len(ev), 'record')} where {age_col} disagrees with {dob_col}", icon=":material/error:"):
+                    st.caption(f"Recorded age differs by more than 1 year from the age implied by {dob_col} on {ref_col}.")
+                    lines = [
+                        f"row {i + 1:,}: {age_col} = {_PII_EVIDENCE_MASK if is_pii_like_column(age_col) else a}, implied {implied}"
+                        for i, a, implied in ev[:10]
+                    ]
+                    st.markdown(f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(x) for x in lines)}</div>', unsafe_allow_html=True)
+
+        broken_totals = {c: t for c, t in total_mismatch_findings.items() if t["evidence"]}
+        if broken_totals:
+            # One line (and one count) per broken total.
+            for col, t in broken_totals.items():
+                attention_log.append("error")
+                with st.expander(f"{_n(len(t['evidence']), 'row')} where {col} ≠ {' + '.join(t['components'])}", icon=":material/error:"):
+                    st.caption(f"The sum holds on {t['agree']:,} of {t['evaluable']:,} rows, so it's a real relationship; these rows break it.")
+                    lines = [f"row {i + 1:,}: {col} = {total:,.2f}, parts sum to {parts:,.2f}" for i, total, parts in t["evidence"][:10]]
+                    st.markdown(f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(x) for x in lines)}</div>', unsafe_allow_html=True)
+
+        if group_missingness:
+            attention_log.append("warning")
+            with st.expander(f"{_n(len(group_missingness), 'column pair')} where the missing rate differs across groups", icon=":material/warning:"):
+                st.caption(
+                    "Missing (or coded as missing) far more often in some groups than others — the data may not be "
+                    "missing at random, so dropping incomplete rows could bias results. A sample description, not a significance test."
+                )
+                st.dataframe(
+                    [
+                        {
+                            "Column": g["column"],
+                            "Highest": f"{g['highest']['rate']:.0%} of {g['highest']['group']} (n={g['highest']['n']:,})",
+                            "Lowest": f"{g['lowest']['rate']:.0%} of {g['lowest']['group']} (n={g['lowest']['n']:,})",
+                            "Gap": f"{g['gap'] * 100:.0f} pts",
+                        }
+                        for g in group_missingness
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+
+        if heaping_findings:
+            attention_log.append("warning")
+            with st.expander(f"{_n(len(heaping_findings), 'column')} with round-number heaping", icon=":material/warning:"):
+                st.caption("Values ending in 0 or 5 far more often than the ~20% expected by chance — typical of estimated or self-reported answers.")
+                for col, h in heaping_findings.items():
+                    top = ", ".join(f"{v} ({c})" for v, c in h["top_values"])
+                    st.markdown(f"- **{_esc(col)}**: {h['share']:.0%} end in 0/5 (index {h['index']}; 100 = none) — most common: {_esc(top)}")
+
+        if rare_category_findings:
+            attention_log.append("warning")
+            n = sum(len(v) for v in rare_category_findings.values())
+            with st.expander(f"{_n(n, 'rare category level')} (1–2 occurrences)", icon=":material/warning:"):
+                st.caption("Often a typo or stray code; too small to analyze as its own group either way.")
+                for col, levels in rare_category_findings.items():
+                    shown = _PII_EVIDENCE_MASK if is_pii_like_column(col) else ", ".join(f'"{v}" ×{c}' for v, c in levels[:10])
+                    st.markdown(f"- **{_esc(col)}**: {_esc(shown)}")
+
+        if redundant_column_groups:
+            attention_log.append("warning")
+            with st.expander(f"{_n(len(redundant_column_groups), 'group')} of redundant columns", icon=":material/warning:"):
+                st.caption("Same information stored twice. Often intentional (a code and its label), but use only one in a model.")
+                for g in redundant_column_groups:
+                    st.markdown(f"- {_esc(', '.join(g['columns']))} — {g['relationship']}")
+
+        def _evidence_block(lines: list[str], total: int) -> None:
+            st.markdown(f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(x) for x in lines[:10])}</div>', unsafe_allow_html=True)
+            if total > 10:
+                st.caption(f"...and {total - 10:,} more.")
+
+        if longitudinal_findings and (longitudinal_findings["age_decreases"] or longitudinal_findings["changing"]):
+            attention_log.append("error")
+            ent = longitudinal_findings["entity"]
+            shown = (lambda v: _PII_EVIDENCE_MASK) if is_pii_like_column(ent) else (lambda v: v)
+            n = len(longitudinal_findings["age_decreases"]) + sum(len(v) for v in longitudinal_findings["changing"].values())
+            with st.expander(f"{_n(n, f'{ent} value')} whose records contradict each other over time", icon=":material/error:"):
+                st.caption(f"Repeated records per {ent}, ordered by {longitudinal_findings['date']}.")
+                lines = [f"{ent} = {shown(k)}: age goes down over time (rows {', '.join(str(i + 1) for i in idx)})" for k, idx in longitudinal_findings["age_decreases"]]
+                for col, items in longitudinal_findings["changing"].items():
+                    lines += [f"{ent} = {shown(k)}: {col} recorded as {_PII_EVIDENCE_MASK if is_pii_like_column(col) else ' / '.join(vals)}" for k, vals in items]
+                _evidence_block(lines, len(lines))
+
+        if zip_state_findings and zip_state_findings["evidence"]:
+            attention_log.append("error")
+            ev = zip_state_findings["evidence"]
+            with st.expander(f"{_n(len(ev), 'row')} where the ZIP code belongs to a different state", icon=":material/error:"):
+                st.caption("Checked against USPS 3-digit ZIP prefixes. Either the ZIP or the state is wrong.")
+                _evidence_block([f"row {i + 1:,}: ZIP {z} is in {exp}, state says {stv}" for i, z, stv, exp in ev], len(ev))
+
+        if coordinate_findings:
+            attention_log.append("error")
+            n = sum(len(v) for v in coordinate_findings.values())
+            with st.expander(f"{_n(n, 'latitude/longitude value')} out of range or swapped", icon=":material/error:"):
+                for col, ev in coordinate_findings.items():
+                    st.markdown(f"**{_esc(col)}**")
+                    _evidence_block([f"row {i + 1:,}: {v}" for i, v in ev], len(ev))
+
+        if negative_value_findings:
+            attention_log.append("error")
+            n = sum(len(v) for v in negative_value_findings.values())
+            with st.expander(f"{_n(n, 'negative value')} in columns that can't be negative", icon=":material/error:"):
+                for col, ev in negative_value_findings.items():
+                    _evidence_block(_evidence_lines(col, ev), len(ev))
+
+        if scientific_notation_findings:
+            attention_log.append("error")
+            n = sum(len(v) for v in scientific_notation_findings.values())
+            with st.expander(f"{_n(n, 'ID')} turned into scientific notation by a spreadsheet", icon=":material/error:"):
+                st.caption("The trailing digits are already lost (1.23457E+11) — re-export these IDs from the source system as text.")
+                for col, ev in scientific_notation_findings.items():
+                    _evidence_block(_evidence_lines(col, ev), len(ev))
+
+        if excel_serial_findings:
+            attention_log.append("warning")
+            n = sum(len(v) for v in excel_serial_findings.values())
+            with st.expander(f"{_n(n, 'date')} stored as Excel numbers", icon=":material/warning:"):
+                st.caption("Fixable in Safe fixes below: each number maps to exactly one date.")
+                for col, ev in excel_serial_findings.items():
+                    _evidence_block([f"row {i + 1:,}: {col} = {v} → {iso}" for i, v, iso in ev], len(ev))
+
+        if lost_leading_zero_findings:
+            attention_log.append("warning")
+            n = sum(v["count"] for v in lost_leading_zero_findings.values())
+            with st.expander(f"{_n(n, 'code')} that lost their leading zeros", icon=":material/warning:"):
+                st.caption("Fixable in Safe fixes below (padded back to the column's full width).")
+                for col, info in lost_leading_zero_findings.items():
+                    st.markdown(f"- **{_esc(col)}**: {_n(info['count'], 'code', spec=',')} shorter than {info['width']} digits")
+
+        if temperature_findings:
+            attention_log.append("warning")
+            with st.expander(f"{_n(len(temperature_findings), 'temperature column')} mixing °F and °C", icon=":material/warning:"):
+                st.caption("Not converted automatically — confirm which unit each source used.")
+                for col, t in temperature_findings.items():
+                    st.markdown(f"**{_esc(col)}**: {_n(t['celsius_count'], 'value', spec=',')} look like °C, {t['fahrenheit_count']:,} like °F")
+                    _evidence_block(_evidence_lines(col, t["evidence"]), len(t["evidence"]))
+
+        if datetime_findings:
+            attention_log.append("warning")
+            with st.expander(f"{_n(len(datetime_findings), 'date-time column')} with time-zone or time problems", icon=":material/warning:"):
+                for col, d in datetime_findings.items():
+                    bits = []
+                    if d["with_zone"] and d["without_zone"]:
+                        bits.append(f"{d['with_zone']:,} with a time zone and {d['without_zone']:,} without")
+                    if len(d["offsets"]) > 1:
+                        bits.append(f"{len(d['offsets'])} different offsets ({', '.join(d['offsets'])})")
+                    if d["invalid"]:
+                        bits.append(f"{_n(len(d['invalid']), 'impossible time', spec=',')}")
+                    st.markdown(f"**{_esc(col)}**: {_esc('; '.join(bits))}")
+                    _evidence_block(_evidence_lines(col, d["evidence"]), len(d["evidence"]))
+
+        if text_personal_findings:
+            attention_log.append("error")
+            n = sum(sum(v.values()) for v in text_personal_findings.values())
+            with st.expander(f"{n} possible street address{'es' if n != 1 else ''} or name{'s' if n != 1 else ''} in free text", icon=":material/error:"):
+                st.caption("The matched text is never shown or exported.")
+                for col in text_personal_findings:
+                    ev = find_free_text_personal_detail_rows(rows, col)
+                    _evidence_block([f"row {i + 1:,} → {col} contains what looks like a {label}" for i, label in ev], len(ev))
+
+        if rare_combination_findings:
+            attention_log.append("warning")
+            with st.expander(f"{_n(len(rare_combination_findings), 'unusual combination')} of common values", icon=":material/warning:"):
+                st.caption("Each value is common, but they almost never occur together — often a data-entry error.")
+                lines = [
+                    f"{a} = {va} with {b} = {vb}: {_n(f['count'], 'row')} (≈{f['expected']:,.0f} expected) — rows {', '.join(str(i + 1) for i in f['rows'])}"
+                    for f in rare_combination_findings
+                    for (a, b), (va, vb) in [(f["columns"], f["values"])]
+                ]
+                _evidence_block(lines, len(lines))
+
+        if placeholder_findings:
+            attention_log.append("warning")
+            n = sum(len(v) for v in placeholder_findings.values())
+            with st.expander(f"{_n(n, 'placeholder or junk text value')}", icon=":material/warning:"):
+                for col, ev in placeholder_findings.items():
+                    _evidence_block(_evidence_lines(col, ev), len(ev))
+
+        if truncation_findings:
+            attention_log.append("warning")
+            with st.expander(f"{_n(len(truncation_findings), 'text column')} cut off at a length limit", icon=":material/warning:"):
+                for col, t in truncation_findings.items():
+                    st.markdown(f"- **{_esc(col)}**: {_n(t['count'], 'value', spec=',')} end at exactly {t['limit']} characters")
+
+        if attention_log:
+            n_error, n_warning = attention_log.count("error"), attention_log.count("warning")
+            summary_strip.markdown(
+                '<div class="df-sev-strip">'
+                f'<span class="sev-error"><b>{n_error}</b> likely error{"s" if n_error != 1 else ""}</span>'
+                f'<span class="sev-warning"><b>{n_warning}</b> worth a look</span>'
+                '<span class="sev-note">Open a line for its rows; lines marked "see exhibit" are shown in full below.</span>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        if not attention_log:
+            st.success("No findings — every column looks clean by the checks above.")
+
+
+        st.markdown('<span id="dictionary" class="df-anchor"></span>', unsafe_allow_html=True)
+        with st.expander("Full data dictionary (every column, every computed field)", icon=":material/table_view:"):
+            # "levels" is None, a list, OR a string (the PII-masked-value
+            # sentinel), and "outliers"/"top_code_spike" are None or a dict --
+            # a real dataset mixing a categorical column with a PII-masked
+            # column (a very common combination: an SSN/name column alongside
+            # any demographic categorical) puts all three of those types into
+            # the SAME dataframe column across different rows here, which
+            # pyarrow cannot serialize as one Arrow column and previously
+            # crashed the render with an ArrowTypeError. Stringify these three
+            # fields uniformly for DISPLAY ONLY -- build_data_dictionary's own
+            # return contract (a list for genuine levels, tested elsewhere)
+            # stays exactly as-is; nothing else reads this dict's "levels" /
+            # "outliers" / "top_code_spike" keys after this point.
+            display_rows = []
+            for c, f in dictionary.items():
+                row = dict(f)
+                if isinstance(row.get("levels"), list):
+                    row["levels"] = ", ".join(row["levels"])
+                row["outliers"] = str(row["outliers"]) if row.get("outliers") is not None else None
+                row["top_code_spike"] = str(row["top_code_spike"]) if row.get("top_code_spike") is not None else None
+                display_rows.append({"column": c, **row})
+            st.dataframe(display_rows, width="stretch")
+
+
+        # --- Suggested variable roles (informational only — never drives any transformation) ---
+        role_suggestions = {col: role for col, role in role_by_column.items() if role is not None}
+        if role_suggestions:
+            with st.expander(f"Suggested variable roles ({len(role_suggestions)}) — informational only", icon=":material/label:"):
+                st.caption("Based on column naming conventions only. Never applied to anything — for your reference.")
+                st.dataframe(
+                    [{"column": c, "suggested role": r["role"], "confidence": r["confidence"], "evidence": r["evidence"]} for c, r in role_suggestions.items()],
+                    width="stretch",
+                )
+
+        # --- Dataset fingerprint: compare against a previous version, fully stateless ---
+        # The downloadable bundle embeds the full per-column dictionary alongside the
+        # fingerprint hashes -- not just the hashes -- so that re-uploading it later
+        # gives compare_fingerprints() real previous-version stats to diff against,
+        # rather than an empty stand-in that would misreport every column as changed.
+        fingerprint = compute_dataset_fingerprint(dictionary, len(rows))
+        fingerprint_bundle = {"fingerprint": fingerprint, "dictionary": dictionary}
+        with st.expander("Dataset fingerprint — compare against a previous version of this file", icon=":material/fingerprint:"):
+            st.caption(
+                "Fully stateless: DataForensics keeps no history on its own. Download this fingerprint now; "
+                "next time you analyze a newer version of this dataset, upload today's fingerprint "
+                "here to see exactly what changed."
+            )
+            st.download_button(
+                "Download this fingerprint (.json)",
+                icon=":material/download:",
+                data=json.dumps(fingerprint_bundle, indent=2),
+                file_name=f"fingerprint_{st.session_state['dataforensics_data_name']}.json",
+                mime="application/json",
+            )
+            prev_fp_file = st.file_uploader("Upload a previous fingerprint.json to compare", type="json", key="fp_upload")
+            if prev_fp_file is not None:
+                try:
+                    prev_bundle = json.loads(prev_fp_file.getvalue())
+                    prev_fp = prev_bundle["fingerprint"]
+                    prev_dict = prev_bundle["dictionary"]
+                except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                    st.error(f"Not a valid dataforensics fingerprint file: {exc}")
+                    prev_fp = None
+                if prev_fp is not None:
+                    if prev_fp.get("schema_fingerprint") == fingerprint["schema_fingerprint"] and prev_fp.get("value_fingerprint") == fingerprint["value_fingerprint"]:
+                        st.success("Identical to the previous version — no structural or distributional change detected.")
+                    else:
+                        st.warning("This dataset has changed since the uploaded fingerprint.")
+                        diff = compare_fingerprints(prev_fp, fingerprint, prev_dict, dictionary)
+                        if diff["possible_renames"]:
+                            for r in diff["possible_renames"]:
+                                st.caption(f"↔ {r['removed']} and {r['added']} have identical dtype, category, cardinality, and missingness — possibly the same column renamed, not truly added/removed.")
+                        if diff["columns_added"]:
+                            st.write(f"**+{_n(len(diff['columns_added']), 'column')}:** {', '.join(diff['columns_added'])}")
+                        if diff["columns_removed"]:
+                            st.write(f"**-{_n(len(diff['columns_removed']), 'column')}:** {', '.join(diff['columns_removed'])}")
+                        st.write(f"**Row count:** {'+' if diff['row_count_delta'] >= 0 else ''}{diff['row_count_delta']}")
+                        if diff["changed_columns"]:
+                            st.write("**Changed columns:**")
+                            st.dataframe(
+                                [{"column": c["column"], **{f"{k} (before → after)": f"{v['before']} → {v['after']}" for k, v in c["changes"].items()}} for c in diff["changed_columns"]],
+                                width="stretch",
+                            )
+                        if diff["distribution_drift"]:
+                            st.write("**Distribution drift:**")
+                            for d in diff["distribution_drift"]:
+                                if d["kind"] == "numeric_median":
+                                    st.markdown(f"- **{d['column']}**: median {d['before']:,.2f} → {d['after']:,.2f} ({d['relative_change']:+.0%})")
+                                else:
+                                    bits = []
+                                    if d["values_added"]:
+                                        bits.append(f"+{', '.join(d['values_added'])}")
+                                    if d["values_removed"]:
+                                        bits.append(f"-{', '.join(d['values_removed'])}")
+                                    st.markdown(f"- **{d['column']}**: category values changed ({'; '.join(bits)})")
+                            st.caption("A change worth investigating, not automatically an error — a median or category set can legitimately shift between real dataset versions.")
+
+        outlier_cols = {c: f for c, f in dictionary.items() if (f.get("outliers") or {}).get("outlier_count")}
+        top_code_cols = {c: f for c, f in dictionary.items() if f.get("top_code_spike")}
+        any_domain_findings = bool(
+            clinical_range_findings or conflicting_id_findings or invalid_fips_findings
+            or invalid_zip_findings or survey_weight_columns
+        )
+        any_cross_column_findings = bool(
+            birth_date_findings or duplicate_entities or fuzzy_duplicate_entities
+            or column_order_findings or conditional_column_findings
+        )
+        any_format_integrity_findings = bool(
+            shape_outlier_findings or whitespace_anomaly_counts or invisible_char_counts
+            or encoding_corruption_counts or numeric_representation_findings or age_year_findings
+            or unit_inconsistency_findings
+        )
+        any_temporal_findings = bool(future_date_findings or temporal_gap_findings)
+        any_privacy_findings = bool(pii_content_findings)
+        if (
+            outlier_cols or top_code_cols or dup_rows or any_domain_findings or any_cross_column_findings
+            or any_format_integrity_findings or any_temporal_findings or any_privacy_findings
+        ):
+            st.markdown(_bucket_header("list", "Exhibits"), unsafe_allow_html=True)
+            st.caption("The evidence behind each finding above. Open a card's panel for the rows. Outliers are never deleted, capped or imputed.")
+            for c, f in outlier_cols.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(c)}: {_n(f["outliers"]["outlier_count"], "statistical outlier")}</div>'
+                    '<div class="dataforensics-card-evidence">IQR method — statistically unusual, not necessarily wrong.'
+                    + (
+                        f' Median {f["outliers"]["median"]:,.2f} · IQR {f["outliers"]["iqr"]:,.2f} · '
+                        f'maximum {f["outliers"]["max"]:,.2f}'
+                        if "median" in f["outliers"]
+                        else ""
+                    )
+                    + "</div></div>",
+                    unsafe_allow_html=True,
+                )
+                outlier_evidence = find_outlier_evidence(rows, c)
+                strip = _value_strip(rows, c, {i for i, _ in outlier_evidence}, "Outside the usual range", "Other values",
+                                     exclude=set(sentinels.get(c, [])))
+                if strip is not None:
+                    st.altair_chart(strip, width="stretch")
+                _evidence_panel(
+                    rule="IQR method: flagged if the value falls below Q1 − 1.5×(Q3−Q1) or above Q3 + 1.5×(Q3−Q1), computed over this column's own non-null values.",
+                    lines=_evidence_lines(c, outlier_evidence),
+                    not_known="Whether this is a data-entry error, a genuine rare observation, or the correct value for a legitimately unusual case.",
+                    recommended_action="Review manually. DataForensics never auto-corrects, caps, or removes outliers.",
+                )
+            for c, f in top_code_cols.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(c)}: possible top-coding at {_esc(f["top_code_spike"]["value"])}</div>'
+                    f'<div class="dataforensics-card-evidence">{f["top_code_spike"]["fraction"]:.1%} of values sit at the observed max</div></div>',
+                    unsafe_allow_html=True,
+                )
+                top_value = f["top_code_spike"]["value"]
+                _evidence_panel(
+                    rule=(
+                        f"{f['top_code_spike']['fraction']:.1%} of this column's non-null values sit exactly at its "
+                        f"observed maximum ({top_value}), suggesting a survey/export ceiling rather than a genuine "
+                        "natural maximum."
+                    ),
+                    lines=_evidence_lines(c, find_top_code_evidence(rows, c, top_value)),
+                    not_known="Whether this ceiling reflects a genuine natural maximum, or a survey/export cap where the true value could actually be higher.",
+                    recommended_action="Review manually. DataForensics never assumes or corrects a top-coding ceiling.",
+                )
+            for col, f in shape_outlier_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {f["outlier_count"]} of {_n(f["total_count"], "value")} don\'t match the column\'s dominant format</div>'
+                    f'<div class="dataforensics-card-evidence">{f["dominant_count"]} of {_n(f["total_count"], "value")} ({f["dominant_count"] / f["total_count"]:.0%}) share one shape</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=(
+                        f"{f['dominant_count']} of {f['total_count']} non-null values in {col} "
+                        f"({f['dominant_count'] / f['total_count']:.0%}) reduce to the same character-pattern "
+                        "shape (digits/letters/spacing/punctuation) — a dominant format, not a declared rule. "
+                        "Values reducing to a different shape are flagged."
+                    ),
+                    lines=_evidence_lines(col, find_value_shape_outlier_evidence(rows, col, f["dominant_shape"])),
+                    not_known="Whether this is a genuine formatting error, a legitimately different but valid format (e.g. an international phone number), or the correct value for an edge case.",
+                    recommended_action="Review manually — DataForensics never reformats or corrects a value automatically.",
+                )
+            for col, count in whitespace_anomaly_counts.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(count, "value")} with leading/trailing or doubled whitespace</div>'
+                    f'<div class="dataforensics-card-evidence">e.g. "California" vs " California " — different strings, same apparent value</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=f"{col} has a value with leading/trailing whitespace or 2+ consecutive internal spaces.",
+                    lines=_evidence_lines(col, find_whitespace_anomaly_evidence(rows, col)),
+                    not_known="Whether this whitespace was intentional, or an export/copy-paste artifact.",
+                    recommended_action="Review manually — DataForensics never trims or reformats a value automatically.",
+                )
+            for col, count in invisible_char_counts.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(count, "value")} with a hidden/invisible character</div>'
+                    f'<div class="dataforensics-card-evidence">a zero-width space, non-breaking space, or control character that renders invisibly</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=f"{col} has a value containing a zero-width space, non-breaking space, embedded byte-order mark, or other invisible/control character.",
+                    lines=_invisible_char_evidence_lines(col, find_invisible_character_evidence(rows, col)),
+                    not_known="Whether this was introduced by a copy-paste from a web page/PDF, an export tool, or is otherwise intentional.",
+                    recommended_action="Review manually — DataForensics never strips or replaces a character automatically.",
+                )
+            for col, count in encoding_corruption_counts.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(count, "value")} that look like encoding corruption</div>'
+                    f'<div class="dataforensics-card-evidence">e.g. "JosÃ©" instead of "José" — a UTF-8/Windows-1252 mismatch</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=(
+                        f"{col} has a value that round-trips cleanly through \"encode as Windows-1252, decode "
+                        "as UTF-8\" into a different string containing a non-ASCII character — the standard "
+                        "signature of text that was genuinely UTF-8 but got decoded as Windows-1252/Latin-1 "
+                        "somewhere in its history."
+                    ),
+                    lines=_evidence_lines(col, find_encoding_corruption_evidence(rows, col)),
+                    not_known="The exact tool/step in this file's history that introduced the mis-decoding, or whether re-decoding it would perfectly recover the original text in every case.",
+                    recommended_action="Review manually — DataForensics never re-encodes or corrects a value automatically.",
+                )
+            for col, f in numeric_representation_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(f["decorated_count"], "value")} formatted differently than the rest of the column</div>'
+                    f'<div class="dataforensics-card-evidence">{_n(f["clean_count"], "plain number")} vs. {f["decorated_count"]} decorated (currency, comma or suffix)</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=(
+                        f"{f['clean_count']} of {f['clean_count'] + f['decorated_count']} numeric-looking values in "
+                        f"{col} parse as a plain number; the rest use a currency symbol, thousands separator, "
+                        "or k/m/b magnitude suffix instead."
+                    ),
+                    lines=_evidence_lines(col, find_numeric_representation_evidence(rows, col)),
+                    not_known="Whether this formatting difference reflects a different data source/entry method, or was simply typed differently by mistake.",
+                    recommended_action="Review manually — DataForensics never reformats or reparses a value automatically.",
+                )
+            for col, f in age_year_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {f["year_like_count"]} of {_n(f["total_count"], "value")} look like a calendar year, not an age</div>'
+                    f'<div class="dataforensics-card-evidence">column name matches the "age" convention, but most values are 4-digit numbers in a plausible birth-year range</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=(
+                        f"{f['year_like_count']} of {f['total_count']} non-null values in {col} "
+                        f"({f['year_like_count'] / f['total_count']:.0%}) are 4-digit numbers between 1900 and the "
+                        "current year — implausible as ages, but exactly the shape of a birth year."
+                    ),
+                    lines=_evidence_lines(col, find_year_like_value_evidence(rows, col)),
+                    not_known="Whether this column is actually a birth year mislabeled as age, or a genuine age column with an unrelated data issue.",
+                    recommended_action="Review manually — confirm what this column actually represents before analyzing it as age.",
+                )
+            for col, f in unit_inconsistency_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: possible {_esc(f["unit_a"])}/{_esc(f["unit_b"])} unit mix</div>'
+                    f'<div class="dataforensics-card-evidence">{_n(f["low_count"], "value")} around {f["low_median"]:,.1f}, {_n(f["high_count"], "value")} around {f["high_median"]:,.1f} — ratio {f["observed_ratio"]:.2f}</div></div>',
+                    unsafe_allow_html=True,
+                )
+                minority_unit = f["unit_b"] if f["minority_side"] == "high" else f["unit_a"]
+                majority_unit = f["unit_a"] if f["minority_side"] == "high" else f["unit_b"]
+                unit_rows = find_unit_inconsistency_evidence(rows, col, f["boundary"], f["minority_side"])
+                strip = _value_strip(rows, col, {i for i, _ in unit_rows}, f"Looks like {minority_unit}",
+                                     f"Looks like {majority_unit}", exclude=set(sentinels.get(col, [])))
+                if strip is not None:
+                    st.altair_chart(strip, width="stretch")
+                _evidence_panel(
+                    rule=(
+                        f"{col}'s values split into two clusters (around {f['low_median']:,.1f} and "
+                        f"{f['high_median']:,.1f}) whose ratio ({f['observed_ratio']:.3f}) is within 5% of the real "
+                        f"{f['unit_a']}-to-{f['unit_b']} conversion factor ({f['expected_factor']:.3f}) — "
+                        "not just any two-humped distribution, but one matching a specific known unit conversion. "
+                        "The rows listed are the smaller cluster."
+                    ),
+                    lines=_evidence_lines(col, unit_rows),
+                    not_known=f"Whether this value is genuinely in {f['unit_b'] if f['minority_side'] == 'high' else f['unit_a']}, or the two clusters reflect a real subpopulation difference that happens to land near this ratio by coincidence.",
+                    recommended_action="Review manually — confirm which unit each row was actually recorded in before analyzing this column.",
+                )
+            for col, counts in pii_content_findings.items():
+                # "1 phone number", "2 email addresses"
+                kinds = ", ".join(
+                    f"{count} {label}{'' if count == 1 else ('es' if label.endswith('s') else 's')}"
+                    for label, count in counts.items()
+                )
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-warning">Privacy</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {kinds} found in cell values</div>'
+                    f'<div class="dataforensics-card-evidence">this column\'s name gave no indication it holds personal data</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=(
+                        f"{col} is not name-flagged as a PII-like column, but at least one cell value contains "
+                        "a substring shaped like an SSN (###-##-####), an email address, or a phone number with "
+                        "standard separators."
+                    ),
+                    lines=_pii_content_evidence_lines(find_pii_content_evidence(rows, col)),
+                    not_known="Whether this is genuinely someone's personal information, a coincidental format match, or placeholder/test data.",
+                    recommended_action="Review manually — consider masking this column in any report or export if it does contain real personal data. DataForensics never redacts a value automatically.",
+                )
+            if dup_rows:
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-warning">Warning</span>'
+                    f'<div class="dataforensics-card-title">{_n(len(dup_rows), "exact duplicate row")}</div>'
+                    f'<div class="dataforensics-card-evidence">DataForensics never auto-deletes rows — could be a data-entry duplicate '
+                    f"or a legitimate repeated record (e.g. a second visit). Removing them is optional, on Review &amp; fix.</div></div>",
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown("**Rule:** Every field in this row is identical to an earlier row (an exact full-row duplicate, not just a shared key).")
+                    dup_lines = [
+                        f"row {d['row_index'] + 1:,} is identical to row {d['duplicate_of_row_index'] + 1:,}"
+                        for d in dup_rows[:10]
+                    ]
+                    st.markdown(
+                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in dup_lines)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if len(dup_rows) > 10:
+                        st.caption(f"...and {len(dup_rows) - 10} more row(s) not shown.")
+                    st.markdown("**Can't tell:** Whether this is a genuine data-entry duplicate, or a legitimate repeated record (e.g. a second identical visit) that just happens to match on every field.")
+                    st.markdown("**Next step:** Review manually. DataForensics never auto-deletes rows.")
+
+            for col, finding in clinical_range_findings.items():
+                rule = finding["rule"]
+                unit_suffix = f" {rule['unit']}" if rule["unit"] else ""
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Clinical range</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(len(finding["evidence"]), "value")} outside the plausible {rule["label"]} range</div>'
+                    f'<div class="dataforensics-card-evidence">expected {rule["min"]}–{rule["max"]}{unit_suffix}</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=f'{col} matches the "{rule["label"]}" naming convention; plausible range is {rule["min"]}–{rule["max"]}{unit_suffix} (Clinical / Research dataset profile).',
+                    lines=_evidence_lines(col, finding["evidence"]),
+                    not_known="Whether this is a data-entry error, a unit mismatch (e.g. months recorded where years were expected), or a genuinely unusual but real value.",
+                    recommended_action="Human review — DataForensics never auto-corrects or removes an implausible value.",
+                )
+
+            for col, conflicts in conflicting_id_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-warning">Conflicting records</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(len(conflicts), "ID value")} with conflicting fields across rows</div>'
+                    f'<div class="dataforensics-card-evidence">same {_esc(col)}, different other fields — not an exact duplicate</div></div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        f"**Rule:** The same {_esc(col)} value appears on 2+ rows where at least one other "
+                        "field differs (Clinical / Research dataset profile)."
+                    )
+                    pii = is_pii_like_column(col)
+                    conflict_lines = [
+                        f"{col} = {_PII_EVIDENCE_MASK if pii else c['id_value']} → rows "
+                        + ", ".join(str(i + 1) for i in c["row_indices"])
+                        for c in conflicts[:10]
+                    ]
+                    st.markdown(
+                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in conflict_lines)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if len(conflicts) > 10:
+                        st.caption(f"...and {len(conflicts) - 10} more id value(s) not shown.")
+                    st.markdown(
+                        "**Can't tell:** Whether this is a genuine data-entry conflict (the same "
+                        "participant recorded inconsistently), or a legitimate repeated visit with a real field "
+                        "change — and if it IS a conflict, which row holds the correct value."
+                    )
+                    st.markdown("**Next step:** Human review — DataForensics never guesses which row is correct.")
+
+            for col, evidence in invalid_fips_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Geographic format</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(len(evidence), "value")} not shaped like a FIPS code</div>'
+                    f'<div class="dataforensics-card-evidence">expected a 2-digit (state) or 5-digit (state+county) numeric code</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=(
+                        f'{col} matches the "fips" naming convention (Geographic dataset profile); a valid FIPS code '
+                        "is a 2-digit (state) or 5-digit (state+county) numeric string, e.g. \"06\" or \"06037\"."
+                    ),
+                    lines=_evidence_lines(col, evidence),
+                    not_known="Whether this is a formatting issue (e.g. a stripped leading zero), a non-US or non-FIPS geographic code, or genuinely invalid data.",
+                    recommended_action="Review manually — check for truncated leading zeros or a non-FIPS value.",
+                )
+
+            for col, evidence in invalid_zip_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Geographic format</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(len(evidence), "value")} not shaped like a ZIP code</div>'
+                    f'<div class="dataforensics-card-evidence">expected a 5-digit ZIP or ZIP+4</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=(
+                        f'{col} matches the "zip" naming convention (Geographic dataset profile); a valid ZIP code '
+                        "is 5 digits, or 5 digits + hyphen + 4 digits (ZIP+4)."
+                    ),
+                    lines=_evidence_lines(col, evidence),
+                    not_known="Whether this is a formatting issue (e.g. a stripped leading zero), a non-US postal code, or genuinely invalid data.",
+                    recommended_action="Review manually — check for a truncated leading zero or a non-ZIP value.",
+                )
+
+            if survey_weight_columns:
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Survey weight</span>'
+                    f'<div class="dataforensics-card-title">{_n(len(survey_weight_columns), "possible survey or sampling weight column")}: {", ".join(_esc(c) for c in survey_weight_columns)}</div>'
+                    f'<div class="dataforensics-card-evidence">column name matches a common weight-variable convention</div></div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        "**Rule:** Column name matches a common survey/sampling weight naming convention "
+                        "(e.g. \"wt\", \"wgt\", \"weight\") (Survey dataset profile)."
+                    )
+                    st.markdown(
+                        "**Can't tell:** Whether this column IS actually a sampling weight — that's a "
+                        "study-design fact only the study documentation can confirm. If it is, treating it as an "
+                        "ordinary numeric variable (flagging it for outliers, averaging it directly) usually "
+                        "produces a meaningless result."
+                    )
+                    st.markdown("**Next step:** Confirm this is really a sampling weight before analyzing it as a regular column.")
+
+            for (birth_col, other_col), evidence in birth_date_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-warning">Temporal inconsistency</span>'
+                    f'<div class="dataforensics-card-title">{_n(len(evidence), "row")} where {_esc(birth_col)} is AFTER {_esc(other_col)}</div>'
+                    f'<div class="dataforensics-card-evidence">a birth date cannot come after another event in the same record</div></div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        f"**Rule:** {_esc(birth_col)} matches the \"date of birth\" naming convention and "
+                        f"{_esc(other_col)} matches the generic \"date\" naming convention; a birth date can never "
+                        "be later than another recorded date for the same person."
+                    )
+                    birth_pii = is_pii_like_column(birth_col)
+                    other_pii = is_pii_like_column(other_col)
+                    birth_lines = [
+                        f"row {i + 1:,} → {birth_col} = {_PII_EVIDENCE_MASK if birth_pii else b} is after "
+                        f"{other_col} = {_PII_EVIDENCE_MASK if other_pii else o}"
+                        for i, b, o in evidence[:10]
+                    ]
+                    st.markdown(
+                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in birth_lines)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if len(evidence) > 10:
+                        st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
+                    st.markdown(
+                        "**Can't tell:** Which of the two dates is wrong (or whether the columns "
+                        "were mislabeled/swapped) — only that both cannot be correct as recorded."
+                    )
+                    st.markdown("**Next step:** Human review — DataForensics never guesses which date is correct.")
+
+            for (before_col, after_col), evidence in column_order_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-warning">Ordering inconsistency</span>'
+                    f'<div class="dataforensics-card-title">{_n(len(evidence), "row")} where {_esc(before_col)} is AFTER {_esc(after_col)}</div>'
+                    f'<div class="dataforensics-card-evidence">column names suggest {_esc(before_col)} should never exceed {_esc(after_col)}</div></div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        f"**Rule:** {_esc(before_col)} and {_esc(after_col)} differ only by a \"before\"/\"after\" "
+                        "naming keyword (start/end, min/max, admission/discharge, ...); compared as ISO dates or as "
+                        f"numbers, {_esc(before_col)}'s value should never exceed {_esc(after_col)}'s in the same row."
+                    )
+                    before_pii = is_pii_like_column(before_col)
+                    after_pii = is_pii_like_column(after_col)
+                    order_lines = [
+                        f"row {i + 1:,} → {before_col} = {_PII_EVIDENCE_MASK if before_pii else b} is after "
+                        f"{after_col} = {_PII_EVIDENCE_MASK if after_pii else a}"
+                        for i, b, a in evidence[:10]
+                    ]
+                    st.markdown(
+                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in order_lines)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if len(evidence) > 10:
+                        st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
+                    st.markdown(
+                        "**Can't tell:** Which value is wrong (or whether the columns were "
+                        "mislabeled/swapped) — only that both cannot be correct as recorded given their names."
+                    )
+                    st.markdown("**Next step:** Human review — DataForensics never guesses which value is correct.")
+
+            for (flag_col, detail_col), evidence in conditional_column_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-warning">Logical inconsistency</span>'
+                    f'<div class="dataforensics-card-title">{_n(len(evidence), "row")} where {_esc(flag_col)} = "No" but {_esc(detail_col)} is filled in</div>'
+                    f'<div class="dataforensics-card-evidence">{_esc(flag_col)} names a negative-value flag that {_esc(detail_col)} appears to depend on</div></div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        f"**Rule:** {_esc(flag_col)} looks like a yes/no flag by name (has_/is_/_flag/_status) and "
+                        f"{_esc(detail_col)} shares that same stem; when {_esc(flag_col)} holds a clearly negative "
+                        f"value (\"No\", \"False\", \"0\", \"Never\", ...), {_esc(detail_col)} should logically be empty."
+                    )
+                    flag_pii = is_pii_like_column(flag_col)
+                    detail_pii = is_pii_like_column(detail_col)
+                    conditional_lines = [
+                        f"row {i + 1:,} → {flag_col} = {_PII_EVIDENCE_MASK if flag_pii else fv}, "
+                        f"{detail_col} = {_PII_EVIDENCE_MASK if detail_pii else dv}"
+                        for i, fv, dv in evidence[:10]
+                    ]
+                    st.markdown(
+                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in conditional_lines)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if len(evidence) > 10:
+                        st.caption(f"...and {len(evidence) - 10} more row(s) not shown.")
+                    st.markdown(
+                        "**Can't tell:** Which of the two fields is wrong (or whether the flag and "
+                        "detail column are actually related the way their names suggest)."
+                    )
+                    st.markdown("**Next step:** Human review — DataForensics never guesses which field is correct.")
+
+            for col, evidence in future_date_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-warning">Future date</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(len(evidence), "value")} dated after today</div>'
+                    f'<div class="dataforensics-card-evidence">a date this far in the future is almost always a data-entry error</div></div>',
+                    unsafe_allow_html=True,
+                )
+                _evidence_panel(
+                    rule=f"{col} has an ISO date value later than today's date.",
+                    lines=_evidence_lines(col, evidence),
+                    not_known="Whether this is a mistyped year/century, a genuinely scheduled future date (e.g. a planned follow-up visit), or a placeholder value.",
+                    recommended_action="Review manually — confirm whether a future date is expected for this column.",
+                )
+
+            for col, g in temporal_gap_findings.items():
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
+                    f'<div class="dataforensics-card-title">{_esc(col)}: {_n(len(g["gaps"]), "coverage gap")} well beyond this column\'s typical spacing</div>'
+                    f'<div class="dataforensics-card-evidence">median spacing between observations is {_n(g["median_gap_days"], "day", spec=",.0f")}</div></div>',
+                    unsafe_allow_html=True,
+                )
+                timeline = _date_timeline(rows, col, g["gaps"])
+                if timeline is not None:
+                    st.altair_chart(timeline, width="stretch")
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        f"**Rule:** The median gap between consecutive distinct dates in {_esc(col)} is "
+                        f"{_n(g['median_gap_days'], 'day', spec=',.0f')}. A gap is flagged when it is at least 1.75x that and 3+ days "
+                        "longer; for irregular arrivals it must also be longer than random arrivals would plausibly produce "
+                        "(under a 5% chance) and rarer than the 95th percentile. This adapts to the column's own cadence "
+                        "rather than assuming a fixed calendar frequency."
+                    )
+                    gap_lines = [f"{gap['after']} → {gap['before']} ({_n(gap['gap_days'], 'day', spec=',')})" for gap in g["gaps"][:10]]
+                    st.markdown(
+                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in gap_lines)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if len(g["gaps"]) > 10:
+                        st.caption(f"...and {len(g['gaps']) - 10} more gap(s) not shown.")
+                    st.markdown(
+                        "**Can't tell:** Whether this reflects a real reporting gap, an expected pause "
+                        "(e.g. a facility closure, a seasonal program), or simply a naturally uneven observation schedule."
+                    )
+                    st.markdown("**Next step:** Review manually — confirm whether this gap is expected.")
+
+            if duplicate_entities:
+                total_flagged_rows = sum(len(d["row_indices"]) for d in duplicate_entities)
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-warning">Potential duplicate entity</span>'
+                    f'<div class="dataforensics-card-title">{_n(len(duplicate_entities), "group")}, {_n(total_flagged_rows, "row")} — same {", ".join(_esc(c) for c in quasi_identifier_columns)}, different {_esc(id_like_defaults[0])}</div>'
+                    f'<div class="dataforensics-card-evidence">the same apparent real-world entity may have been assigned more than one ID — DataForensics does not merge these</div></div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        f"**Rule:** 2+ rows share the same value (case/whitespace-normalized) across every one of "
+                        f"{', '.join(_esc(c) for c in quasi_identifier_columns)}, but have different "
+                        f"{_esc(id_like_defaults[0])} values."
+                    )
+                    pii_cols = [c for c in quasi_identifier_columns if is_pii_like_column(c)]
+                    entity_lines = []
+                    for d in duplicate_entities[:10]:
+                        sample_row = rows[d["row_indices"][0]]
+                        key_desc = ", ".join(
+                            f"{c}={_PII_EVIDENCE_MASK if c in pii_cols else sample_row.get(c)}" for c in quasi_identifier_columns
+                        )
+                        entity_lines.append(
+                            f"{key_desc} → {id_like_defaults[0]} values {', '.join(d['id_values'])} "
+                            f"(rows {', '.join(str(i + 1) for i in d['row_indices'])})"
+                        )
+                    st.markdown(
+                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in entity_lines)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if len(duplicate_entities) > 10:
+                        st.caption(f"...and {len(duplicate_entities) - 10} more group(s) not shown.")
+                    st.markdown(
+                        "**Can't tell:** Whether this is genuinely the same real-world entity "
+                        "recorded under two IDs (e.g. a re-registration), a coincidental match, or two different "
+                        "people who happen to share these attributes."
+                    )
+                    st.markdown("**Next step:** Human review — DataForensics never merges records.")
+
+            if fuzzy_duplicate_entities:
+                total_fuzzy_flagged_rows = sum(len(d["row_indices"]) for d in fuzzy_duplicate_entities)
+                st.markdown(
+                    f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Possible duplicate entity</span>'
+                    f'<div class="dataforensics-card-title">{_n(len(fuzzy_duplicate_entities), "group")}, {_n(total_fuzzy_flagged_rows, "row")} — same {", ".join(_esc(c) for c in fuzzy_exact_columns)}, similar {_esc(fuzzy_name_column)}, different {_esc(id_like_defaults[0])}</div>'
+                    f'<div class="dataforensics-card-evidence">a spelling variant, not an exact match — weaker evidence than an exact duplicate entity</div></div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Why was this flagged?"):
+                    st.markdown(
+                        f"**Rule:** 2+ rows share the same value (case/whitespace-normalized) across every one of "
+                        f"{', '.join(_esc(c) for c in fuzzy_exact_columns)}, and {_esc(fuzzy_name_column)} is a close "
+                        f"but not exact match (rapidfuzz token-sort similarity ≥90%), but the rows have different "
+                        f"{_esc(id_like_defaults[0])} values."
+                    )
+                    fuzzy_pii_cols = [c for c in [*fuzzy_exact_columns, fuzzy_name_column] if is_pii_like_column(c)]
+                    fuzzy_entity_lines = []
+                    for d in fuzzy_duplicate_entities[:10]:
+                        row_x, row_y = rows[d["row_indices"][0]], rows[d["row_indices"][1]]
+                        name_x = _PII_EVIDENCE_MASK if fuzzy_name_column in fuzzy_pii_cols else row_x.get(fuzzy_name_column)
+                        name_y = _PII_EVIDENCE_MASK if fuzzy_name_column in fuzzy_pii_cols else row_y.get(fuzzy_name_column)
+                        exact_desc = ", ".join(
+                            f"{c}={_PII_EVIDENCE_MASK if c in fuzzy_pii_cols else row_x.get(c)}" for c in fuzzy_exact_columns
+                        )
+                        fuzzy_entity_lines.append(
+                            f"{exact_desc}, {fuzzy_name_column}: {name_x!r} vs {name_y!r} ({d['similarity']}% similar) → "
+                            f"{id_like_defaults[0]} values {', '.join(d['id_values'])} "
+                            f"(rows {', '.join(str(i + 1) for i in d['row_indices'])})"
+                        )
+                    st.markdown(
+                        f'<div class="dataforensics-card-evidence">{"<br>".join(_esc(line) for line in fuzzy_entity_lines)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if len(fuzzy_duplicate_entities) > 10:
+                        st.caption(f"...and {len(fuzzy_duplicate_entities) - 10} more group(s) not shown.")
+                    st.markdown(
+                        "**Can't tell:** Whether this is genuinely a spelling variant of the same "
+                        "real-world entity, or two different people who happen to have similar-sounding names and "
+                        "share the exact-matched fields by coincidence — weaker evidence than an exact match on "
+                        "every field."
+                    )
+                    st.markdown("**Next step:** Human review — DataForensics never merges records.")
+
+        with st.expander("Missing-data patterns — information only, nothing to approve", icon=":material/info:"):
+            if missingness_concentration or missingness_co_occurrence:
+                st.markdown(_bucket_header("missing", "Missingness patterns"), unsafe_allow_html=True)
+                st.caption("Informational only — nothing to approve here. DataForensics never imputes; these are plain comparisons, not a significance test.")
+                for col, findings in missingness_concentration.items():
+                    for f in findings:
+                        st.markdown(
+                            f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Concentration</span>'
+                            f'<div class="dataforensics-card-title">{_esc(col)} missingness is concentrated where {_esc(f["column"])} is {f["direction"]}</div>'
+                            f'<div class="dataforensics-card-evidence">median {_esc(f["column"])} {f["median_when_missing"]:,.2f} when {_esc(col)} is missing '
+                            f'vs. {f["median_when_present"]:,.2f} when present</div></div>',
+                            unsafe_allow_html=True,
+                        )
+                        with st.expander("Why was this flagged?"):
+                            st.markdown(
+                                f"**Rule:** Among rows where {_esc(col)} is missing ({_n(f['missing_group_size'], 'row')} "
+                                f"with a parseable {_esc(f['column'])} value) vs. rows where it's present "
+                                f"({_n(f['present_group_size'], 'row')}), {_esc(f['column'])}'s median differs by "
+                                f"{f['relative_gap']:.0%} — at or above the 20% relative-gap threshold used to surface this."
+                            )
+                            st.markdown(
+                                "**Can't tell:** Whether this reflects a real cause (e.g. a measurement "
+                                "that becomes harder to collect for one group), a coincidence in this sample, or a "
+                                "confound with a third variable — this is a median comparison, not a statistical test."
+                            )
+                            st.markdown(
+                                "**Next step:** Missingness pattern detected; statistical handling (e.g. "
+                                "multiple imputation, a missing-data mechanism analysis) requires analyst judgment. "
+                                "DataForensics never imputes."
+                            )
+                for f in missingness_co_occurrence:
+                    st.markdown(
+                        f'<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-suggestion">Co-occurrence</span>'
+                        f'<div class="dataforensics-card-title">{_esc(f["column_a"])} and {_esc(f["column_b"])} are frequently missing together</div>'
+                        f'<div class="dataforensics-card-evidence">{_n(f["both_missing_count"], "row")} missing both — '
+                        f'{f["overlap_fraction"]:.0%} of the smaller gap</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                    with st.expander("Why was this flagged?"):
+                        st.markdown(
+                            f"**Rule:** {_esc(f['column_a'])} is missing on {_n(f['column_a_missing_count'], 'row')}, "
+                            f"{_esc(f['column_b'])} on {_n(f['column_b_missing_count'], 'row')}; {f['both_missing_count']} "
+                            "row(s) are missing both — that's at or above the 50% overlap-of-the-smaller-gap threshold "
+                            "used to surface this."
+                        )
+                        st.markdown(
+                            "**Can't tell:** Whether these gaps share a real cause (e.g. the same survey "
+                            "section skipped, the same non-response), or are coincidentally correlated in this sample — "
+                            "this is a raw overlap count, not an independence test."
+                        )
+                        st.markdown(
+                            "**Next step:** Missingness pattern detected; statistical handling requires "
+                            "analyst judgment. DataForensics never imputes."
+                        )
+
+        _step_nav("issues")
+    if step == "review":
+        _page_banner(
+            _step_eyebrow(4, "Review &amp; fix"),
+            "Choose what to fix",
+            "Tick the fixes you want, or approve all the recommended ones. Nothing changes until you click "
+            "<b>Apply approved changes</b> at the bottom.",
+            chips=[
+                (str(len(model["recommended_keys"])), "recommended fixes"),
+                (str(model["approved_count"]), "approved so far"),
+            ],
+        )
+        st.markdown('<div class="df-field-label">Primary key</div>', unsafe_allow_html=True)
+        st.multiselect(
+            "Primary key column(s)",
+            help="The column(s) that identify a record — used to find duplicate and conflicting records.",
+            options=columns,
+            default=id_like_defaults[:1] or columns[:1],
+            key=f"dataforensics_primary_key__{_source_key}",
+        )
+
+        _approval_buttons(model["recommended_keys"], model["all_keys"], "top")
+
+        if sentinels:
+            st.markdown(_bucket_header("search", "Candidate missing-value codes"), unsafe_allow_html=True)
+            for col, values in sentinels.items():
+                for val in values:
+                    key = f"sentinel__{_source_key}__{col}__{val}"
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([0.5, 2.5, 2])
+                        c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
+                        c2.markdown(
+                            f'<div class="dataforensics-card-title">{_esc(col)} = "{_visualize_whitespace(val)}"</div>'
+                            f'<div class="dataforensics-card-evidence">looks like a common missing-value convention</div>',
+                            unsafe_allow_html=True,
+                        )
+                        # A numeric column gets a blank cell by default, so the cleaned
+                        # column is all numbers; text columns get an explicit label.
+                        c3.text_input(
+                            "Map to (blank = empty cell)",
+                            value="" if column_types.get(col) == "numeric" else "Missing",
+                            key=f"{key}_label",
+                            label_visibility="collapsed",
+                            placeholder="(empty cell)",
+                        )
+                        sentinel_evidence_rows = find_sentinel_evidence(rows, col, val)
+                        non_null_count = len(rows) - dictionary[col].get("null_count", 0)
+                        sentinel_share = len(sentinel_evidence_rows) / non_null_count if non_null_count else 0.0
+                        _evidence_panel(
+                            rule=(
+                                f'"{val}" is {sentinel_share:.1%} of {col}\'s non-null values and case-insensitively '
+                                "matches a common missing-value convention: "
+                                + ", ".join(f'"{s}"' for s in sorted(COMMON_SENTINEL_STRINGS))
+                            ),
+                            lines=_evidence_lines(col, [(i, val) for i in sentinel_evidence_rows]),
+                            not_known=f'Whether "{val}" is actually being used as a missing-value code here, or is a genuine {col} value that happens to match the pattern.',
+                            recommended_action='Map to an explicit missing-value label above, or leave the checkbox unchecked if this is a real value.',
+                        )
+
+        if ambiguous_dates:
+            st.markdown(_bucket_header("calendar", "Ambiguous dates"), unsafe_allow_html=True)
+            for col, count in ambiguous_dates.items():
+                key = f"date__{_source_key}__{col}"
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([0.5, 2.5, 2])
+                    c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
+                    c2.markdown(
+                        f'<div class="dataforensics-card-title">{_esc(col)}</div>'
+                        f'<div class="dataforensics-card-evidence">{_n(count, "value")} shaped like MM/DD or DD/MM with no way to '
+                        f"tell which — never parsed automatically</div>",
+                        unsafe_allow_html=True,
+                    )
+                    c3.selectbox(
+                        "Format", ["MM/DD/YYYY", "DD/MM/YYYY"], key=f"{key}_fmt", label_visibility="collapsed"
+                    )
+                    _evidence_panel(
+                        rule=(
+                            "A date-shaped value matching MM/DD/YYYY or DD/MM/YYYY (1-2 digit month/day, "
+                            "4-digit year, slash- or dash-separated) with no declared format is ambiguous "
+                            "and is never parsed automatically."
+                        ),
+                        lines=_evidence_lines(col, find_ambiguous_date_evidence(rows, col)),
+                        not_known="Whether this is Month/Day or Day/Month — that requires knowing the source system's date convention, which nothing in the file states.",
+                        recommended_action="Declare the correct format above, or leave the checkbox unchecked if you're not sure.",
+                    )
+
+        if category_clusters:
+            st.markdown(_bucket_header("tag", "Inconsistent categories"), unsafe_allow_html=True)
+            for col, clusters in category_clusters.items():
+                for i, cluster in enumerate(clusters):
+                    key = f"cat__{_source_key}__{col}__{i}"
+                    with st.container(border=True):
+                        badge_cls = "dataforensics-badge-high" if cluster["confidence"] == "high" else "dataforensics-badge-medium"
+                        c1, c2 = st.columns([0.5, 4])
+                        # Default set through session state (not the widget's `value=`),
+                        # so "Approve all"/"Clear all" can change it without Streamlit's
+                        # default-vs-session-state conflict warning.
+                        # A cluster containing a code's default label ("Missing", or a
+                        # blank) would rewrite that code's output, which the app
+                        # refuses -- so it's neither pre-ticked nor recommended.
+                        label_collision = col in sentinels and bool({"Missing", ""} & set(cluster["values"]))
+                        st.session_state.setdefault(f"{key}_on", cluster["confidence"] == "high" and not label_collision)
+                        c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
+                        values_str = " / ".join(f'"{_visualize_whitespace(v)}"' for v in cluster["values"])
+                        c2.markdown(
+                            f'<span class="dataforensics-badge {badge_cls}">{"synonym codes" if cluster.get("synonym") else _esc(cluster["confidence"]) + " confidence"}</span>'
+                            f'<div class="dataforensics-card-title">{_esc(col)}: {values_str}</div>'
+                            f'<div class="dataforensics-card-evidence">would merge onto "{_visualize_whitespace(cluster["suggested_canonical"])}"</div>',
+                            unsafe_allow_html=True,
+                        )
+                        if cluster.get("synonym"):
+                            confidence_basis = "standard codes for the same category (e.g. M / Male, Y / Yes / True)"
+                        elif cluster["confidence"] == "high":
+                            confidence_basis = "identical after trimming whitespace and lowercasing"
+                        else:
+                            confidence_basis = "85%+ similar by fuzzy string match (rapidfuzz ratio)"
+                        cluster_evidence = sorted(
+                            (row_idx, v) for v in cluster["values"] for row_idx in find_category_value_evidence(rows, col, v)
+                        )
+                        _evidence_panel(
+                            rule=f"Values in this cluster are {confidence_basis}, suggesting the same real-world category written inconsistently.",
+                            lines=_evidence_lines(col, cluster_evidence),
+                            not_known=(
+                                f'Whether they all represent the same real-world category as "{cluster["suggested_canonical"]}", '
+                                "or whether one of these variants was intentionally distinct — that needs domain context "
+                                "this system doesn't have."
+                            ),
+                            recommended_action="Approve the merge above to standardize onto the suggested canonical value, or leave unchecked if these are genuinely different categories.",
+                        )
+
+        # --- Safe fixes: deterministic value-level repairs (cleaning.py). Off
+        # by default like everything else here; each shows a before -> after
+        # preview of real rows before you approve it. ---
+        if fix_offers or dup_rows or inseparable_unit_columns:
+            st.markdown(_bucket_header("sparkle", "Safe fixes"), unsafe_allow_html=True)
+            st.caption(
+                "Predictable, repeatable repairs. Each one only touches the values shown, and every changed cell is logged in the audit trail."
+            )
+            for fix, col, description, param, evidence in fix_offers:
+                key = f"fix__{_source_key}__{fix}__{col}"
+                with st.container(border=True):
+                    c1, c2 = st.columns([0.5, 4])
+                    c1.checkbox("approve", key=key, label_visibility="collapsed")
+                    c2.markdown(
+                        f'<span class="dataforensics-badge dataforensics-badge-high">{_esc(FIX_LABELS[fix])}</span>'
+                        f'<div class="dataforensics-card-title">{_esc(col)}: {_esc(description)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    preview_fixes: dict = {fix: param if param is not None else [col]}
+                    if fix in ("leading_zeros", "date_iso", "units"):
+                        preview_fixes = {fix: {col: param}}
+                    preview, _ = apply_safe_fixes([{col: v} for _, v in evidence[:8]], preview_fixes, [], reason="preview")
+                    pii = is_pii_like_column(col)
+                    with st.expander("Preview: before → after"):
+                        st.markdown(
+                            '<div class="dataforensics-card-evidence">'
+                            + "<br>".join(
+                                f"row {i + 1:,}: " + ("[masked]" if pii else f"{_visualize_whitespace(before)} → {_visualize_whitespace(after[col])}")
+                                for (i, before), after in zip(evidence[:8], preview, strict=True)
+                            )
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
+                        if len(evidence) > 8:
+                            st.caption(f"...and {len(evidence) - 8:,} more.")
+                        if fix == "numeric_format":
+                            st.caption("Percentages (e.g. 45%) are left as-is: whether they mean 45 or 0.45 depends on the column.")
+            if dup_rows:
+                with st.container(border=True):
+                    c1, c2 = st.columns([0.5, 4])
+                    c1.checkbox("approve", key=f"fix__{_source_key}__drop_duplicates", label_visibility="collapsed")
+                    c2.markdown(
+                        f'<span class="dataforensics-badge dataforensics-badge-high">Remove duplicates</span>'
+                        f'<div class="dataforensics-card-title">Remove {_n(len(dup_rows), "exact duplicate row", spec=",")}</div>'
+                        f'<div class="dataforensics-card-evidence">keeps the first occurrence; each removed row is re-verified as identical before removal</div>',
+                        unsafe_allow_html=True,
+                    )
+            if inseparable_unit_columns:
+                st.caption(
+                    f"Mixed units in {', '.join(inseparable_unit_columns)} can't be converted automatically: the two units' "
+                    "ranges overlap, so a value like 105 could be either. Fix these at the source."
+                )
+            if ambiguous_dates and not approved_date_formats:
+                st.caption("To convert ambiguous dates to YYYY-MM-DD, approve a date format in the Ambiguous dates section above.")
+
+        with st.expander("Add your own rules (optional) — ranges, required, unique, allowed values, if-then", icon=":material/rule:"):
+            # --- Expectations: rules the analyst KNOWS must hold (ranges, required,
+            # unique, allowed values, if-then skip logic). The editor's own widget
+            # state can't be restored through session_state, so the latest table is
+            # kept under a separate key and used as the editor's starting data
+            # whenever the editor is recreated (new dataset, or after switching
+            # workspaces) -- never fed back while the editor is live, which would
+            # re-apply its pending edits a second time.
+            st.caption(
+                "Add rules you know must be true: a range (age 0–120), required, unique, allowed values (M, F, U), "
+                "or an if-then rule for skip logic and impossible combinations (if sex = M then pregnant is blank). "
+                "Checked against every row now, and again on the cleaned data. Hover the table and click **+** to add a rule; "
+                "pick its type under Rule, then fill only the fields that type uses."
+            )
+            editor_key = f"dataforensics_expect_editor__{_source_key}"
+            base_key = f"dataforensics_expect_base__{_source_key}"
+            latest_key = f"dataforensics_expect_latest__{_source_key}"
+            if editor_key not in st.session_state:
+                st.session_state[base_key] = st.session_state.get(latest_key, _empty_expectations_frame())
+            edited_expectations = st.data_editor(
+                st.session_state[base_key],
+                key=editor_key,
+                num_rows="dynamic",
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Rule": st.column_config.SelectboxColumn(options=list(EXPECTATION_TYPES), required=True),
+                    "Column": st.column_config.SelectboxColumn(options=columns),
+                    "Min": st.column_config.NumberColumn(),
+                    "Max": st.column_config.NumberColumn(),
+                    "Allowed values": st.column_config.TextColumn(help="Comma-separated, e.g. M, F, U"),
+                    "If column": st.column_config.SelectboxColumn(options=columns),
+                    "If op": st.column_config.SelectboxColumn(options=list(OPERATORS)),
+                    "If value": st.column_config.TextColumn(),
+                    "Then column": st.column_config.SelectboxColumn(options=columns),
+                    "Then op": st.column_config.SelectboxColumn(options=list(OPERATORS)),
+                    "Then value": st.column_config.TextColumn(),
+                },
+            )
+            st.session_state[latest_key] = edited_expectations
+            # The table just edited is the current one; re-read it so this page's
+            # results reflect the edit made on this very run.
+            expectation_specs, expectation_problems = _expectation_specs(edited_expectations, columns)
+            for problem in expectation_problems:
+                st.warning(problem)
+            expectation_results = [evaluate_expectation(rows, spec) for spec in expectation_specs]
+            if expectation_results:
+                _table_with_download(
+                    "Expectation results (original data)",
+                    _expectation_table(expectation_results),
+                    "expectation_results.csv",
+                    key="download_expectations",
+                    status_column="Status",
+                )
+                for result in expectation_results:
+                    if result["evidence"]:
+                        with st.expander(f"Rows violating: {result['rule']}"):
+                            st.markdown(
+                                '<div class="dataforensics-card-evidence">'
+                                + "<br>".join(f"row {i + 1:,}: {_esc(text)}" for i, text in result["evidence"])
+                                + "</div>",
+                                unsafe_allow_html=True,
+                            )
+                            if result["violations"] > len(result["evidence"]):
+                                st.caption(f"...and {result['violations'] - len(result['evidence']):,} more.")
+
+        # A column may have both kinds of mapping (codes apply first); only a
+        # value that is in both, or rewritten from one into the other, conflicts.
+        mapping_conflicts = {
+            col: conflicts
+            for col in set(approved_sentinels) & set(approved_categories)
+            if (conflicts := find_mapping_conflicts(approved_sentinels[col], approved_categories[col]))
+        }
+        # Same idempotency-chain check load_rules() runs on a file-based rules
+        # YAML (e.g. {"99": "Refused", "Refused": "Unknown"} -- a value already
+        # mapped to "Refused" would map again on a second run). This app builds
+        # its rules dict from checkbox/text-input state instead of a file, so
+        # it needs the identical check rather than skipping it just because
+        # there's no YAML to validate -- a hand-typed "Map to" label that
+        # collides with another approved sentinel's raw value in the same
+        # column would otherwise apply a silently non-idempotent mapping with
+        # no warning at all.
+        chained_columns = {
+            col: chained
+            for source in (approved_sentinels, approved_categories)
+            for col, mapping in source.items()
+            if (chained := find_chained_keys(mapping))
+        }
+        if mapping_conflicts:
+            details = "; ".join(f"{col} ({', '.join(repr(v) for v in vals)})" for col, vals in sorted(mapping_conflicts.items()))
+            st.warning(
+                f"The approved missing-value mapping and spelling merge conflict in: {details}. A value can't be "
+                "both a missing-value code and a spelling variant, and one mapping's result can't be rewritten by "
+                "the other. Un-check one of the two, or change the \"Map to\" label, before applying."
+            )
+            st.session_state["dataforensics_applied"] = False
+        elif chained_columns:
+            details = "; ".join(
+                f"{_esc(col)} ({', '.join(repr(v) for v in vals)})" for col, vals in sorted(chained_columns.items())
+            )
+            st.warning(
+                f"Some approved \"Map to\" labels would chain in the same column ({details}) — a "
+                "value mapped to one of these would map again the next time this ran, so the result "
+                "would keep changing instead of stabilizing. DataForensics refuses this combination "
+                "rather than guess which mapping should apply first. Change the \"Map to\" label(s) "
+                "so no mapped-to value matches another mapped-from value in the same column."
+            )
+            st.session_state["dataforensics_applied"] = False
+        else:
+            _approval_buttons(model["recommended_keys"], model["all_keys"], "bottom")
+            st.button(
+                "Apply approved changes",
+                type="primary",
+                icon=":material/check_circle:",
+                on_click=_apply_now,
+            )
+
+        _step_nav("review")
+    if step == "results":
+        _page_banner(
+            _step_eyebrow(5, "Results"),
+            "Your cleaned dataset",
+            "Every check is re-run on the cleaned file so you can see what improved. Every change is listed in the "
+            "audit trail, and everything is ready to download.",
+        )
+        # ------------------------------------------------------------------ #
+        # Step 4: Cleaned dataset + audit report
+        # ------------------------------------------------------------------ #
+        # Gated on session_state (set once, when the button is actually
+        # clicked) rather than the button's transient True-only-on-the-click-
+        # frame return value -- otherwise clicking any of the three download
+        # buttons below triggers a rerun on which the button reads False again,
+        # collapsing this whole section back to just the "Apply approved
+        # changes" button and losing the results the user just clicked to get.
+        approvals_changed = st.session_state.get("dataforensics_applied") and st.session_state.get(
+            "dataforensics_applied_signature"
+        ) != _approval_signature(_source_key, primary_key, rules, approved_fixes, expectation_specs)
+        if approvals_changed:
+            # Approvals were edited after Apply: never show a result the user
+            # didn't apply, or stamp new approvals with the old Apply time.
+            st.markdown(
+                '<div class="dataforensics-card"><span class="dataforensics-badge dataforensics-badge-warning">Not applied</span>'
+                '<div class="dataforensics-card-title">Your approvals changed after you clicked Apply</div>'
+                '<div class="df-ref-text">Go back to <b>Review &amp; fix</b> and click <b>Apply approved changes</b> again '
+                "to build the cleaned file from your current choices.</div></div>",
+                unsafe_allow_html=True,
+            )
+            st.button("Go to Review & fix", type="primary", icon=":material/arrow_back:", on_click=_go_to_step, args=("review",),
+                      key="results_back_to_review_changed")
+        elif not st.session_state.get("dataforensics_applied"):
+            st.markdown(
+                '<div class="dataforensics-card"><div class="dataforensics-card-title">Nothing applied yet</div>'
+                '<div class="df-ref-text">Approve the fixes you want on <b>Review &amp; fix</b>, then click '
+                "<b>Apply approved changes</b>. The cleaned file, before → after comparison and audit trail appear here.</div></div>",
+                unsafe_allow_html=True,
+            )
+            st.button("Go to Review & fix", type="primary", icon=":material/arrow_back:", on_click=_go_to_step, args=("review",))
+        else:
+            try:
+                report = validate(rows, rules)
+            except Exception as exc:
+                st.error(f"Could not validate with the current rules: {exc}")
+                st.stop()
+
+            # Mappings -> safe fixes -> 1:1 safety report -> approved duplicate
+            # removal, in one shared function (cleaning.clean_dataset) so the
+            # app, the benchmark, and the property tests run the same sequence.
+            try:
+                cleaning_result = clean_dataset(
+                    rows, rules, approved_fixes, dup_rows, primary_key or columns[:1],
+                    reason="Approved by user during interactive review",
+                )
+            except ValueError as exc:
+                st.error(f"Refusing to apply these changes: {exc}", icon=":material/block:")
+                st.stop()
+            transformed_rows = cleaning_result["rows"]
+            mutations = cleaning_result["mutations"]
+            safety = cleaning_result["safety"]
+
+            st.markdown(_bucket_header("shield", "Safety checks"), unsafe_allow_html=True)
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Rows", f"{safety['row_count']['before']:,} → {safety['row_count']['after']:,}")
+            sc2.metric("Columns", f"{safety['column_count']['before']} → {safety['column_count']['after']}")
+            sc3.metric(
+                "Unique primary keys",
+                f"{safety['primary_key_uniqueness']['before']:,} → {safety['primary_key_uniqueness']['after']:,}",
+            )
+            checks = [
+                ("Row count preserved", safety["row_count"]["passed"]),
+                ("Column set preserved", safety["column_count"]["passed"]),
+                ("No primary-key values collapsed together", safety["primary_key_uniqueness"]["passed"]),
+            ]
+            # Passed checks as one compact row of chips; a failure stays a
+            # full-width error so it can't be missed.
+            st.markdown(
+                '<div class="df-facts">'
+                + "".join(
+                    f'<span class="df-fact df-check-{"ok" if passed else "bad"}">{_icon("check" if passed else "alert", 15)}{label}</span>'
+                    for label, passed in checks
+                )
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            for label, passed in checks:
+                if not passed:
+                    st.error(f"✗ {label}")
+            if safety["unmodified_columns"]:
+                st.caption(
+                    f"Unmodified columns (byte/value equivalent, verified row-by-row): "
+                    f"{', '.join(safety['unmodified_columns'])}"
+                )
+
+            if not safety["all_passed"]:
+                key_columns = primary_key or columns[:1]
+                touched = sorted({m["column"] for m in mutations if m["column"] in key_columns})
+                st.error(
+                    "A safety check failed, so the cleaned dataset is not offered for download (the CLI refuses "
+                    "to write output in the same case). "
+                    + (
+                        f"An approved change edited the primary-key column(s) {', '.join(touched)}, which made two "
+                        "different records share the same key. Un-approve the fixes/mappings on those columns, or "
+                        "choose a different primary key, then apply again."
+                        if touched
+                        else "Please report this as a bug, with the file if possible."
+                    )
+                )
+                st.stop()
+
+            if cleaning_result["rows_removed"]:
+                st.success(
+                    f"✓ {_n(cleaning_result['rows_removed'], 'exact duplicate row', spec=',')} removed after verification — "
+                    f"{len(rows):,} → {len(transformed_rows):,} rows"
+                )
+
+            # Every mutation records the same timestamp -- the moment the Apply
+            # button was actually clicked (persisted in session_state, not
+            # re-read from the clock on every rerun this section now survives)
+            # -- rather than a per-row clock read that would imply an ordering
+            # precision this batch operation doesn't have.
+            applied_at = st.session_state["dataforensics_applied_at"]
+            for mutation in mutations:
+                mutation["timestamp_utc"] = applied_at
+
+            buffer = io.StringIO()
+            # column_union scans every row, not just row 0 -- a ragged input row
+            # (more fields than the header, usually an unescaped delimiter inside
+            # a free-text value) can add a stray "" key to just THAT row, which
+            # row-0-only fieldnames would miss entirely and crash on later.
+            fieldnames = column_union(transformed_rows) if transformed_rows else columns
+            writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(transformed_rows)
+            if "" in fieldnames:
+                st.warning(
+                    "At least one row had more fields than the header (usually an unescaped "
+                    "comma/delimiter inside a text value) — the overflow content was preserved "
+                    "under a column literally named \"\" rather than being dropped. Open the "
+                    "cleaned CSV and check that column; you may want to fix the source file's "
+                    "quoting and re-run."
+                )
+
+            st.success(f"Done — {_n(len(mutations), 'approved change')} applied and logged.")
+
+            # --- Before -> after: every automated check run again, unchanged,
+            # on the cleaned output -- the evidence that quality improved
+            # (or, honestly, that it didn't). ---
+            cleaned_csv = buffer.getvalue()
+            # Fingerprints tie the cleaned file to the exact input it came from:
+            # anyone can re-hash both files and check them against the report.
+            input_sha256 = hashlib.sha256(st.session_state["dataforensics_data_bytes"]).hexdigest()
+            output_sha256 = hashlib.sha256(cleaned_csv.encode("utf-8")).hexdigest()
+            cleaned_name = f"cleaned_{Path(st.session_state['dataforensics_data_name']).stem}.csv"
+            after = _cached_investigation(cleaned_csv.encode("utf-8"), cleaned_name, None, dataset_type, len(cleaned_csv.encode("utf-8")))
+            after_expectations = [evaluate_expectation(transformed_rows, spec) for spec in expectation_specs]
+            _section("before-after", "Before → After", "The same checks, re-run on the cleaned file.")
+            ba1, ba2, ba3, ba4 = st.columns(4)
+            ba1.metric("Quality score", f"{after['quality']['overall']}/100", f"{after['quality']['overall'] - quality['overall']:+d}")
+            after_flagged = sum(1 for c in after["check_catalog"] if c["Status"] == "Flagged")
+            ba2.metric("Checks flagged", after_flagged, f"{after_flagged - checks_flagged:+d}", delta_color="inverse")
+            ba3.metric("Rows", f"{len(transformed_rows):,}", f"{len(transformed_rows) - len(rows):+,}", delta_color="off")
+            after_violations = sum(r["violations"] for r in after_expectations)
+            before_violations = sum(r["violations"] for r in expectation_results)
+            ba4.metric(
+                "Expectation violations",
+                after_violations if expectation_specs else "—",
+                f"{after_violations - before_violations:+,}" if expectation_specs else None,
+                delta_color="inverse",
+            )
+            with st.container(border=True):
+                st.markdown(
+                    '<div class="df-chart-title">Quality before and after cleaning</div>'
+                    '<div class="df-chart-sub">The same rule-based checks, run on the original and on the cleaned file.</div>',
+                    unsafe_allow_html=True,
+                )
+                st.altair_chart(_before_after_chart(quality, after["quality"]), width="stretch")
+            fix_chart = _changes_by_fix(mutations)
+            if fix_chart is not None:
+                with st.container(border=True):
+                    st.markdown(
+                        '<div class="df-chart-title">What was changed</div>'
+                        '<div class="df-chart-sub">Cells changed by each kind of approved fix (rows, for duplicate '
+                        "removal). Every one is listed in the audit trail below.</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.altair_chart(fix_chart, width="stretch")
+            _table_with_download(
+                "Score and check changes",
+                build_before_after(quality, after["quality"], check_catalog, after["check_catalog"]),
+                "before_after.csv",
+                key="download_before_after",
+            )
+            st.caption(
+                "Null counts can rise after cleaning: a missing-value code (like 9999) turned into an empty cell was "
+                "always missing — it's now counted honestly, which lowers Completeness while raising Validity. "
+                "Checks that only describe the data (outliers, heaping, missingness patterns) don't change, because "
+                "DataForensics never deletes or imputes values to make them go away."
+            )
+            _table_with_download(
+                f"Audit Trail ({len(mutations):,} change{'s' if len(mutations) != 1 else ''})",
+                build_audit_trail(mutations),
+                "audit_trail.csv",
+                key="download_audit_trail",
+                height=min(38 + 35 * len(mutations), 420),
+            )
+            st.caption("Every applied edit, one row per changed cell — the original value, the new value, the rule that produced it, and when it was approved.")
+
+            # DataForensics Audit Report: one canonical findings list (shared
+            # by Investigation Findings, Recommended Actions, Remaining
+            # Review, and Analysis Readiness, so they can't drift out of
+            # sync with each other), fed into the full 10-section report.
+            audit_findings = build_investigation_findings(
+                rows=rows,
+                dup_rows=dup_rows,
+                sentinels=sentinels,
+                approved_sentinels=approved_sentinels,
+                ambiguous_dates=ambiguous_dates,
+                category_clusters=category_clusters,
+                distribution_columns=distribution_columns,
+                dictionary=dictionary,
+                missingness_columns=missingness_columns,
+                clinical_range_findings=clinical_range_findings,
+                conflicting_id_findings=conflicting_id_findings,
+                invalid_fips_findings=invalid_fips_findings,
+                invalid_zip_findings=invalid_zip_findings,
+                survey_weight_columns=survey_weight_columns,
+                duplicate_entities=duplicate_entities,
+                fuzzy_duplicate_entities=fuzzy_duplicate_entities,
+                fuzzy_exact_columns=fuzzy_exact_columns,
+                fuzzy_name_column=fuzzy_name_column,
+                birth_date_findings=birth_date_findings,
+                quasi_identifier_columns=quasi_identifier_columns,
+                id_like_defaults=id_like_defaults,
+                column_types=column_types,
+                mutations=mutations,
+                missingness_concentration=missingness_concentration,
+                missingness_co_occurrence=missingness_co_occurrence,
+                shape_outlier_findings=shape_outlier_findings,
+                whitespace_anomaly_counts=whitespace_anomaly_counts,
+                invisible_char_counts=invisible_char_counts,
+                encoding_corruption_counts=encoding_corruption_counts,
+                numeric_representation_findings=numeric_representation_findings,
+                age_year_findings=age_year_findings,
+                unit_inconsistency_findings=unit_inconsistency_findings,
+                future_date_findings=future_date_findings,
+                temporal_gap_findings=temporal_gap_findings,
+                column_order_findings=column_order_findings,
+                conditional_column_findings=conditional_column_findings,
+                pii_content_findings=pii_content_findings,
+            )
+            audit_report_html = build_audit_report_html(
+                file_name=st.session_state["dataforensics_data_name"],
+                file_size_bytes=data_size,
+                rows=rows,
+                transformed_rows=transformed_rows,
+                columns=columns,
+                column_types=column_types,
+                dictionary=dictionary,
+                findings=audit_findings,
+                mutations=mutations,
+                safety=safety,
+                validation_report=report,
+                applied_at=applied_at,
+                dataset_type=" + ".join(investigation["detected_profiles"]),
+                input_sha256=input_sha256,
+                output_sha256=output_sha256,
+                rows_removed=len(rows) - len(transformed_rows),
+                checks_performed=[f"{c['Check ID']} {c['Check']}" for c in check_catalog if c["Status"] != "Not applicable"]
+                + [f"Expectation: {spec_result['rule']}" for spec_result in expectation_results],
+            )
+
+            st.markdown(
+                '<div class="df-hashes">'
+                f"<div><span>Input SHA-256</span><code>{input_sha256}</code></div>"
+                f"<div><span>Cleaned output SHA-256</span><code>{output_sha256}</code></div></div>",
+                unsafe_allow_html=True,
+            )
+            export_rules = {
+                **rules,
+                "safe_fixes": approved_fixes,
+                "expectations": expectation_specs,
+            }
+            rules_yaml = (
+                "# DataForensics cleaning rules -- re-run on a new release of this dataset with:\n"
+                "#   dataforensics harmonize NEW_FILE.csv --rules cleaning_rules.yaml --output cleaned.csv --execute\n"
+                + yaml.safe_dump(export_rules, sort_keys=False, allow_unicode=True)
+            )
+
+            dl1, dl2 = st.columns(2)
+            dl3, dl4 = st.columns(2)
+            dl1.download_button(
+                "Cleaned CSV (analysis-ready)", icon=":material/download:", data=buffer.getvalue(),
+                file_name=f"cleaned_{st.session_state['dataforensics_data_name']}", mime="text/csv", width="stretch",
+            )
+            dl2.download_button(
+                "data_dictionary.html", icon=":material/download:", data=render_html("Data Dictionary", dictionary),
+                file_name="data_dictionary.html", mime="text/html", width="stretch",
+            )
+            dl3.download_button(
+                "audit_report.html", icon=":material/download:", data=audit_report_html,
+                file_name="audit_report.html", mime="text/html", width="stretch",
+            )
+            dl4.download_button(
+                "cleaning_rules.yaml", icon=":material/download:", data=rules_yaml,
+                file_name="cleaning_rules.yaml", mime="application/x-yaml", width="stretch",
+            )
+        _step_nav("results")
+
+if workspace == "reference":
+    reference = build_check_reference()
+    fixable = sum(1 for r in reference if r["What happens"].startswith("Fix"))
+    categories = sorted({r["Category"] for r in reference})
+    st.markdown(
+        '<span id="reference" class="df-anchor"></span>'
+        '<div class="df-page-banner">'
+        '<div class="df-hero-eyebrow">Checks reference</div>'
+        f'<h1 class="df-banner-title">Every check DataForensics runs — and why it matters</h1>'
+        '<p class="df-hero-sub">Each check looks for one specific kind of problem. Flagged items come with '
+        "evidence; fixes are only ever applied with your approval.</p>"
+        '<div class="df-hero-stats">'
+        f'<div class="df-hero-stat"><b>{len(reference)}</b><span>automated checks</span></div>'
+        f'<div class="df-hero-stat"><b>{fixable}</b><span>fixable on approval</span></div>'
+        f'<div class="df-hero-stat"><b>{len(reference) - fixable}</b><span>flag-only, with evidence</span></div>'
+        f'<div class="df-hero-stat"><b>{len(categories)}</b><span>categories</span></div>'
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+    f1, f2 = st.columns([2, 1])
+    query = f1.text_input("Search checks", placeholder="Search — e.g. dates, duplicates, ZIP, units", key="dataforensics_reference_search")
+    handling = f2.segmented_control(
+        "Show", ["All", "Fixable", "Flag only"], default="All", key="dataforensics_reference_handling"
+    )
+    category_filter = st.pills(
+        "Category", categories, selection_mode="multi", key="dataforensics_reference_filter"
+    )
+    shown_reference = [
+        r for r in reference
+        if (not category_filter or r["Category"] in category_filter)
+        and (handling in (None, "All") or (handling == "Fixable") == r["What happens"].startswith("Fix"))
+        and (not query or query.casefold() in " ".join(str(v) for v in r.values()).casefold())
+    ]
+    if not shown_reference:
+        st.info("No checks match those filters.")
+    for category in [c for c in categories if any(r["Category"] == c for r in shown_reference)]:
+        items = [r for r in shown_reference if r["Category"] == category]
+        st.markdown(
+            f'<div class="df-ref-category">{_esc(category)}<span>{len(items)}</span></div>'
+            '<div class="df-ref-grid">'
+            + "".join(
+                '<div class="df-ref-card">'
+                f'<div class="df-ref-top"><span class="df-ref-id">{_esc(r["Check ID"])}</span>'
+                f'<span class="df-ref-badge {"fix" if r["What happens"].startswith("Fix") else "flag"}">'
+                f'{"Fixable" if r["What happens"].startswith("Fix") else "Flag only"}</span></div>'
+                f'<div class="df-ref-name">{_esc(r["Check"])}</div>'
+                f'<div class="df-ref-label">Looks for</div><div class="df-ref-text">{_esc(r["What it looks for"])}</div>'
+                f'<div class="df-ref-label">Why it matters</div><div class="df-ref-text why">{_esc(r["Why it matters"])}</div>'
+                f'<div class="df-ref-handling">{_esc(r["What happens"])}</div>'
+                "</div>"
+                for r in items
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+    with st.expander("All checks as a table", icon=":material/table_view:"):
+        _table_with_download(
+            "All checks",
+            reference,
+            "dataforensics_checks.csv",
+            key="download_reference",
+            height=min(38 + 35 * len(reference), 900),
+        )
+    st.markdown(
+        '<div class="df-ref-category">Beyond the automated checks</div>'
+        '<div class="df-ref-grid">'
+        + "".join(
+            f'<div class="df-ref-card"><div class="df-ref-name">{t}</div><div class="df-ref-text">{d}</div></div>'
+            for t, d in (
+                ("Your own expectations", "Ranges, required, unique, allowed values, and if-then rules for skip logic and impossible combinations (Review &amp; Approve)."),
+                ("Multi-file checks", "Shared keys, referential integrity, key uniqueness, relationship shape, and value disagreements between files."),
+                ("Insights", "Plain-language patterns: relationships, group differences, higher-likelihood segments, concentration, trends."),
+                ("Before → after proof", "Every check re-runs on the cleaned file, with the score and check changes side by side."),
+            )
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="df-ref-category">Not checked</div>'
+        '<div class="df-ref-text" style="max-width:820px">Spelling and grammar in long text; names written without a '
+        "title; whether a plausible value is actually true in the real world; combinations of three or more columns; "
+        "units beyond weight, height, distance, money and temperature; time-zone conversion (flagged, never "
+        "converted).</div>",
+        unsafe_allow_html=True,
+    )
+
+if workspace == "insights":
+    insight_args = st.session_state.get("dataforensics_insight_args")
+    st.markdown('<span id="insights-tab" class="df-anchor"></span>', unsafe_allow_html=True)
+    if not insight_args:
+        st.markdown(
+            '<div class="df-page-banner"><div class="df-hero-eyebrow">Insights</div>'
+            '<h1 class="df-banner-title">Patterns worth knowing, found automatically</h1>'
+            '<p class="df-hero-sub">Load a dataset in <b>Analyze &amp; Clean</b> (or pick a sample there) and this '
+            "page will surface its most useful, least obvious patterns.</p></div>",
+            unsafe_allow_html=True,
+        )
+        st.stop()
+    result = _cached_investigation(*insight_args)
+    adjustable = _adjustable_columns(result)
+    if (
+        "dataforensics_adjust_for" not in st.session_state
+        or st.session_state.get("dataforensics_adjust_for_source") != insight_args[1:]
+    ):
+        st.session_state["dataforensics_adjust_for"] = list(result["default_adjust_for"])
+        st.session_state["dataforensics_adjust_for_source"] = insight_args[1:]
+    else:
+        st.session_state["dataforensics_adjust_for"] = [
+            c for c in st.session_state["dataforensics_adjust_for"] if c in adjustable
+        ]
+    all_cards = _insight_cards(insight_args, result)
+    held_back = [c for c in all_cards if c.get("hidden")]
+    cards = [c for c in all_cards if not c.get("hidden")]
+    kinds = list(dict.fromkeys(c["kind"] for c in cards))
+    st.markdown(
+        '<div class="df-page-banner"><div class="df-hero-eyebrow">Insights</div>'
+        f'<h1 class="df-banner-title">What {_esc(st.session_state.get("dataforensics_insight_name", "this dataset"))} is telling you</h1>'
+        '<p class="df-hero-sub">The strongest, least obvious patterns in the data, ranked and written in plain '
+        "language. Descriptive and unweighted: leads to investigate, not proof of cause.</p>"
+        '<div class="df-hero-stats">'
+        f'<div class="df-hero-stat"><b>{len(cards)}</b><span>key insights</span></div>'
+        f'<div class="df-hero-stat"><b>{min(len(result["rows"]), 20_000):,}</b><span>rows analyzed'
+        f'{" (evenly sampled)" if len(result["rows"]) > 20_000 else ""}</span></div>'
+        f'<div class="df-hero-stat"><b>{len(result["associations"])}</b><span>column relationships</span></div>'
+        f'<div class="df-hero-stat"><b>{len(result["group_missingness"])}</b><span>missing-data patterns</span></div>'
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+    with st.container(border=True):
+        opt_left, opt_right = st.columns(2, gap="large")
+        with opt_left:
+            st.multiselect(
+                "Re-test every pattern within groups of",
+                adjustable,
+                key="dataforensics_adjust_for",
+                placeholder="No adjustment",
+                help="A pattern that mostly disappears when people are compared only with others in the same "
+                "group (e.g. the same age band) is held back as explained by that column. Age and sex are chosen "
+                "by default because nothing in the data can cause them. Be careful adding a column that sits "
+                "between cause and effect (education → income → health): adjusting for income would hide a "
+                "real education effect.",
+            )
+        with opt_right:
+            codebook = st.session_state.get("dataforensics_codebook")
+            if codebook:
+                st.markdown(
+                    f'<div class="df-ref-text">{_icon("check", 14)} Codebook <b>{_esc(codebook["name"])}</b> — '
+                    f'labels for {codebook["columns"]} column{"s" if codebook["columns"] != 1 else ""}, so codes '
+                    "read as e.g. <b>3 (Widowed)</b>.</div>",
+                    unsafe_allow_html=True,
+                )
+                st.button("Remove codebook", key="dataforensics_codebook_remove", on_click=_remove_codebook)
+            upload = st.file_uploader(
+                "Replace codebook" if codebook else "Add a codebook to label coded values",
+                type=["csv"],
+                key="dataforensics_codebook_upload",
+                help="A CSV with three columns — column, value, label — one row per code, e.g. "
+                "marital_status,3,Widowed. Labels only change how values are shown; the data isn't touched.",
+            )
+            # Process each upload once: the uploader keeps its file across
+            # reruns, which would otherwise undo "Remove codebook".
+            if upload is not None and st.session_state.get("dataforensics_codebook_seen") != upload.file_id:
+                st.session_state["dataforensics_codebook_seen"] = upload.file_id
+                problem = _store_codebook(upload.name, upload.getvalue())
+                if problem:
+                    st.session_state["dataforensics_codebook_problem"] = problem
+                else:
+                    st.session_state.pop("dataforensics_codebook_problem", None)
+                st.rerun()
+            if problem := st.session_state.get("dataforensics_codebook_problem"):
+                st.error(f"Couldn't use that codebook: {problem}", icon=":material/error:")
+    if not cards and held_back:
+        st.markdown(
+            '<div class="dataforensics-card"><div class="dataforensics-card-title">Nothing left after a second look</div>'
+            '<div class="df-ref-text">Every strong pattern in this file turned out to be obvious or misleading — '
+            "true by definition, or mostly explained by another column such as age. They're listed below with the "
+            "reason.</div></div>",
+            unsafe_allow_html=True,
+        )
+    elif not cards:
+        st.markdown(
+            '<div class="dataforensics-card"><div class="dataforensics-card-title">No strong patterns to report</div>'
+            '<div class="df-ref-text">Insights need enough rows per group to be trustworthy (30+ for group '
+            "comparisons). This file is small or very uniform — the full statistics below still describe it.</div></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        chosen = st.pills("Filter", kinds, selection_mode="multi", key="dataforensics_insight_filter")
+        visible = [c for c in cards if not chosen or c["kind"] in chosen]
+        for start_index in range(0, len(visible), 2):
+            pair_cols = st.columns(2)
+            for col_slot, card in zip(pair_cols, visible[start_index:start_index + 2]):
+                with col_slot.container(border=True):
+                    st.markdown(
+                        f'<div class="df-insight-head"><span class="df-insight-kind k-{_esc(card["kind"].split()[0].lower())}">'
+                        f'{_esc(card["kind"])}</span><span class="df-insight-score">strength {card["score"]:.0%}</span></div>'
+                        f'<div class="df-insight-title">{_esc(card["title"])}</div>'
+                        f'<div class="df-insight-detail">{_esc(card["detail"])}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if card["chart"]:
+                        st.altair_chart(_insight_chart(card["chart"]), width="stretch")
+                    st.markdown(
+                        f'<div class="df-insight-why">{_icon("sparkle", 14)}<span>{_esc(card["why"])}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+    if held_back:
+        with st.expander(
+            f"{len(held_back)} pattern{'s' if len(held_back) != 1 else ''} held back as obvious or misleading — and why",
+            icon=":material/visibility_off:",
+        ):
+            st.caption(
+                "These were strong enough to report but failed a second look: true by definition (two columns "
+                "measuring the same thing, and the data agrees — one is part of, calculated from, or determined "
+                "by the other), or mostly explained by another column (the ones picked above, or a survey skip) "
+                "once like is compared with like."
+            )
+            st.dataframe(
+                pd.DataFrame([{"Pattern": c["title"], "Why it was held back": c["hidden"]} for c in held_back]),
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Pattern": st.column_config.TextColumn(width="medium"),
+                    "Why it was held back": st.column_config.TextColumn(width="large"),
+                },
+            )
     st.caption(
-        "Upload 2+ files from the same study (e.g. participants.csv, visits.csv, labs.csv). "
-        "DataForensics suggests which columns look like shared keys — by name AND by real value overlap, "
-        "not name alone — checks referential integrity, key uniqueness, and relationship shape (one-to-one "
-        "vs. one-to-many) across a pair you pick, then either reconciles shared-column values record-by-record "
-        "(one-to-one) or checks that shared columns stay consistent across repeated keys (one-to-many). "
-        "Nothing here is ever joined or merged automatically — the optional Merge section at the bottom only "
-        "produces a combined file if you explicitly review and approve it."
+        "Many pairs of columns are compared, so a few patterns can appear by chance — treat them as leads. "
+        "Survey weights, if any, are not applied."
+    )
+    _section("insights-tables", "All the numbers", "The full statistics behind the cards.")
+    _table_with_download(
+        "Associations & group differences",
+        result["associations"],
+        "associations.csv",
+        key="download_insight_associations",
+        column_config={"Insight": st.column_config.TextColumn(width="large")},
+    )
+    _table_with_download(
+        "Numeric distributions",
+        result["numeric_summary"],
+        "numeric_distributions.csv",
+        key="download_insight_distributions",
+    )
+
+if workspace == "multi":
+    _section("multi-file", "Multi-File Relationships")
+    st.caption(
+        "Upload 2+ files from the same study (e.g. participants.csv and visits.csv) to find the columns that link "
+        "them, check every record links up, and compare the columns they share. Nothing is merged unless you "
+        "approve it in the Merge section at the bottom."
     )
     multi_files = st.file_uploader(
         "Upload 2 or more CSV/TSV/JSON/Excel files",
@@ -2442,7 +4094,7 @@ with tab_multifile:
                 c2.metric("Not found in " + cand["file_a"], integrity["orphan_count"])
                 if integrity["orphan_count"]:
                     st.warning(
-                        f"⚠ {integrity['orphan_count']} record(s) in {cand['file_b']} reference a "
+                        f"{_n(integrity['orphan_count'], 'record')} in {cand['file_b']} reference a "
                         f"{cand['column_b']} value absent from {cand['file_a']}. This may be expected "
                         "by the study design, or may indicate a data issue — DataForensics doesn't assume either."
                     )
@@ -2469,10 +4121,10 @@ with tab_multifile:
                 if key_uniqueness["duplicate_value_count"]:
                     pii = is_pii_like_column(cand["column_a"])
                     if pii:
-                        st.warning(f"⚠ {key_uniqueness['duplicate_value_count']} {cand['column_a']} value(s) in {cand['file_a']} appear more than once.")
+                        st.warning(f"{_n(key_uniqueness['duplicate_value_count'], cand['column_a'] + ' value')} in {cand['file_a']} appear more than once.")
                     else:
                         examples = ", ".join(f"{v} (×{c})" for v, c in key_uniqueness["duplicate_examples"][:5])
-                        st.warning(f"⚠ {key_uniqueness['duplicate_value_count']} {cand['column_a']} value(s) in {cand['file_a']} appear more than once, e.g. {examples}.")
+                        st.warning(f"{_n(key_uniqueness['duplicate_value_count'], cand['column_a'] + ' value')} in {cand['file_a']} appear more than once, e.g. {examples}.")
                 else:
                     st.success(f"Every {cand['column_a']} value in {cand['file_a']} is unique.")
 
@@ -2497,13 +4149,13 @@ with tab_multifile:
                 c5.metric(f"{cand['file_a']} rows with 1+ match", f"{coverage['coverage_fraction']:.1%}")
                 if cardinality["relationship"] == "one_to_many":
                     st.caption(
-                        f"{cardinality['parents_with_multiple_children']} {cand['column_a']} value(s) have "
+                        f"{_n(cardinality['parents_with_multiple_children'], cand['column_a'] + ' value')} have "
                         f"2+ matching rows in {cand['file_b']} (up to {cardinality['max_children_per_parent']}) — "
                         f"consistent with a {cand['file_a']} → {cand['file_b']} one-to-many relationship "
                         "(e.g. one participant, several visits)."
                     )
                 st.caption(
-                    f"{coverage['covered_count']} of {coverage['parent_count']} {cand['column_a']} value(s) in "
+                    f"{coverage['covered_count']} of {_n(coverage['parent_count'], cand['column_a'] + ' value')} in "
                     f"{cand['file_a']} ({coverage['coverage_fraction']:.1%}) have at least one matching record "
                     f"in {cand['file_b']}. The remainder may be expected (e.g. a participant not yet visited) "
                     "or may indicate incomplete data — DataForensics doesn't assume either."
@@ -2555,7 +4207,7 @@ with tab_multifile:
                                     if v["discrepancy"] > len(v["examples"]):
                                         st.caption(f"...and {v['discrepancy'] - len(v['examples'])} more not shown.")
                         else:
-                            st.success(f"Every shared column agrees for all {reconciliation['records_compared']:,} record(s) present in both files.")
+                            st.success(f"Every shared column agrees for all {_n(reconciliation['records_compared'], 'record', spec=',')} present in both files.")
 
                 elif cardinality["relationship"] == "one_to_many":
                     st.subheader("Repeated-key consistency")
@@ -2579,9 +4231,9 @@ with tab_multifile:
                             st.write("**Columns that disagree with themselves under the same key:**")
                             for col, items in repeated_key_findings.items():
                                 pii = is_pii_like_column(col)
-                                with st.expander(f"{col}: {len(items)} {cand['column_b']} value(s) with disagreeing rows"):
+                                with st.expander(f"{col}: {_n(len(items), cand['column_b'] + ' value')} with disagreeing rows"):
                                     inconsistency_lines = [
-                                        f"{cand['column_b']} {item['key']} ({item['row_count']} row(s)) → "
+                                        f"{cand['column_b']} {item['key']} ({_n(item['row_count'], 'row')}) → "
                                         f"{_PII_EVIDENCE_MASK if pii else ', '.join(item['values'])}"
                                         for item in items[:10]
                                     ]
@@ -2647,15 +4299,16 @@ with tab_multifile:
                         merge_writer.writerows(merge_preview["rows"])
                         merged_file_name = f"merged_{cand['file_a']}"
                         st.download_button(
-                            f"⬇ Download {merged_file_name}",
+                            f"Download {merged_file_name}",
+                            icon=":material/download:",
                             data=merge_buffer.getvalue(),
                             file_name=merged_file_name,
                             mime="text/csv",
                             width="stretch",
                         )
                         st.success(
-                            f"Merge approved — {merge_preview['total_count']:,} row(s), "
-                            f"{len(merge_preview['columns'])} column(s)."
+                            f"Merge approved — {_n(merge_preview['total_count'], 'row', spec=',')}, "
+                            f"{_n(len(merge_preview['columns']), 'column')}."
                         )
     elif multi_files:
         st.info("Upload at least 2 files to discover relationships between them.")

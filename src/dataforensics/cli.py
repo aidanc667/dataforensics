@@ -2,14 +2,17 @@ import csv
 import io
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import click
 import yaml
 
 from dataforensics import __version__
+from dataforensics.cleaning import apply_safe_fixes, drop_duplicate_rows
 from dataforensics.config_schema import RulesConfigError, load_rules
 from dataforensics.dictionary import build_data_dictionary, read_rows
+from dataforensics.expectations import evaluate_expectations, validate_expectation
 from dataforensics.harmonize import (
     HarmonizeSafetyError,
     apply_crosswalk,
@@ -30,6 +33,7 @@ from dataforensics.ingest import (
     split_delimited_line,
     strip_footer,
 )
+from dataforensics.investigate import detect_duplicate_rows
 from dataforensics.manifest import atomic_write, build_manifest
 from dataforensics.report import render_markdown
 from dataforensics.validation import validate
@@ -308,6 +312,18 @@ def harmonize(files, rules_path, output, rules_map, crosswalk_path, output_dir, 
     sys.exit(2)
 
 
+def _safe_fix_and_expectation_columns(rules: dict) -> set[str]:
+    columns: set[str] = set()
+    for setting in rules["safe_fixes"].values():
+        # A list of columns, or a {column: setting} mapping; the boolean
+        # drop_exact_duplicate_rows names no column.
+        if isinstance(setting, (list, dict)):
+            columns.update(setting)
+    for spec in rules["expectations"]:
+        columns.update(spec[k] for k in ("column", "if_column", "then_column") if isinstance(spec.get(k), str))
+    return columns
+
+
 def _harmonize_single_file(file, rules_path, output, execute, sheet):
     file_path = Path(file)
 
@@ -332,6 +348,10 @@ def _harmonize_single_file(file, rules_path, output, execute, sheet):
         click.echo(f"Malformed input file {file_path}: {exc}", err=True)
         sys.exit(3)
     plan = plan_transformations(rows, rules)
+    safe_fixes = {k: v for k, v in rules["safe_fixes"].items() if k != "drop_exact_duplicate_rows"}
+    # Duplicates are found on the raw rows -- the same rows the app showed
+    # the analyst when they approved removal.
+    duplicates = detect_duplicate_rows(rows) if rules["safe_fixes"].get("drop_exact_duplicate_rows") else []
 
     # Anchor both the column check and the row-count check to a header/count
     # re-derived independently from disk, not to rows[0].keys()/len(rows) --
@@ -355,15 +375,39 @@ def _harmonize_single_file(file, rules_path, output, execute, sheet):
     anchor_header, anchor_row_count, anchor_stripped_count = _read_header_and_row_count(file_path, sheet=sheet)
     _warn_if_footer_stripped(file_path, anchor_stripped_count, anchor_row_count)
 
+    # A rules file written for one release can name columns a later release
+    # dropped or renamed. Fail loudly (dry run included) rather than
+    # silently skipping those fixes and expectations.
+    absent = sorted(_safe_fix_and_expectation_columns(rules) - set(anchor_header))
+    if absent:
+        click.echo(f"Rules file refers to column(s) not in {file_path.name}: {', '.join(absent)}", err=True)
+        sys.exit(2)
+    for n, spec in enumerate(rules["expectations"], start=1):
+        try:
+            validate_expectation(spec, anchor_header)
+        except ValueError as exc:
+            click.echo(f"Invalid expectation #{n} in rules file: {exc}", err=True)
+            sys.exit(2)
+
     if not execute:
         click.echo(f"DRY RUN — no files written. Proposed transformations for {file_path.name}:")
         for item in plan:
             click.echo(f"  {item['rule']} -> {item['column']}: {item['rows_affected']} rows affected")
-        if not plan:
+        preview_rows, _ = apply_transformations(rows, rules)
+        _, fix_preview = apply_safe_fixes(preview_rows, safe_fixes, rules["primary_key"], reason="dry run")
+        for rule, n in Counter(m["transformation_rule"] for m in fix_preview).items():
+            click.echo(f"  {rule}: {n} cells affected")
+        if duplicates:
+            click.echo(f"  drop_exact_duplicate_row: {len(duplicates)} rows would be removed")
+        if not plan and not fix_preview and not duplicates:
             click.echo("  (no transformations would be applied)")
         sys.exit(0)
 
     transformed_rows, mutations = apply_transformations(rows, rules)
+    transformed_rows, fix_mutations = apply_safe_fixes(
+        transformed_rows, safe_fixes, rules["primary_key"], reason="Specified in the rules file"
+    )
+    mutations += fix_mutations
 
     try:
         assert_row_and_column_integrity(
@@ -377,6 +421,30 @@ def _harmonize_single_file(file, rules_path, output, execute, sheet):
     except HarmonizeSafetyError as exc:
         click.echo(f"Refusing to write output: {exc}", err=True)
         sys.exit(3)
+
+    # Duplicate removal is the one approved change that alters the row
+    # count, so it runs only after the 1:1 integrity check above has
+    # passed, and drop_duplicate_rows re-verifies each removed row.
+    if duplicates:
+        try:
+            transformed_rows, dedup_mutations = drop_duplicate_rows(
+                transformed_rows, duplicates, rules["primary_key"], reason="Specified in the rules file"
+            )
+        except ValueError as exc:
+            click.echo(f"Refusing to write output: {exc}", err=True)
+            sys.exit(3)
+        mutations += dedup_mutations
+
+    expectation_results = []
+    if rules["expectations"]:
+        try:
+            expectation_results = evaluate_expectations(transformed_rows, rules["expectations"], anchor_header)
+        except ValueError as exc:
+            click.echo(f"Invalid expectations in rules file: {exc}", err=True)
+            sys.exit(2)
+        for result in expectation_results:
+            if result["violations"]:
+                click.echo(f"WARNING: expectation '{result['rule']}' violated on {result['violations']} row(s)", err=True)
 
     # column_union scans every row, not just row 0 -- a ragged input row
     # (more fields than the header) can add a stray "" key to just THAT
@@ -394,6 +462,8 @@ def _harmonize_single_file(file, rules_path, output, execute, sheet):
     manifest = build_manifest([file_path], [Path(rules_path)])
     manifest["mutations"] = mutations
     manifest["stripped_footer_lines"] = anchor_stripped_count
+    if expectation_results:
+        manifest["expectations"] = [{k: v for k, v in r.items() if k != "evidence"} for r in expectation_results]
     manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
     atomic_write(manifest_path, json.dumps(manifest, indent=2))
 
@@ -493,6 +563,15 @@ def _harmonize_crosswalk(files, rules_map_str, crosswalk_path, output_dir, execu
             loaded_rules[source_key] = load_rules(Path(rules_map[source_key]))
         except RulesConfigError as exc:
             click.echo(f"Invalid rules file for {source_key}: {exc}", err=True)
+            sys.exit(2)
+        # Crosswalk mode applies only missing-value and category mappings;
+        # refuse rather than silently skip approved fixes/expectations.
+        if loaded_rules[source_key]["safe_fixes"] or loaded_rules[source_key]["expectations"]:
+            click.echo(
+                f"Rules file for {source_key} has safe_fixes/expectations, which crosswalk mode doesn't "
+                "support yet -- harmonize that file on its own first, then crosswalk the result",
+                err=True,
+            )
             sys.exit(2)
         schema_paths.append(Path(rules_map[source_key]))
 
@@ -655,4 +734,27 @@ def report(artifact, out):
         Path(out).write_text(markdown)
     else:
         click.echo(markdown)
+    sys.exit(0)
+
+
+@main.command()
+@click.option("--rows", "n_rows", default=1000, show_default=True, type=click.IntRange(min=200), help="Rows per synthetic file.")
+@click.option("--seeds", default=10, show_default=True, type=click.IntRange(min=1, max=100), help="Number of random seeds to run.")
+def benchmark(n_rows, seeds):
+    """Plant known errors in synthetic data and measure what the checks catch."""
+    from dataforensics.benchmark import run_benchmark_seeds
+
+    result = run_benchmark_seeds(n_rows, range(seeds))
+    click.echo(f"DataForensics error-injection benchmark: {seeds} seed(s) x {n_rows} rows\n")
+    click.echo("| Check | Planted | Caught | Recall | Flags on clean items | Left after fixes |")
+    click.echo("|---|---:|---:|---:|---:|---:|")
+    for c in result["checks"]:
+        click.echo(
+            f"| {c['Check']} | {c['Planted']} | {c['Caught']} | {c['Recall']:.0%} | "
+            f"{c['Flags on clean items']} | {c['Left after fixes']} |"
+        )
+    q = result["quality"]
+    click.echo(f"\nMean quality score: clean {q['clean']} / with errors {q['dirty']} / after approved fixes {q['cleaned']}")
+    alarms = ", ".join(result["clean_false_alarms"]) or "none"
+    click.echo(f"Checks flagged on the clean file: {alarms} (in {result['clean_false_alarm_runs']} of {seeds} runs)")
     sys.exit(0)

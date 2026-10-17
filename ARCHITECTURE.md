@@ -88,6 +88,29 @@ src/dataforensics/
 │                       # ordering, dataset-fingerprint drift, and
 │                       # cross-file value reconciliation — suggestions
 │                       # only, never mutates data
+├── pipeline.py          # run_investigation(): every check in one pure
+│                       # function -- what app.py caches, re-runs on the
+│                       # cleaned output (before/after), and benchmarks
+├── advanced_checks.py   # spreadsheet damage, synonym codes, negatives,
+│                       # longitudinal contradictions, ZIP/state and
+│                       # coordinates, °F/°C, date-times, text PII,
+│                       # rare combinations, placeholder/truncated text
+├── patterns.py          # heaping, missing rate by group, redundant
+│                       # columns, rare categories, age vs. DOB, totals
+├── insights.py          # descriptive data insights: distributions,
+│                       # associations (Spearman / eta² / Cramér's V),
+│                       # group differences, trends over time
+├── cleaning.py          # approval-gated safe fixes (whitespace, hidden
+│                       # characters, mojibake, formatted numbers, leading
+│                       # zeros, ISO dates, separable unit mixes) and
+│                       # verified exact-duplicate removal
+├── expectations.py      # analyst-declared rules: range, required, unique,
+│                       # allowed values, if-then (skip logic)
+├── summary.py           # check catalog (DF-01..DF-51) + plain-language
+│                       # CHECK_DETAILS for the Checks page,
+│                       # dashboard tables,
+│                       # before/after comparison, audit-trail rows
+├── benchmark.py         # error-injection benchmark (planted ground truth)
 ├── validation.py        # three-tier (Error/Warning/Suggestion) rule engine
 ├── harmonize.py          # rules-driven transform + crosswalk mapping +
 │                          # approval-gated cross-file row-merge
@@ -102,16 +125,20 @@ src/dataforensics/
 └── viewer.py                     # report-type classification for app.py
 ```
 
-`app.py` is mostly a read-only Streamlit viewer over the same engine the
-CLI uses. Two real asymmetries: `investigate.py` has grown a much larger
+`app.py` is a Streamlit dashboard over the same engine the CLI uses. All
+detection runs through `pipeline.run_investigation`, cached on the file's
+bytes (`st.cache_data`), so clicking an approval checkbox doesn't re-run
+every check; after Apply, the identical function runs on the cleaned CSV
+for the before/after comparison. Two real asymmetries: `investigate.py` has grown a much larger
 battery of heuristic checks than the CLI's `scan` command surfaces —
 they're currently wired into the Streamlit app only, not the CLI's
 output — and the Multi-File Relationships tab's merge step is a genuine
 write path the CLI has no equivalent of at all (`harmonize.merge_files_on_key`,
 called only from that one UI section, gated behind an explicit approval
 checkbox after a full preview). Every other write path in the app —
-sentinel mapping, category merges, date-format declarations — mirrors a
-rule the CLI's `harmonize` command could also apply from a YAML file;
+sentinel mapping, category merges, date-format declarations, safe fixes,
+duplicate removal, expectations — is exported by the app's "Download
+cleaning_rules.yaml" button and re-applied by the CLI's `harmonize` command;
 the cross-file merge is the one capability that exists only here.
 
 ## Investigation heuristics (`investigate.py`)
@@ -221,6 +248,10 @@ dataforensics harmonize <file1> <file2> ... --rules-map f1=r1.yaml,f2=r2.yaml \
 
 dataforensics report <artifact.json>
     Renders a data_dictionary/validation_report/manifest JSON to Markdown.
+
+dataforensics benchmark [--rows N] [--seeds K]
+    Plants known errors in synthetic data and prints per-check recall,
+    flags on clean items, and what's left after approved fixes.
 ```
 
 Exit codes: `0` success, `1` validation errors found, `2` invalid rules/config,
@@ -245,7 +276,29 @@ missing_values:
 category_mappings:      # merges require an explicit mapping; never automatic
   sex:
     male: Male
+safe_fixes:             # optional; each entry was approved in the app
+  whitespace: [state]
+  numeric_format: [income]          # "$50,000" -> 50000 (never percentages)
+  leading_zeros: {zip: 5}
+  date_iso: {visit_date: "%d/%m/%Y"}
+  units: {weight_kg: {boundary: 120.0, minority_side: high, factor: 2.20462}}
+  drop_exact_duplicate_rows: true   # found on the raw rows; each re-verified
+expectations:           # optional; violations are reported, never "fixed"
+  - {type: range, column: age, min: 0, max: 120}
+  - {type: conditional, if_column: sex, if_op: "=", if_value: M,
+     then_column: pregnant, then_op: is blank}
 ```
+
+All of this runs through `cleaning.clean_dataset` in the app and benchmark
+(the CLI runs the same steps around its own disk-anchored integrity check).
+A column may carry both a missing-value mapping and a category mapping:
+codes apply first, then merges; `config_schema.find_mapping_conflicts`
+rejects only a value in both maps or one map's output rewritten by the other.
+Safe fixes run after the mappings (a mapping's keys are raw variants that
+trimming would otherwise orphan), then the 1:1 row/column safety check,
+then duplicate removal -- the one approved change that alters row count.
+Crosswalk mode refuses a rules file with `safe_fixes`/`expectations` rather
+than silently skipping them.
 
 ## Why not a merge of aggregate and individual data
 
