@@ -1160,3 +1160,13 @@ def test_infer_profile_checks_from_column_names():
     assert profiles == ["Geographic", "Survey"]
     # A body-weight column alone doesn't make it a survey.
     assert infer_profile_checks(["weight_lbs"]) == ([], ["General"])
+
+
+def test_shape_check_covers_date_columns_with_few_distinct_dates():
+    # Found in the final walkthrough: nine survey dates make a column
+    # "categorical", so one DD/MM date among YYYY-MM-DD ones went unflagged.
+    rows = [{"visit": "13/02/2024" if i == 7 else f"2024-0{1 + i % 9}-1{i % 9}"} for i in range(60)]
+    dictionary = {"visit": {"category": "categorical"}}
+    assert detect_value_shape_outliers(rows, ["visit"], dictionary) == {}
+    found = detect_value_shape_outliers(rows, ["visit"], dictionary, {"visit"})
+    assert found["visit"]["outlier_count"] == 1 and found["visit"]["dominant_count"] == 59

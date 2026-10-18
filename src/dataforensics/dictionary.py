@@ -113,7 +113,20 @@ def cardinality_cap(n_rows: int) -> int:
     return min(_CARDINALITY_MAX, max(_CARDINALITY_FLOOR, ratio_cap))
 
 
-def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: str | None = None) -> dict:
+def build_data_dictionary(
+    path: Path,
+    include_raw_samples: bool = False,
+    sheet: str | None = None,
+    numeric_overrides: dict[str, dict[str, str]] | None = None,
+    missing_codes: dict[str, set[str]] | None = None,
+) -> dict:
+    """`numeric_overrides` ({column: {raw: value}}) gives the number to use
+    for a value a codebook says is recorded in another unit (BRFSS weight
+    9088 = 88 kg = 194 lb), so outliers and top-coding see real weights.
+    `missing_codes` ({column: codes}) are skipped like the built-in
+    missing-value codes: a codebook's "99 = Refused" is not a measurement."""
+    numeric_overrides = numeric_overrides or {}
+    missing_codes = missing_codes or {}
     header, body_rows = _load_table(path, sheet=sheet)
     if not header:
         return {}
@@ -197,10 +210,12 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
             # uses, so a column where "9999" IS the dominant real value
             # (not a rare sentinel) is never stripped of most of its data.
             sentinel_like = find_sentinel_like_values([v.strip() for v in non_null_values])
+            overrides = numeric_overrides.get(name, {})
+            skip = sentinel_like | missing_codes.get(name, set())
             for v in non_null_values:
-                if v.strip() in sentinel_like:
+                if v.strip() in skip:
                     continue
-                parsed = parse_finite_float(v)
+                parsed = parse_finite_float(overrides.get(v.strip(), v))
                 if parsed is None:
                     numeric_values = []
                     break
@@ -315,7 +330,7 @@ def detect_top_code_spike(values: list[float]) -> dict | None:
     return None
 
 
-def find_outlier_evidence(rows: list[dict], column: str) -> list[tuple[int, str]]:
+def find_outlier_evidence(rows: list[dict], column: str, exclude: set[str] | None = None) -> list[tuple[int, str]]:
     """Real (row_index, raw_value) pairs for the values in `column` that
     detect_outliers would flag, for showing genuine evidence ("row 183 ->
     age = 300") instead of just a count.
@@ -337,8 +352,10 @@ def find_outlier_evidence(rows: list[dict], column: str) -> list[tuple[int, str]
     column the dictionary didn't actually treat as numeric.
     """
     non_null = [(i, row.get(column, "")) for i, row in enumerate(rows) if row.get(column, "") != ""]
-    sentinel_like = find_sentinel_like_values([str(v).strip() for _, v in non_null])
-    eligible = [(i, v) for i, v in non_null if str(v).strip() not in sentinel_like]
+    # `exclude`: the column's other missing-value codes (from a codebook), as
+    # build_data_dictionary's `missing_codes`.
+    skip = find_sentinel_like_values([str(v).strip() for _, v in non_null]) | (exclude or set())
+    eligible = [(i, v) for i, v in non_null if str(v).strip() not in skip]
     values_only: list[float] = []
     for _, v in eligible:
         parsed = parse_finite_float(v)

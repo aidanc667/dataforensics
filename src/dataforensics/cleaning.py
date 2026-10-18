@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from functools import partial
 
 from dataforensics.advanced_checks import excel_serial_to_iso
+from dataforensics.codebook import convert_coded_unit
 from dataforensics.config_schema import find_chained_keys, find_mapping_conflicts
 from dataforensics.harmonize import apply_transformations, compute_safety_report
 from dataforensics.investigate import (
@@ -41,8 +42,8 @@ PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern detected]"
 # in the final text, and missing values are filled after everything that
 # could empty a cell (a mapped missing-value code, a blanked outlier).
 FIX_ORDER = (
-    "mojibake", "invisible", "whitespace", "numeric_format", "leading_zeros", "excel_dates", "date_iso", "units",
-    "outliers", "pii_mask", "impute",
+    "mojibake", "invisible", "whitespace", "numeric_format", "leading_zeros", "excel_dates", "date_iso",
+    "coded_units", "units", "outliers", "pii_mask", "impute",
 )
 # Fixes that need a person's judgment -- never ticked by "Approve all
 # recommended fixes".
@@ -53,12 +54,13 @@ MISSING_LABEL = "Missing"
 
 FIX_LABELS = {
     "invisible": "Remove hidden/invisible characters",
-    "whitespace": "Trim leading/trailing and doubled whitespace",
+    "whitespace": "Trim extra spaces and tabs",
     "mojibake": "Repair encoding corruption",
     "numeric_format": "Convert formatted numbers to plain numbers",
     "leading_zeros": "Restore leading zeros",
     "excel_dates": "Convert Excel date numbers to dates",
     "date_iso": "Standardize dates to YYYY-MM-DD",
+    "coded_units": "Convert values the codebook records in another unit",
     "units": "Convert mixed units to one unit",
     "outliers": "Treat outliers",
     "pii_mask": "Mask personal data in text",
@@ -66,7 +68,7 @@ FIX_LABELS = {
 }
 
 _ZERO_WIDTH = re.compile("[​‌‍‎‏﻿⁠\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_DOUBLED_SPACE = re.compile(r"\s{2,}")
+_DOUBLED_SPACE = re.compile(r"\s{2,}|\t")
 _DECORATED_NUMBER = re.compile(r"^([\$€£])?\s*(-?[\d,]*\.?\d+)\s*([kKmMbB])?$")
 _MAGNITUDE = {"k": Decimal(1_000), "m": Decimal(1_000_000), "b": Decimal(1_000_000_000)}
 
@@ -79,10 +81,10 @@ def fix_invisible(value: str) -> str:
 
 
 def fix_whitespace(value: str) -> str:
-    """Strip leading/trailing whitespace and collapse any run of 2+
-    whitespace characters (spaces, tabs, newlines) to one space -- the
-    same pattern detect_whitespace_anomalies flags, so an approved fix
-    clears every value it was shown for."""
+    """Strip leading/trailing whitespace and turn any run of 2+
+    whitespace characters (spaces, tabs, newlines), or a single tab, into
+    one space -- the same pattern detect_whitespace_anomalies flags, so an
+    approved fix clears every value it was shown for."""
     return _DOUBLED_SPACE.sub(" ", value.strip())
 
 
@@ -384,7 +386,7 @@ def validate_fixes(fixes: dict) -> None:
             isinstance(fixes[name], list) and all(isinstance(c, str) for c in fixes[name])
         ):
             raise ValueError(f"safe fix {name!r} must be a list of column names")
-    for name in ("leading_zeros", "date_iso", "units", "outliers", "impute"):
+    for name in ("leading_zeros", "date_iso", "coded_units", "units", "outliers", "impute"):
         if name in fixes and not isinstance(fixes[name], dict):
             raise ValueError(f"safe fix {name!r} must be a mapping of column name -> setting, got {fixes[name]!r}")
     for col, width in fixes.get("leading_zeros", {}).items():
@@ -393,6 +395,15 @@ def validate_fixes(fixes: dict) -> None:
     for col, fmt in fixes.get("date_iso", {}).items():
         if not isinstance(fmt, str) or "%" not in fmt:
             raise ValueError(f"date_iso format for {col!r} must be a strptime format string, got {fmt!r}")
+    for col, rule in fixes.get("coded_units", {}).items():
+        if not isinstance(rule, dict) or set(rule) != {"low", "high", "offset", "unit"}:
+            raise ValueError(f"coded_units for {col!r} needs exactly high, low, offset, unit")
+        if rule["unit"] not in ("kg", "cm"):
+            raise ValueError(f"coded_units unit for {col!r} must be 'kg' or 'cm'")
+        if any(isinstance(rule[k], bool) or not isinstance(rule[k], (int, float)) for k in ("low", "high", "offset")):
+            raise ValueError(f"coded_units low, high and offset for {col!r} must be numbers")
+        if rule["low"] >= rule["high"]:
+            raise ValueError(f"coded_units low for {col!r} must be below high")
     for col, params in fixes.get("units", {}).items():
         if not isinstance(params, dict) or set(params) != _UNIT_PARAMS:
             raise ValueError(f"units fix for {col!r} needs exactly {', '.join(sorted(_UNIT_PARAMS))}")
@@ -442,6 +453,8 @@ def _fixers(fixes: dict) -> list[tuple[str, str, Callable[[str], str]]]:
             plan.extend((name, col, partial(fix_leading_zeros, width=w)) for col, w in fixes.get(name, {}).items())
         elif name == "date_iso":
             plan.extend((name, col, partial(fix_date_iso, source_format=f)) for col, f in fixes.get(name, {}).items())
+        elif name == "coded_units":
+            plan.extend((name, col, partial(_convert_coded, rule=r, column=col)) for col, r in fixes.get(name, {}).items())
         elif name == "units":
             plan.extend((name, col, partial(fix_units, **p)) for col, p in fixes.get(name, {}).items())
         elif name == "outliers":
@@ -454,6 +467,15 @@ def _fixers(fixes: dict) -> list[tuple[str, str, Callable[[str], str]]]:
 
 def _fill(_empty: str, *, value: str) -> str:
     return value
+
+
+def _convert_coded(value: str, *, rule: dict, column: str) -> str:
+    """A value the codebook records in another unit, in the column's own
+    unit ("9088" -> "194"); anything else unchanged. The rule (range,
+    offset, unit) rather than a list of values, so re-running the rules on
+    a new release converts codes that release adds."""
+    converted = convert_coded_unit(value, (rule["low"], rule["high"], rule["offset"], rule["unit"]), column)
+    return value if converted is None else converted
 
 
 def apply_safe_fixes(

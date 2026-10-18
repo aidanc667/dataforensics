@@ -154,3 +154,39 @@ def test_default_key_skips_place_codes_personal_data_and_blank_ids():
     # An ID with a blank cell isn't unique; with no partner the first ID stays the default.
     blank = [{"id": "" if i == 2 else str(i)} for i in range(4)]
     assert suggest_primary_key(blank, ["id"], ["id"]) == ["id"]
+
+
+def test_codebook_adds_no_answer_codes_and_converts_coded_units():
+    """BRFSS with its codebook: 7/9 (Don't know/Refused) become missing-value
+    codes, and weights recorded as 9000 + kg are read in pounds. Expected
+    statistics checked with pandas: mean 183.08 lb, max 425 (without the
+    codebook: mean 236.06 with a 9,088 maximum)."""
+    from dataforensics.codebook import parse_codebook
+
+    codebook = parse_codebook((DEMOS / "brfss_survey_sample.codebook.csv").read_bytes())
+    result = run_investigation(DEMOS / "brfss_survey_sample.csv", sheet=None, dataset_type="Auto", data_size=1,
+                               codebook=codebook)
+    assert result["sentinels"]["general_health"] == ["7", "9"]
+    assert result["sentinels"]["income_bracket"] == ["77", "99"]  # 7 and 9 are real brackets here
+    assert result["unit_conversions"]["weight_lbs"] == {"9055": "121", "9060": "132", "9088": "194"}
+    weight = next(s for s in result["numeric_summary"] if s["Column"] == "weight_lbs")
+    assert (weight["Mean"], weight["Max"]) == (183.08, 425.0)
+
+
+def test_codebook_codes_are_not_outliers_in_a_numeric_column(tmp_path):
+    """Review finding: a days column (0-30) with 77 = Don't know and 99 =
+    Refused had 77/99 counted as IQR outliers even with the codebook."""
+    path = tmp_path / "days.csv"
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["id", "days_drank"])
+        for i in range(200):
+            writer.writerow([i, "99" if i % 20 == 0 else "77" if i % 25 == 0 else str(i % 31)])
+    from dataforensics.codebook import parse_codebook
+
+    codebook = parse_codebook(b"column,value,label\ndays_drank,77,Don't know\ndays_drank,99,Refused\n")
+    without = run_investigation(path, sheet=None, dataset_type="Auto", data_size=1)
+    with_codebook = run_investigation(path, sheet=None, dataset_type="Auto", data_size=1, codebook=codebook)
+    assert without["dictionary"]["days_drank"]["outliers"]["outlier_count"] > 0  # 77s and 99s
+    assert with_codebook["dictionary"]["days_drank"]["outliers"]["outlier_count"] == 0  # values 0-30 only
+    assert with_codebook["sentinels"]["days_drank"] == ["77", "99"]

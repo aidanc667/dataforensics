@@ -545,6 +545,21 @@ def test_fill_never_uses_the_missing_label():
     assert offers and "most common value (A)" in offers[0]
 
 
+def test_safety_rows_show_the_cleaned_files_row_count():
+    """Found in the final walkthrough: with a duplicate removed, Safety checks
+    said "Rows 61 → 61" next to a 60-row cleaned file."""
+    lines = ["id,name,score"] + [f"{i},P{i},{i % 7}" for i in range(1, 61)] + ["3,P3,3"]
+    at = AppTest.from_file(str(APP_PATH), default_timeout=60)
+    at.session_state["dataforensics_data_bytes"] = ("\n".join(lines) + "\n").encode()
+    at.session_state["dataforensics_data_name"] = "dups.csv"
+    at = _goto(at, "review")
+    next(b for b in at.button if b.label == "Approve all recommended fixes").click().run()
+    next(b for b in at.button if "Apply approved changes" in b.label).click().run()
+    assert not at.exception
+    assert next(m for m in at.metric if m.label == "Rows").value == "61 → 60"
+    assert any("Every value fix kept every row (1 exact duplicate removed)" in m.value for m in at.markdown)
+
+
 def _approve_notes(at: AppTest) -> list[str]:
     return [m.value for m in at.markdown if 'class="df-approve-note"' in m.value]
 
@@ -640,11 +655,12 @@ def _card_titles(at: AppTest) -> list[str]:
 def test_example_dataset_comes_with_its_codebook_and_it_can_be_removed():
     at = _example_on_insights(1, "brfss_survey_sample.csv")
     assert any("brfss_survey_sample.codebook.csv" in m.value for m in at.markdown)
-    # 9 (Refused) is blank for all 7 of its rows too (checked with pandas), so
-    # the skip names it -- the card used to leave out groups too small to compare.
-    assert any(
-        "smoked_100_cigarettes = 2 (No), 7 (Don&#x27;t know / Not sure) or 9 (Refused)" in t for t in _card_titles(at)
-    )
+    # With the codebook, 7 (Don't know) and 9 (Refused) are no-answer codes,
+    # so the skip is the survey's real rule: asked only if smoked 100.
+    assert any("blank whenever smoked_100_cigarettes = 2 (No)<" in t for t in _card_titles(at))
+    # Weights the codebook records as 9000 + kg are read in pounds (pandas:
+    # mean 183.08, max 425 -- not 236 with a 9,088 "maximum").
+    assert any("Mean 183.08 vs median 175 (range 100–425)" in t for t in _card_titles(at))
     # The survey skip explains this column's other missing-data patterns.
     reasons = _held_back_reasons(at)
     assert reasons["currently_smokes is missing far more often for general_health = 1 (Excellent)"].startswith(
@@ -695,29 +711,15 @@ def test_issue_panels_show_evidence_limits_next_step_and_rule():
     assert any("The rows listed are the smaller cluster." in c.value for c in at.caption)
 
 
-def test_case_number_follows_the_file_and_findings_are_exhibits():
-    """The case number is the first 4 hex digits of the file's SHA-256, so
-    it's stable for a file and changes when the file does; each finding on
-    the Issues page is marked as an exhibit."""
-    import hashlib
-
-    data = (FIXTURES_DIR / "demos" / "messy_csv_example.csv").read_bytes()
-    case = hashlib.sha256(data).hexdigest()[:4].upper()
+def test_step_label_has_no_case_number_and_findings_are_exhibits():
+    """The step label reads "Step 3 of 5 · Issues" (the case number was
+    removed on request); each finding on the Issues page is an exhibit."""
     at = _messy_app()
     _goto(at, "issues")
     assert not at.exception
-    assert any(f"Case {case} · Step 3 of 5 · Issues" in m.value for m in at.markdown)
+    assert any("Step 3 of 5 · Issues" in m.value for m in at.markdown)
+    assert not any("Case " in m.value and "· Step" in m.value for m in at.markdown)
     assert sum('class="dataforensics-card df-exhibit"' in m.value for m in at.markdown) >= 5
-
-    # A different file is a different case.
-    changed = data + b"P099,Extra,Row,1990-01-01,,,,,,,,,\n"
-    at.session_state["dataforensics_data_bytes"] = changed
-    at.run(timeout=60)
-    assert not at.exception
-    new_case = hashlib.sha256(changed).hexdigest()[:4].upper()
-    assert new_case != case
-    assert any(f"Case {new_case} · Step 3 of 5 · Issues" in m.value for m in at.markdown)
-    assert not any(f"Case {case} ·" in m.value for m in at.markdown)
 
 
 def test_home_specimen_matches_the_real_output():
@@ -806,7 +808,7 @@ def test_issues_summary_overview_charts_and_results_fix_chart():
         for label in table.column("label").to_pylist()
     ]
     assert "Convert mixed units to one unit" in labels
-    assert "Trim leading/trailing and doubled whitespace" in labels
+    assert "Trim extra spaces and tabs" in labels
 
 
 def test_logo_starts_fresh_on_the_home_page_from_anywhere():

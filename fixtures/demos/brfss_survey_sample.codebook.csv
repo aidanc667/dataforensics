@@ -59,3 +59,9 @@ diabetes_status,3,No
 diabetes_status,4,"No, pre-diabetes or borderline diabetes"
 diabetes_status,7,Don't know / Not sure
 diabetes_status,9,Refused
+weight_lbs,7777,Don't know / Not sure
+weight_lbs,9023-9352,Weight in kilograms (value minus 9000)
+weight_lbs,9999,Refused
+height_ft_in,7777,Don't know / Not sure
+height_ft_in,9061-9998,Height in centimeters (value minus 9000)
+height_ft_in,9999,Refused

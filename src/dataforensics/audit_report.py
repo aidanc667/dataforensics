@@ -58,17 +58,20 @@ def categorical_frequency(rows: list[dict], column: str, max_levels: int = 8) ->
     return result
 
 
-def numeric_summary(rows: list[dict], column: str) -> dict | None:
+def numeric_summary(rows: list[dict], column: str, exclude: set[str] | None = None) -> dict | None:
     """min/max/median/mean for a numeric column's non-null values,
     independent of detect_outliers' 4-value minimum -- so even a small
     numeric column still gets a real range/median in the audit report,
     not just a blank. Returns None if the column has no numeric values
     (skips non-finite parses via parse_finite_float the same way every
-    other numeric-detection site in this codebase does)."""
+    other numeric-detection site in this codebase does). Values in
+    `exclude` (the column's missing-value codes, like 9999) are skipped:
+    they aren't measurements."""
+    exclude = exclude or set()
     values = []
     for row in rows:
         raw = row.get(column, "")
-        if raw == "":
+        if raw == "" or str(raw).strip() in exclude:
             continue
         parsed = parse_finite_float(raw)
         if parsed is None:
@@ -86,6 +89,16 @@ def numeric_summary(rows: list[dict], column: str) -> dict | None:
         "median": median,
         "mean": sum(values) / n,
     }
+
+
+def _distribution_clear(after: dict | None, column: str) -> bool:
+    """The cleaned file shows no outliers and no top-coding in `column`."""
+    if after is None or column not in (after.get("dictionary") or {}):
+        return False
+    f = after["dictionary"][column]
+    # Still measured as numbers, and nothing flagged -- not merely a column
+    # that stopped being numeric (a code relabelled "Refused").
+    return f.get("outliers") is not None and not f["outliers"].get("outlier_count") and not f.get("top_code_spike")
 
 
 def build_investigation_findings(
@@ -127,6 +140,8 @@ def build_investigation_findings(
     fuzzy_duplicate_entities: list[dict] | None = None,
     fuzzy_exact_columns: list[str] | None = None,
     fuzzy_name_column: str | None = None,
+    after: dict | None = None,
+    code_labels: dict[str, dict[str, str]] | None = None,
 ) -> list[dict]:
     """One canonical list of findings -- tier (high/review/info), a
     title, real evidence lines (PII-masked where the column warrants it),
@@ -152,10 +167,13 @@ def build_investigation_findings(
     "resolved" is determined from `mutations` (what was ACTUALLY applied,
     the ground truth), not from checkbox state -- a sentinel/category
     value only counts as resolved if it appears as an original_value in
-    an applied mutation for that column. Every other finding type here
-    has no apply mechanism at all (this app never deletes rows, merges
-    entities, or auto-corrects a range/format violation), so those are
-    always fully unresolved by construction.
+    an applied mutation for that column. Findings a safe fix can remove
+    (whitespace, encoding, number formats, unit mixes, FIPS/ZIP shape,
+    duplicates) are resolved when the re-run checks no longer find them in
+    the cleaned file (`after`, the investigation of that file). The rest
+    have no apply mechanism (DataForensics never merges entities or
+    corrects a range violation or contradiction), so those are always
+    fully unresolved by construction.
 
     For a PII-masked column, `mutations` never records the real
     original_value (only the placeholder mask, so a raw identifier never
@@ -169,6 +187,25 @@ def build_investigation_findings(
     mutated_pairs = {(m["column"], m["original_value"]) for m in mutations}
     findings: list[dict] = []
 
+    def left_after(key: str, col: str | None = None) -> int | None:
+        """How many of a finding's items the re-run checks still find in the
+        cleaned file (`after`), or None when there's no cleaned file. A fix
+        that removed the problem -- trimming, padding a FIPS code back to 2
+        digits -- shows as resolved without this module knowing the fix."""
+        if after is None:
+            return None
+        found = after.get(key) or {}
+        if col is None:
+            return len(found)
+        value = found.get(col)
+        if not value:
+            return 0
+        return value if isinstance(value, int) else len(value) if isinstance(value, list) else 1
+
+    def resolved_after(total: int, key: str, col: str | None = None) -> int:
+        left = left_after(key, col)
+        return 0 if left is None else max(0, total - min(left, total))
+
     def _mask(column: str, value) -> str:
         return PII_EVIDENCE_MASK if is_pii_like_column(column) else str(value)
 
@@ -181,7 +218,7 @@ def build_investigation_findings(
             "detection": "Every field in these rows is identical to an earlier row.",
             "suggested_action": "Review manually — could be a genuine duplicate or a legitimate repeated record.",
             "confidence": "Medium",
-            "resolved": 0,
+            "resolved": resolved_after(len(dup_rows), "dup_rows"),
             "total": len(dup_rows),
         })
 
@@ -329,7 +366,7 @@ def build_investigation_findings(
             "detection": "This column has values with leading/trailing whitespace or 2+ consecutive internal spaces.",
             "suggested_action": "Review manually — could silently break exact-match joins or category counts.",
             "confidence": "Low",
-            "resolved": 0,
+            "resolved": resolved_after(1, "whitespace_anomaly_counts", col),
             "total": 1,
         })
 
@@ -342,7 +379,7 @@ def build_investigation_findings(
             "detection": "This column has values containing a zero-width space, non-breaking space, or other invisible/control character.",
             "suggested_action": "Review manually — could silently break exact-match comparisons or lookups.",
             "confidence": "Low",
-            "resolved": 0,
+            "resolved": resolved_after(1, "invisible_char_counts", col),
             "total": 1,
         })
 
@@ -355,7 +392,7 @@ def build_investigation_findings(
             "detection": "This column has values matching the classic signature of UTF-8 text mis-decoded as Windows-1252/Latin-1 (mojibake).",
             "suggested_action": "Review manually — could indicate a real character-encoding problem earlier in this file's history.",
             "confidence": "Low",
-            "resolved": 0,
+            "resolved": resolved_after(1, "encoding_corruption_counts", col),
             "total": 1,
         })
 
@@ -368,7 +405,7 @@ def build_investigation_findings(
             "detection": "Most numeric-looking values in this column parse as a plain number; the rest use a currency symbol, thousands separator, or k/m/b suffix instead.",
             "suggested_action": "Review manually — could reflect a different data source or entry method.",
             "confidence": "Low",
-            "resolved": 0,
+            "resolved": resolved_after(1, "numeric_representation_findings", col),
             "total": 1,
         })
 
@@ -400,7 +437,7 @@ def build_investigation_findings(
             "detection": f"This column's values split into two clusters whose ratio matches the real {f['unit_a']}-to-{f['unit_b']} conversion factor, not just any two-humped distribution.",
             "suggested_action": "Review manually — confirm which unit each row was actually recorded in.",
             "confidence": "Low",
-            "resolved": 0,
+            "resolved": resolved_after(1, "unit_inconsistency_findings", col),
             "total": 1,
         })
 
@@ -456,7 +493,7 @@ def build_investigation_findings(
             "detection": "These values don't match the standard 2- or 5-digit numeric US Census FIPS code shape.",
             "suggested_action": "Check for a truncated leading zero or a non-FIPS value.",
             "confidence": "Medium",
-            "resolved": 0,
+            "resolved": resolved_after(len(evidence_pairs), "invalid_fips_findings", col),
             "total": len(evidence_pairs),
         })
 
@@ -469,7 +506,7 @@ def build_investigation_findings(
             "detection": "These values don't match the standard 5-digit ZIP or ZIP+4 shape.",
             "suggested_action": "Check for a truncated leading zero or a non-ZIP value.",
             "confidence": "Medium",
-            "resolved": 0,
+            "resolved": resolved_after(len(evidence_pairs), "invalid_zip_findings", col),
             "total": len(evidence_pairs),
         })
 
@@ -519,7 +556,10 @@ def build_investigation_findings(
 
     if ambiguous_dates:
         for col, count in ambiguous_dates.items():
-            resolved = 1 if any(m["column"] == col for m in mutations) else 0
+            if after is not None:  # the cleaned file has no ambiguous dates left in this column
+                resolved = 0 if col in (after.get("ambiguous_dates") or {}) else 1
+            else:
+                resolved = 1 if any(m["column"] == col for m in mutations) else 0
             findings.append({
                 "tier": "review",
                 "title": f"{col}: {count} date value(s) with an ambiguous format",
@@ -554,7 +594,9 @@ def build_investigation_findings(
                 "detection": "Statistically unusual relative to the rest of this column (IQR method) or a disproportionate share of values sit at the observed maximum (possible top-coding).",
                 "suggested_action": "Review manually — unusual is not the same as incorrect (e.g. income is normally right-skewed).",
                 "confidence": "Low",
-                "resolved": 1 if fixed_by("outliers", col) else 0,
+                # Treated, or gone from the cleaned file (kg weights converted
+                # to lb are no longer outliers).
+                "resolved": 1 if fixed_by("outliers", col) or _distribution_clear(after, col) else 0,
                 "total": 1,
             })
 
@@ -568,7 +610,7 @@ def build_investigation_findings(
             "detection": "A majority of this column's non-null values reduce to the same digit/letter/spacing/punctuation shape; a minority don't.",
             "suggested_action": "Review manually — could be a genuine formatting error, or a legitimately different but valid format.",
             "confidence": "Low",
-            "resolved": 0,
+            "resolved": resolved_after(1, "shape_outlier_findings", col),
             "total": 1,
         })
 
@@ -587,12 +629,27 @@ def build_investigation_findings(
                 resolved = len(values) if (col, PII_EVIDENCE_MASK) in mutated_pairs else 0
             else:
                 resolved = sum(1 for v in values if (col, v) in mutated_pairs or v in approved_sentinels.get(col, {}))
+            labels = (code_labels or {}).get(col, {})
             findings.append({
                 "tier": "info",
-                "title": f"{col}: {', '.join(repr(v) for v in values)} match a common missing-value convention",
-                "evidence": [],
+                "title": (
+                    f"{col}: {', '.join(repr(v) for v in values)} "
+                    + (
+                        "are no-answer codes in the codebook" if labels and all(v in labels for v in values)
+                        else "are missing-value codes (some labelled so in the codebook)" if labels
+                        else "match a common missing-value convention"
+                    )
+                ),
+                "evidence": [f"{v!r} = {labels[v]}" for v in values if v in labels],
                 "more": 0,
-                "detection": "These values case-insensitively match a common research/survey missing-value convention.",
+                "detection": (
+                    "The codebook labels these values as no answer (don't know, refused, missing)."
+                    if labels and all(v in labels for v in values)
+                    else "Labelled as no answer in the codebook where listed below; the rest match a common "
+                    "research/survey missing-value convention."
+                    if labels
+                    else "These values case-insensitively match a common research/survey missing-value convention."
+                ),
                 "suggested_action": "Map to an explicit missing-value label, or leave as-is if this is a genuine value.",
                 "confidence": "Medium",
                 "resolved": resolved,
@@ -712,6 +769,8 @@ def build_audit_report_html(
     output_sha256: str | None = None,
     rows_removed: int = 0,
     checks_performed: list[str] | None = None,
+    stat_rows: list[dict] | None = None,
+    exclude_codes: dict[str, set[str]] | None = None,
 ) -> str:
     """The full DataForensics Data Investigation Report: what did I
     receive, what does the data look like, what deserves attention, what
@@ -803,7 +862,9 @@ def build_audit_report_html(
         ctype = column_types.get(col, "mixed_uncertain")
         detail = ""
         if ctype == "numeric":
-            summary = numeric_summary(rows, col)
+            # The same reading as the app's statistics: codes skipped, and
+            # values a codebook records in another unit converted.
+            summary = numeric_summary(stat_rows or rows, col, (exclude_codes or {}).get(col))
             if summary:
                 detail = f"Median {summary['median']:,.2f} · Range {summary['min']:,.2f}–{summary['max']:,.2f} · Mean {summary['mean']:,.2f}"
         elif ctype == "categorical" and not is_pii_like_column(col):

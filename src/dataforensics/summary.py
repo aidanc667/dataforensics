@@ -215,6 +215,7 @@ def build_null_table(dictionary: dict, row_count: int) -> list[dict]:
 
 def build_insights(
     *,
+    code_labels: dict[str, dict[str, str]] | None = None,
     sentinels: dict[str, list[str]],
     sentinel_counts: dict[tuple[str, str], int],
     missingness_concentration: dict[str, list[dict]],
@@ -239,11 +240,13 @@ def build_insights(
     for col, values in sentinels.items():
         for val in values:
             n = sentinel_counts.get((col, val), 0)
+            label = (code_labels or {}).get(col, {}).get(val)
+            what = f"which the codebook labels {label!r}" if label else "a common missing-value code"
             insights.append(
                 {
                     "Type": "Missing-value code",
                     "Column(s)": col,
-                    "Insight": f"{n:,} cell(s) hold {val!r}, a common missing-value code; "
+                    "Insight": f"{n:,} cell(s) hold {val!r}, {what}; "
                     "treated as a real number it distorts means and counts.",
                 }
             )

@@ -469,3 +469,46 @@ def test_blank_only_where_still_works_on_a_file_sorted_by_age():
     ages = sorted((i * 37) % 60 for i in range(120))
     rows = [{"age": str(a), "wages": "" if a < 15 else "100"} for a in ages]
     assert blank_only_where(rows, "wages", ["age"]) == ("age", 0.0, 14.0)
+
+
+_KG_RULE = {"low": 9023, "high": 9352, "offset": 9000, "unit": "kg"}
+
+
+def test_coded_units_converts_by_the_codebook_rule_including_new_codes():
+    # Review finding: the rule, not a list of values, is stored -- so a code
+    # that only appears in a later release (9100 = 100 kg) is converted too.
+    rows = [{"id": "1", "weight_lbs": "9088"}, {"id": "2", "weight_lbs": "9100"}, {"id": "3", "weight_lbs": "180"}]
+    out, mutations = apply_safe_fixes(rows, {"coded_units": {"weight_lbs": _KG_RULE}}, ["id"], reason="t")
+    # 88 kg * 2.20462 = 194.0 lb; 100 kg = 220.46 -> 220 (whole pounds)
+    assert [r["weight_lbs"] for r in out] == ["194", "220", "180"]
+    assert [m["transformation_rule"] for m in mutations] == ["coded_units:weight_lbs"] * 2
+
+
+def test_coded_units_run_before_outliers_so_a_kg_code_is_never_capped():
+    rows = [{"id": "1", "weight_lbs": "9100"}]
+    fixes = {"coded_units": {"weight_lbs": _KG_RULE},
+             "outliers": {"weight_lbs": {"action": "cap", "lower": 100.0, "upper": 300.0, "keep": []}}}
+    out, _ = apply_safe_fixes(rows, fixes, ["id"], reason="t")
+    assert out[0]["weight_lbs"] == "220"  # converted, then inside the limits -- not capped to 300
+
+
+@pytest.mark.parametrize("rule", [
+    {"low": 9023, "high": 9352, "offset": 9000},  # no unit
+    {**_KG_RULE, "unit": "stone"},
+    {**_KG_RULE, "low": 9400},  # low above high
+])
+def test_coded_units_rejects_a_malformed_rule(rule):
+    with pytest.raises(ValueError, match="coded_units"):
+        apply_safe_fixes([{"w": "9100"}], {"coded_units": {"w": rule}}, [], reason="t")
+
+
+def test_whitespace_fix_replaces_a_tab_but_keeps_a_line_break():
+    # Found in the final walkthrough: a tab inside a value ("tab<TAB>here")
+    # wasn't flagged or fixed; it breaks TSV exports. A line break in a note
+    # can be intended, so it stays.
+    from dataforensics.investigate import detect_whitespace_anomalies
+
+    rows = [{"c": "tab\there"}, {"c": "line1\nline2"}, {"c": "ok"}]
+    assert detect_whitespace_anomalies(rows, ["c"]) == {"c": 1}
+    out, _ = apply_safe_fixes(rows, {"whitespace": ["c"]}, [], reason="t")
+    assert [r["c"] for r in out] == ["tab here", "line1\nline2", "ok"]

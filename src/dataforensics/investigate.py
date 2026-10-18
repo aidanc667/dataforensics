@@ -27,6 +27,7 @@ from itertools import combinations
 
 from dataforensics.typing_guards import (
     find_sentinel_like_values,
+    is_id_like_column,
     is_pii_like_column,
     parse_finite_float,
 )
@@ -651,6 +652,9 @@ def compare_fingerprints(previous: dict, current: dict, prev_dictionary: dict, c
 _MAX_ROWS_FOR_VALUE_OVERLAP = 200_000  # guard against O(n) set-building on huge uploads
 
 
+_MIN_KEY_DISTINCTNESS = 0.5
+
+
 def discover_shared_key_columns(file_rows: dict[str, list[dict]], min_overlap: float = 0.5) -> list[dict]:
     """For every pair of uploaded files, find column-name pairs (matched
     case-insensitively, ignoring underscores -- "participant_id" ~
@@ -681,6 +685,18 @@ def discover_shared_key_columns(file_rows: dict[str, list[dict]], min_overlap: f
                     values_b = {str(r[col_b]) for r in rows_b[:_MAX_ROWS_FOR_VALUE_OVERLAP] if r.get(col_b) not in (None, "")}
                     if not values_a or not values_b:
                         continue
+                    # A key identifies records: on at least one side its values
+                    # are mostly distinct. "sex" (two values) overlaps 100% but
+                    # can't link a visit to a participant.
+                    filled_a = sum(1 for r in rows_a[:_MAX_ROWS_FOR_VALUE_OVERLAP] if r.get(col_a) not in (None, ""))
+                    filled_b = sum(1 for r in rows_b[:_MAX_ROWS_FOR_VALUE_OVERLAP] if r.get(col_b) not in (None, ""))
+                    distinctness = max(len(values_a) / filled_a, len(values_b) / filled_b)
+                    if distinctness < _MIN_KEY_DISTINCTNESS:
+                        continue
+                    # In a file of a few rows every column looks distinct; there,
+                    # only an ID-named column is offered.
+                    if max(filled_a, filled_b) < 5 and not (is_id_like_column(col_a) or is_id_like_column(col_b)):
+                        continue
                     smaller, larger = (values_a, values_b) if len(values_a) <= len(values_b) else (values_b, values_a)
                     overlap = len(smaller & larger) / len(smaller)
                     if overlap >= min_overlap:
@@ -689,9 +705,18 @@ def discover_shared_key_columns(file_rows: dict[str, list[dict]], min_overlap: f
                                 "file_a": file_a, "column_a": col_a,
                                 "file_b": file_b, "column_b": col_b,
                                 "overlap_fraction": round(overlap, 4),
+                                "distinctness": round(distinctness, 4),
                             }
                         )
-    return sorted(candidates, key=lambda c: c["overlap_fraction"], reverse=True)
+    # ID-named pairs first (the app pre-selects the first), then the pairs
+    # that both overlap and identify records best (pid before birth_year).
+    return sorted(
+        candidates,
+        key=lambda c: (
+            not (is_id_like_column(c["column_a"]) or is_id_like_column(c["column_b"])),
+            -c["overlap_fraction"] * c["distinctness"],
+        ),
+    )
 
 
 # --------------------------------------------------------------------- #
@@ -917,7 +942,9 @@ def _value_shape(value: str) -> str:
     return "".join(shape)
 
 
-def detect_value_shape_outliers(rows: list[dict], columns: list[str], dictionary: dict) -> dict[str, dict]:
+def detect_value_shape_outliers(
+    rows: list[dict], columns: list[str], dictionary: dict, date_columns: set[str] | None = None
+) -> dict[str, dict]:
     """Flag free_text columns where one value shape (see `_value_shape`)
     dominates (>= 80% of non-null values) and a minority of values don't
     match it -- a general format-consistency check that works for any
@@ -937,7 +964,9 @@ def detect_value_shape_outliers(rows: list[dict], columns: list[str], dictionary
     """
     results: dict[str, dict] = {}
     for column in columns:
-        if dictionary.get(column, {}).get("category") != "free_text":
+        # Date columns too, however few distinct dates they hold (survey
+        # waves): one "13/02/2024" among YYYY-MM-DD dates is a format slip.
+        if dictionary.get(column, {}).get("category") != "free_text" and column not in (date_columns or set()):
             continue
         values = [str(row.get(column, "")).strip() for row in rows]
         values = [v for v in values if v != ""]
@@ -973,12 +1002,16 @@ def find_value_shape_outlier_evidence(rows: list[dict], column: str, dominant_sh
     return evidence
 
 
-_WHITESPACE_ANOMALY_PATTERN = re.compile(r"^\s|\s$|\s{2,}")
+# Leading/trailing, doubled, or a tab inside the value (a tab breaks TSV
+# exports and spreadsheet cells). A single "\n" line break is left alone: a
+# multi-line note or address can be intended. (A Windows "\r\n" is two
+# whitespace characters, so it counts as doubled.)
+_WHITESPACE_ANOMALY_PATTERN = re.compile(r"^\s|\s$|\s{2,}|\t")
 
 
 def detect_whitespace_anomalies(rows: list[dict], columns: list[str]) -> dict[str, int]:
-    """Column -> count of non-null values with leading/trailing whitespace
-    or 2+ consecutive internal spaces. "California", " California", and
+    """Column -> count of non-null values with leading/trailing whitespace,
+    2+ consecutive internal spaces, or a tab inside the value. "California", " California", and
     "California  Ave" look identical or near-identical at a glance but are
     different strings -- this silently breaks exact-match joins, category
     counts, and lookups without ever showing up as a visible typo.

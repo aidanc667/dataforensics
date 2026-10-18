@@ -380,6 +380,10 @@ st.markdown(
     .df-path .df-path-arrow { color: var(--df-accent); }
     @media (max-width: 900px) { .df-hero-title, .df-hero-grid .df-hero-title { font-size: 2rem !important; } }
 
+    /* The zero-height scroll-to-top helper still took full width, offset by
+       the page margin, so phones could scroll sideways by 16px. */
+    [data-testid="stElementContainer"]:has(iframe[srcdoc*="scrollTo"]) {
+        position: absolute; width: 0; height: 0; overflow: hidden; }
     .df-sample { padding: 0.15rem 0 0.5rem; }
     /* Streamlit pulls markdown up 1rem to cancel a trailing <p> margin; these rows have
        no <p>, so the text overflowed its row and crowded the box's bottom edge. */
@@ -536,18 +540,9 @@ def _bucket_header(icon: str, title: str) -> str:
     return f'<div class="dataforensics-bucket-header"><span class="df-icon-chip">{_icon(icon, 16)}</span>{title}</div>'
 
 
-def _case_id() -> str | None:
-    """The loaded dataset's case number: the first 4 hex digits of its
-    SHA-256, so the same file always gets the same number and a changed
-    file gets a new one. None when nothing is loaded."""
-    data = st.session_state.get("dataforensics_data_bytes")
-    return hashlib.sha256(data).hexdigest()[:4].upper() if data is not None else None
-
-
 def _step_eyebrow(number: int, name: str) -> str:
-    """Page eyebrow for the Analyze steps: "Case 4F2A · Step 3 of 5 · Issues"."""
-    case = _case_id()
-    return (f"Case {case} · " if case else "") + f"Step {number} of {len(_STEPS)} · {name}"
+    """Page eyebrow for the Analyze steps: "Step 3 of 5 · Issues"."""
+    return f"Step {number} of {len(_STEPS)} · {name}"
 
 
 # A real finding from the bundled Messy CSV Example, shown on the first
@@ -898,10 +893,15 @@ def _visualize_whitespace(value: str) -> str:
     stripped = value.strip()
     leading_ws = len(value) - len(value.lstrip())
     trailing_ws = len(value) - len(value.rstrip())
-    if not leading_ws and not trailing_ws:
+    inner_flags = "\t" in stripped or "  " in stripped
+    if not leading_ws and not trailing_ws and not inner_flags:
         return escaped
     marker = '<span style="background:#FEE2E2; color:#B91C1C;">&middot;</span>'
-    visible = (marker * leading_ws) + _esc(stripped) + (marker * trailing_ws)
+    tab_marker = '<span style="background:#FEE2E2; color:#B91C1C;">&rarr;</span>'
+    # Inside the value too: a tab (→) and each space of a doubled run (·),
+    # which HTML would otherwise collapse into one plain gap.
+    inner = _esc(stripped).replace("\t", tab_marker).replace("  ", marker + marker)
+    visible = (marker * leading_ws) + inner + (marker * trailing_ws)
     return f'{visible} <span style="color:#5A6875; font-style:italic;">(hidden whitespace, {len(value)} chars total)</span>'
 
 
@@ -1001,12 +1001,19 @@ def _evidence_panel(
 
 
 @st.cache_data(show_spinner="Running automated checks…", max_entries=8)
-def _cached_investigation(data_bytes: bytes, file_name: str, sheet: str | None, dataset_type: str, data_size: int) -> dict:
+def _cached_investigation(
+    data_bytes: bytes, file_name: str, sheet: str | None, dataset_type: str, data_size: int, codebook: bytes | None = None
+) -> dict:
     """run_investigation, cached on the file's bytes + options. Every widget
     click reruns this script; without the cache, each click re-ran every
     check over the whole file. The temp copy is needed because the
-    readers take a path; its location doesn't affect the result."""
-    return run_investigation(_write_temp(file_name, data_bytes), sheet=sheet, dataset_type=dataset_type, data_size=data_size)
+    readers take a path; its location doesn't affect the result. The
+    codebook (validated when it was stored) adds its "Don't know" codes and
+    coded units to the checks."""
+    return run_investigation(
+        _write_temp(file_name, data_bytes), sheet=sheet, dataset_type=dataset_type, data_size=data_size,
+        codebook=parse_codebook(codebook) if codebook else None,
+    )
 
 
 @st.cache_data(show_spinner="Finding patterns…", max_entries=16)
@@ -1033,7 +1040,7 @@ def _insight_cards(investigation_args: tuple, result: dict) -> list[dict]:
     """The cards for the current options: the confounders picked on the
     Insights tab (age and sex by default) and the dataset's codebook."""
     chosen = st.session_state.get("dataforensics_adjust_for")
-    if chosen is None or st.session_state.get("dataforensics_adjust_for_source") != investigation_args[1:]:
+    if chosen is None or st.session_state.get("dataforensics_adjust_for_source") != investigation_args[1:5]:
         # Picked for a different sheet or profile (or never): the defaults.
         chosen = result["default_adjust_for"]
     allowed = set(_adjustable_columns(result))
@@ -1083,7 +1090,7 @@ def _fix_offer_row(source_key: str, fix: str, col: str, description: str, param,
                 lines = [f"row {i + 1:,}: {label} → replaced with a marker" for i, label in evidence[:8]]
             else:
                 preview_fixes: dict = {fix: param if param is not None else [col]}
-                if fix in ("leading_zeros", "date_iso", "units", "outliers", "impute"):
+                if fix in ("leading_zeros", "date_iso", "coded_units", "units", "outliers", "impute"):
                     preview_fixes = {fix: {col: param}}
                 preview, _ = apply_safe_fixes([{col: v} for _, v in evidence[:8]], preview_fixes, [], reason="preview")
                 pii = is_pii_like_column(col)
@@ -1097,6 +1104,20 @@ def _fix_offer_row(source_key: str, fix: str, col: str, description: str, param,
                 st.caption(f"...and {len(evidence) - 8:,} more.")
             if fix == "numeric_format":
                 st.caption("Percentages (e.g. 45%) are left as-is: whether they mean 45 or 0.45 depends on the column.")
+
+
+def _verb(n: int, one: str, many: str) -> str:
+    """The verb agreeing with a count: "1 value appears", "2 values appear"."""
+    return one if n == 1 else many
+
+
+def _limit(x: float) -> str:
+    """An outlier limit for display: 275,000 or 12.5, never 2.75e+05."""
+    if abs(x) >= 1000 or x == int(x):
+        return f"{x:,.0f}"
+    if abs(x) < 1:  # small-scale data: keep significant digits (0.0012, not 0)
+        return f"{x:.3g}"
+    return f"{x:,.2f}".rstrip("0").rstrip(".")
 
 
 def _approval_buttons(recommended: list[str], every: list[str], where: str, approved: int) -> None:
@@ -1145,6 +1166,8 @@ def _approval_model(
     column_types: dict,
     id_like_defaults: list[str],
     default_primary_key: list[str],
+    unit_conversions: dict[str, dict[str, str]],
+    coded_unit_rules: dict[str, dict],
     sentinels: dict,
     ambiguous_dates: dict,
     category_clusters: dict,
@@ -1236,6 +1259,14 @@ def _approval_model(
              unit_fix_params(u),
              find_unit_inconsistency_evidence(rows, col, u["boundary"], u["minority_side"], (u["minority_min"], u["minority_max"])))
         )
+    for col, conversions in unit_conversions.items():
+        coded = [(i, v) for i, r in enumerate(rows) if (v := str(r.get(col, "")).strip()) in conversions]
+        example = next(iter(sorted(conversions.items())))
+        fix_offers.append(
+            ("coded_units", col,
+             (f"convert {_n(len(coded), 'value', spec=',')} the codebook records in another unit "
+              f"(e.g. {example[0]} → {example[1]})"), coded_unit_rules[col], coded)
+        )
     for col, serials in excel_serial_findings.items():
         fix_offers.append(
             ("excel_dates", col, f"{_n(len(serials), 'date', spec=',')} stored as Excel numbers (e.g. 45000 = 2023-03-15)", None,
@@ -1253,7 +1284,7 @@ def _approval_model(
             if col not in primary_key and fix not in JUDGMENT_FIXES:
                 recommended.append(key)
             if state.get(key, False):
-                if fix in ("leading_zeros", "date_iso", "units", "outliers", "impute"):
+                if fix in ("leading_zeros", "date_iso", "coded_units", "units", "outliers", "impute"):
                     approved_fixes.setdefault(fix, {})[col] = param
                 else:
                     approved_fixes.setdefault(fix, []).append(col)
@@ -1289,7 +1320,11 @@ def _approval_model(
     for col in columns:
         if col in off_limits or column_types.get(col) != "numeric" or _CODE_NAME.search(col):
             continue
+        # Codes, and values the codebook records in another unit when their
+        # conversion isn't approved (9088 is 88 kg, not an outlier to cap).
         keep = list(sentinels.get(col, []))
+        if col not in approved_fixes.get("coded_units", {}):
+            keep += sorted(unit_conversions.get(col, {}))
         values = [
             (i, number) for i, r in enumerate(staged)
             if (raw := str(r.get(col, "") or "").strip()) and raw not in keep
@@ -1309,7 +1344,7 @@ def _approval_model(
         if evidence:
             outlier_offers.append(
                 ("outliers", col,
-                 f"{_n(len(evidence), 'value', spec=',')} outside {params['lower']:,.4g} to {params['upper']:,.4g}",
+                 f"{_n(len(evidence), 'value', spec=',')} outside {_limit(params['lower'])} to {_limit(params['upper'])}",
                  params, evidence)
             )
     register(outlier_offers)
@@ -1912,6 +1947,7 @@ if workspace == "analyze":
         sheet_choice,
         dataset_type,
         len(st.session_state["dataforensics_data_bytes"]),
+        (st.session_state.get("dataforensics_codebook") or {}).get("bytes"),
     )
     investigation = _cached_investigation(*investigation_args)
     # The Insights tab re-reads the same cached result with these arguments.
@@ -1980,6 +2016,10 @@ if workspace == "analyze":
     ragged_row_count = investigation["ragged_row_count"]
     role_by_column = investigation["role_by_column"]
     rows = investigation["rows"]
+    # Rows with codebook-coded units converted (9088 -> 194 lb): what the
+    # statistics -- outliers, top-coding -- were computed from.
+    stat_rows = investigation["stat_rows"]
+    unit_conversions = investigation["unit_conversions"]
     sentinels = investigation["sentinels"]
     shape_outlier_findings = investigation["shape_outlier_findings"]
     stripped_footer_count = investigation["stripped_footer_count"]
@@ -2022,6 +2062,8 @@ if workspace == "analyze":
         column_types=column_types,
         id_like_defaults=id_like_defaults,
         default_primary_key=investigation["default_primary_key"],
+        unit_conversions=investigation["unit_conversions"],
+        coded_unit_rules=investigation["coded_unit_rules"],
         sentinels=sentinels,
         ambiguous_dates=ambiguous_dates,
         category_clusters=category_clusters,
@@ -2331,7 +2373,10 @@ if workspace == "analyze":
             attention_log.append("warning")
             total_shape_outlier_rows = sum(f["outlier_count"] for f in shape_outlier_findings.values())
             n = len(shape_outlier_findings)
-            _summary_row(f"{_n(total_shape_outlier_rows, 'value')} across {n} column{'s' if n != 1 else ''} that don't match the column's own format", "warning")
+            _summary_row(
+                f"{_n(total_shape_outlier_rows, 'value')} across {n} column{'s' if n != 1 else ''} that "
+                f"{'doesn' if total_shape_outlier_rows == 1 else 'don'}'t match the column's own format", "warning"
+            )
         if whitespace_anomaly_counts:
             attention_log.append("warning")
             n = sum(whitespace_anomaly_counts.values())
@@ -2362,6 +2407,13 @@ if workspace == "analyze":
             attention_log.append("warning")
             n = sum(len(v) for v in sentinels.values())
             _summary_row(f"{n} possible missing-value code{'s' if n != 1 else ''} ({', '.join(sentinels.keys())})", "warning", where="review")
+        if unit_conversions:
+            attention_log.append("warning")
+            n = sum(1 for r in rows for c, m in unit_conversions.items() if str(r.get(c) or "").strip() in m)
+            _summary_row(
+                f"{n} value{'s' if n != 1 else ''} the codebook records in another unit ({', '.join(unit_conversions)})",
+                "warning", where="review",
+            )
         if ambiguous_dates:
             attention_log.append("warning")
             n = len(ambiguous_dates)
@@ -2752,8 +2804,8 @@ if workspace == "analyze":
                     + "</div></div>",
                     unsafe_allow_html=True,
                 )
-                outlier_evidence = find_outlier_evidence(rows, c)
-                strip = _value_strip(rows, c, {i for i, _ in outlier_evidence}, "Outside the usual range", "Other values",
+                outlier_evidence = find_outlier_evidence(stat_rows, c, set(sentinels.get(c, [])))
+                strip = _value_strip(stat_rows, c, {i for i, _ in outlier_evidence}, "Outside the usual range", "Other values",
                                      exclude=set(sentinels.get(c, [])))
                 if strip is not None:
                     st.altair_chart(strip, width="stretch")
@@ -2777,7 +2829,7 @@ if workspace == "analyze":
                         f"observed maximum ({top_value}), suggesting a survey/export ceiling rather than a genuine "
                         "natural maximum."
                     ),
-                    lines=_evidence_lines(c, find_top_code_evidence(rows, c, top_value)),
+                    lines=_evidence_lines(c, find_top_code_evidence(stat_rows, c, top_value)),
                     not_known="Whether this ceiling reflects a genuine natural maximum, or a survey/export cap where the true value could actually be higher.",
                     recommended_action="Review manually. DataForensics never assumes or corrects a top-coding ceiling.",
                 )
@@ -3357,9 +3409,13 @@ if workspace == "analyze":
                     with st.container(border=True):
                         c1, c2, c3 = st.columns([0.5, 2.5, 2])
                         c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
+                        code_label = investigation["code_labels"].get(col, {}).get(val)
                         c2.markdown(
                             f'<div class="dataforensics-card-title">{_esc(col)} = "{_visualize_whitespace(val)}"</div>'
-                            f'<div class="dataforensics-card-evidence">looks like a common missing-value convention</div>',
+                            '<div class="dataforensics-card-evidence">'
+                            + (f'the codebook labels it "{_esc(code_label)}"' if code_label
+                               else "looks like a common missing-value convention")
+                            + "</div>",
                             unsafe_allow_html=True,
                         )
                         # A numeric column gets a blank cell by default, so the cleaned
@@ -3376,7 +3432,10 @@ if workspace == "analyze":
                         sentinel_share = len(sentinel_evidence_rows) / non_null_count if non_null_count else 0.0
                         _evidence_panel(
                             rule=(
-                                f'"{val}" is {sentinel_share:.1%} of {col}\'s non-null values and case-insensitively '
+                                f'"{val}" is {sentinel_share:.1%} of {col}\'s non-null values, and the codebook '
+                                f'labels it "{code_label}".'
+                                if code_label
+                                else f'"{val}" is {sentinel_share:.1%} of {col}\'s non-null values and case-insensitively '
                                 "matches a common missing-value convention: "
                                 + ", ".join(f'"{s}"' for s in sorted(COMMON_SENTINEL_STRINGS))
                             ),
@@ -3677,14 +3736,21 @@ if workspace == "analyze":
 
             st.markdown(_bucket_header("shield", "Safety checks"), unsafe_allow_html=True)
             sc1, sc2, sc3 = st.columns(3)
-            sc1.metric("Rows", f"{safety['row_count']['before']:,} → {safety['row_count']['after']:,}")
+            # The cleaned file's row count: the safety check itself compares
+            # before duplicate removal (every value fix keeps every row).
+            removed_rows = cleaning_result["rows_removed"]
+            sc1.metric("Rows", f"{safety['row_count']['before']:,} → {safety['row_count']['after'] - removed_rows:,}")
             sc2.metric("Columns", f"{safety['column_count']['before']} → {safety['column_count']['after']}")
             sc3.metric(
                 "Unique primary keys",
                 f"{safety['primary_key_uniqueness']['before']:,} → {safety['primary_key_uniqueness']['after']:,}",
             )
             checks = [
-                ("Row count preserved", safety["row_count"]["passed"]),
+                (
+                    f"Every value fix kept every row ({_n(removed_rows, 'exact duplicate')} removed)"
+                    if removed_rows else "Row count preserved",
+                    safety["row_count"]["passed"],
+                ),
                 ("Column set preserved", safety["column_count"]["passed"]),
                 ("No primary-key values collapsed together", safety["primary_key_uniqueness"]["passed"]),
             ]
@@ -3768,7 +3834,10 @@ if workspace == "analyze":
             input_sha256 = hashlib.sha256(st.session_state["dataforensics_data_bytes"]).hexdigest()
             output_sha256 = hashlib.sha256(cleaned_csv.encode("utf-8")).hexdigest()
             cleaned_name = f"cleaned_{Path(st.session_state['dataforensics_data_name']).stem}.csv"
-            after = _cached_investigation(cleaned_csv.encode("utf-8"), cleaned_name, None, dataset_type, len(cleaned_csv.encode("utf-8")))
+            after = _cached_investigation(
+                cleaned_csv.encode("utf-8"), cleaned_name, None, dataset_type, len(cleaned_csv.encode("utf-8")),
+                (st.session_state.get("dataforensics_codebook") or {}).get("bytes"),
+            )
             after_expectations = [evaluate_expectation(transformed_rows, spec) for spec in expectation_specs]
             _section("before-after", "Before → After", "The same checks, re-run on the cleaned file.")
             ba1, ba2, ba3, ba4 = st.columns(4)
@@ -3887,6 +3956,8 @@ if workspace == "analyze":
                 column_order_findings=column_order_findings,
                 conditional_column_findings=conditional_column_findings,
                 pii_content_findings=pii_content_findings,
+                after=after,
+                code_labels=investigation["code_labels"],
             )
             audit_report_html = build_audit_report_html(
                 file_name=st.session_state["dataforensics_data_name"],
@@ -3905,6 +3976,8 @@ if workspace == "analyze":
                 input_sha256=input_sha256,
                 output_sha256=output_sha256,
                 rows_removed=len(rows) - len(transformed_rows),
+                stat_rows=stat_rows,
+                exclude_codes=investigation["exclude_codes"],
                 checks_performed=[f"{c['Check ID']} {c['Check']}" for c in check_catalog if c["Status"] != "Not applicable"]
                 + [f"Expectation: {spec_result['rule']}" for spec_result in expectation_results],
             )
@@ -3933,7 +4006,7 @@ if workspace == "analyze":
                 file_name=f"cleaned_{st.session_state['dataforensics_data_name']}", mime="text/csv", width="stretch",
             )
             dl2.download_button(
-                "data_dictionary.html", icon=":material/download:", data=render_html("Data Dictionary", dictionary),
+                "data_dictionary.html", icon=":material/download:", data=render_html(f"Data Dictionary — {st.session_state['dataforensics_data_name']} (before cleaning)", dictionary),
                 file_name="data_dictionary.html", mime="text/html", width="stretch",
             )
             dl3.download_button(
@@ -4035,6 +4108,8 @@ if workspace == "reference":
 
 if workspace == "insights":
     insight_args = st.session_state.get("dataforensics_insight_args")
+    if insight_args:  # with the codebook as it is now (it can be added or removed on this tab)
+        insight_args = (*insight_args[:5], (st.session_state.get("dataforensics_codebook") or {}).get("bytes"))
     st.markdown('<span id="insights-tab" class="df-anchor"></span>', unsafe_allow_html=True)
     if not insight_args:
         st.markdown(
@@ -4049,10 +4124,10 @@ if workspace == "insights":
     adjustable = _adjustable_columns(result)
     if (
         "dataforensics_adjust_for" not in st.session_state
-        or st.session_state.get("dataforensics_adjust_for_source") != insight_args[1:]
+        or st.session_state.get("dataforensics_adjust_for_source") != insight_args[1:5]
     ):
         st.session_state["dataforensics_adjust_for"] = list(result["default_adjust_for"])
-        st.session_state["dataforensics_adjust_for_source"] = insight_args[1:]
+        st.session_state["dataforensics_adjust_for_source"] = insight_args[1:5]
     else:
         st.session_state["dataforensics_adjust_for"] = [
             c for c in st.session_state["dataforensics_adjust_for"] if c in adjustable
@@ -4258,7 +4333,7 @@ if workspace == "multi":
                     if is_pii_like_column(cand["column_b"]):
                         st.write(f"Examples: {_PII_EVIDENCE_MASK} ({len(integrity['orphan_examples'])} shown)")
                     else:
-                        st.write("Examples:", integrity["orphan_examples"])
+                        st.write("Examples: " + ", ".join(str(v) for v in integrity["orphan_examples"]))
                 else:
                     st.success(f"Every {cand['column_b']} value in {cand['file_b']} is present in {cand['file_a']}.")
 
@@ -4268,8 +4343,10 @@ if workspace == "multi":
                     "usually has? A repeated key doesn't mean the choice is wrong (some legitimate designs "
                     "repeat a key), but it's worth knowing before treating it as one."
                 )
+                # Stripped, as the merge matches keys ("P1" and "P1 " are one key there).
                 key_uniqueness = analyze_key_uniqueness(
-                    [str(r[cand["column_a"]]) for r in file_rows[cand["file_a"]] if r.get(cand["column_a"]) not in (None, "")]
+                    [str(r[cand["column_a"]]).strip() for r in file_rows[cand["file_a"]]
+                     if str(r.get(cand["column_a"]) or "").strip()]
                 )
                 ku1, ku2, ku3 = st.columns(3)
                 ku1.metric(f"{cand['column_a']} values in {cand['file_a']}", f"{key_uniqueness['total_count']:,}")
@@ -4278,17 +4355,17 @@ if workspace == "multi":
                 if key_uniqueness["duplicate_value_count"]:
                     pii = is_pii_like_column(cand["column_a"])
                     if pii:
-                        st.warning(f"{_n(key_uniqueness['duplicate_value_count'], cand['column_a'] + ' value')} in {cand['file_a']} appear more than once.")
+                        st.warning(f"{_n(key_uniqueness['duplicate_value_count'], cand['column_a'] + ' value')} in {cand['file_a']} {_verb(key_uniqueness['duplicate_value_count'], 'appears', 'appear')} more than once.")
                     else:
                         examples = ", ".join(f"{v} (×{c})" for v, c in key_uniqueness["duplicate_examples"][:5])
-                        st.warning(f"{_n(key_uniqueness['duplicate_value_count'], cand['column_a'] + ' value')} in {cand['file_a']} appear more than once, e.g. {examples}.")
+                        st.warning(f"{_n(key_uniqueness['duplicate_value_count'], cand['column_a'] + ' value')} in {cand['file_a']} {_verb(key_uniqueness['duplicate_value_count'], 'appears', 'appear')} more than once, e.g. {examples}.")
                 else:
                     st.success(f"Every {cand['column_a']} value in {cand['file_a']} is unique.")
 
                 st.subheader("Relationship shape")
                 st.caption(
                     f"How {cand['file_a']}.{cand['column_a']} and {cand['file_b']}.{cand['column_b']} relate — "
-                    "discovery only, DataForensics never joins or merges these files."
+                    "discovery only; nothing is merged unless you approve it under Merge these files below."
                 )
                 child_values_all = [
                     str(r[cand["column_b"]]) for r in file_rows[cand["file_b"]] if r.get(cand["column_b"]) not in (None, "")
@@ -4432,7 +4509,17 @@ if workspace == "multi":
                     mc1, mc2, mc3 = st.columns(3)
                     mc1.metric("Output rows", f"{merge_preview['total_count']:,}")
                     mc2.metric("Matched", f"{merge_preview['matched_count']:,}")
-                    mc3.metric("Unmatched", f"{merge_preview['unmatched_count']:,}")
+                    mc3.metric(
+                        "Kept without a match" if merge_join_type == "left" else "Dropped (no match)",
+                        f"{merge_preview['unmatched_count']:,}",
+                    )
+                    if key_uniqueness["duplicate_value_count"]:
+                        st.warning(
+                            f"{_n(key_uniqueness['duplicate_value_count'], cand['column_a'] + ' value')} "
+                            f"{_verb(key_uniqueness['duplicate_value_count'], 'repeats', 'repeat')} in "
+                            f"{cand['file_a']} (see Key uniqueness above). For those, the merge attaches the first "
+                            f"matching {cand['file_a']} row and ignores the others."
+                        )
                     shared_merge_columns = sorted(
                         (set(file_rows[cand["file_a"]][0]) & set(file_rows[cand["file_b"]][0]))
                         - {cand["column_a"], cand["column_b"]}
@@ -4443,7 +4530,8 @@ if workspace == "multi":
                             f"Column(s) present in both files ({', '.join(shared_merge_columns)}) are kept as BOTH "
                             f"separately (e.g. \"{example_col} ({cand['file_a']})\" and \"{example_col} "
                             f"({cand['file_b']})\") rather than one silently overwriting the other — check "
-                            "Value reconciliation above first if you want to know exactly where they disagree."
+                            + ("Value reconciliation" if cardinality["relationship"] == "one_to_one" else "Repeated-key consistency")
+                            + " above first if you want to know exactly where they disagree."
                         )
                     approve_merge = st.checkbox(
                         "I've reviewed this and approve merging these files",
