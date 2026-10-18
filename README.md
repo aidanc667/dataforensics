@@ -48,8 +48,8 @@ The Insights tab ranks the strongest patterns in the data in plain language, for
 
 ## Sample datasets
 
-- **ACS PUMS** (U.S. Census): real person records with income top-coding and skip-pattern gaps.
 - **BRFSS** (CDC): real health-survey answers with `7777`/`9999` missing-value codes and age capped at 80.
+- **ACS PUMS** (U.S. Census): real person records with income top-coding and skip-pattern gaps.
 - **Messy CSV Example**: a small synthetic intake form built to trigger every fix.
 
 Sources and details are in [`fixtures/demos/README.md`](fixtures/demos/README.md).

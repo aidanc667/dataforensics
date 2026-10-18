@@ -657,7 +657,7 @@ def _card_titles(at: AppTest) -> list[str]:
 
 
 def test_example_dataset_comes_with_its_codebook_and_it_can_be_removed():
-    at = _example_on_insights(1, "brfss_survey_sample.csv")
+    at = _example_on_insights(0, "brfss_survey_sample.csv")
     assert any("brfss_survey_sample.codebook.csv" in m.value for m in at.markdown)
     # With the codebook, 7 (Don't know) and 9 (Refused) are no-answer codes,
     # so the skip is the survey's real rule: asked only if smoked 100.
@@ -677,7 +677,7 @@ def test_example_dataset_comes_with_its_codebook_and_it_can_be_removed():
 
 
 def test_choosing_what_to_retest_within_changes_what_is_held_back():
-    at = _example_on_insights(0, "acs_pums_person_dc.csv")
+    at = _example_on_insights(1, "acs_pums_person_dc.csv")
     assert at.multiselect(key="dataforensics_adjust_for").value == ["age_years", "sex"]
     assert any(p.endswith("person_number = 4") for p in _held_back_reasons(at))
     at.multiselect(key="dataforensics_adjust_for").set_value([]).run(timeout=60)
