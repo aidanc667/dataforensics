@@ -1735,6 +1735,16 @@ if _restore_prefixes:
 # format -- none of which a pre-coded, dateless census/survey extract
 # can ever contain.
 _EXAMPLE_DATASETS = {
+    "BRFSS (CDC)": {
+        "file": "brfss_survey_sample.csv",
+        "tag": "Real · CDC",
+        "short": "Health survey responses with real 7 / 9 / 9999 missing-value codes and age top-coded at 80.",
+        "caption": (
+            "CDC, 2023 Behavioral Risk Factor Surveillance System — survey respondent "
+            "sample. Real self-reported health survey data with textbook missing-value "
+            "sentinel codes (7/9/9999 = don't know/refused) and age top-coded at 80."
+        ),
+    },
     "ACS PUMS (Census)": {
         "file": "acs_pums_person_dc.csv",
         "tag": "Real · U.S. Census",
@@ -1744,16 +1754,6 @@ _EXAMPLE_DATASETS = {
             "person records, Washington D.C. Real household/income microdata with "
             "genuine Census top-coding (income-to-poverty ratio capped at 501) and "
             "skip-pattern missingness (education not asked of children under 3)."
-        ),
-    },
-    "BRFSS (CDC)": {
-        "file": "brfss_survey_sample.csv",
-        "tag": "Real · CDC",
-        "short": "Health survey responses with real 7 / 9 / 9999 missing-value codes and age top-coded at 80.",
-        "caption": (
-            "CDC, 2023 Behavioral Risk Factor Surveillance System — survey respondent "
-            "sample. Real self-reported health survey data with textbook missing-value "
-            "sentinel codes (7/9/9999 = don't know/refused) and age top-coded at 80."
         ),
     },
     "Messy CSV Example": {
