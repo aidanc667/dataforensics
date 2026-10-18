@@ -678,3 +678,42 @@ class TestBuildAuditReportHtml:
         html = self._build(findings=findings)
         assert "Ada Lovelace" not in html
         assert PII_EVIDENCE_MASK in html
+
+
+def test_profile_summary_skips_missing_value_codes():
+    # Regression (accuracy audit): the report's profile averaged 7777/9999
+    # codes in as weights (BRFSS: "Range 100-9,999, Mean 1,324").
+    rows = [{"w": "150"}, {"w": "170"}, {"w": "9999"}, {"w": "190"}]
+    summary = numeric_summary(rows, "w", {"9999"})
+    assert (summary["min"], summary["max"], summary["mean"], summary["median"]) == (150.0, 190.0, 170.0, 170.0)
+
+
+def test_findings_a_fix_removed_are_resolved_by_the_cleaned_file():
+    # Regression (accuracy audit): FIPS codes padded back to two digits were
+    # still listed as "not shaped like a FIPS code" in Remaining Review.
+    evidence = [(0, "9"), (1, "1")]
+    before = _base_findings_kwargs(invalid_fips_findings={"state_fips": evidence}, whitespace_anomaly_counts={"name": 2})
+
+    def finding(findings, text):
+        return next(f for f in findings if text in f["title"])
+
+    no_after = build_investigation_findings(**before)
+    assert finding(no_after, "FIPS")["resolved"] == 0
+    cleaned = build_investigation_findings(**before, after={"invalid_fips_findings": {}, "whitespace_anomaly_counts": {}})
+    assert finding(cleaned, "FIPS")["resolved"] == 2 and finding(cleaned, "whitespace")["resolved"] == 1
+    partly = build_investigation_findings(**before, after={"invalid_fips_findings": {"state_fips": [(0, "9")]},
+                                                           "whitespace_anomaly_counts": {"name": 1}})
+    assert finding(partly, "FIPS")["resolved"] == 1 and finding(partly, "whitespace")["resolved"] == 0
+
+
+
+def test_distribution_finding_resolves_only_when_the_cleaned_column_is_clear():
+    from dataforensics.audit_report import _distribution_clear
+
+    numeric_clear = {"dictionary": {"w": {"outliers": {"outlier_count": 0}, "top_code_spike": None}}}
+    still_flagged = {"dictionary": {"w": {"outliers": {"outlier_count": 3}, "top_code_spike": None}}}
+    no_longer_numeric = {"dictionary": {"w": {"outliers": None, "top_code_spike": None}}}
+    assert _distribution_clear(numeric_clear, "w") is True
+    assert _distribution_clear(still_flagged, "w") is False
+    assert _distribution_clear(no_longer_numeric, "w") is False  # a code relabelled as text
+    assert _distribution_clear(None, "w") is False

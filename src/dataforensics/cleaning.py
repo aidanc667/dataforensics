@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from functools import partial
 
 from dataforensics.advanced_checks import excel_serial_to_iso
+from dataforensics.codebook import convert_coded_unit
 from dataforensics.config_schema import find_chained_keys, find_mapping_conflicts
 from dataforensics.harmonize import apply_transformations, compute_safety_report
 from dataforensics.investigate import (
@@ -41,21 +42,25 @@ PII_MASK_PLACEHOLDER = "[masked: potential identifier pattern detected]"
 # in the final text, and missing values are filled after everything that
 # could empty a cell (a mapped missing-value code, a blanked outlier).
 FIX_ORDER = (
-    "mojibake", "invisible", "whitespace", "numeric_format", "leading_zeros", "excel_dates", "date_iso", "units",
-    "outliers", "pii_mask", "impute",
+    "mojibake", "invisible", "whitespace", "numeric_format", "leading_zeros", "excel_dates", "date_iso",
+    "coded_units", "units", "outliers", "pii_mask", "impute",
 )
 # Fixes that need a person's judgment -- never ticked by "Approve all
 # recommended fixes".
 JUDGMENT_FIXES = ("outliers", "pii_mask", "impute")
+# What a missing-value code in a text column is mapped to by default (a
+# number column gets an empty cell). Still missing, and scored as missing.
+MISSING_LABEL = "Missing"
 
 FIX_LABELS = {
     "invisible": "Remove hidden/invisible characters",
-    "whitespace": "Trim leading/trailing and doubled whitespace",
+    "whitespace": "Trim extra spaces and tabs",
     "mojibake": "Repair encoding corruption",
     "numeric_format": "Convert formatted numbers to plain numbers",
     "leading_zeros": "Restore leading zeros",
     "excel_dates": "Convert Excel date numbers to dates",
     "date_iso": "Standardize dates to YYYY-MM-DD",
+    "coded_units": "Convert values the codebook records in another unit",
     "units": "Convert mixed units to one unit",
     "outliers": "Treat outliers",
     "pii_mask": "Mask personal data in text",
@@ -63,7 +68,7 @@ FIX_LABELS = {
 }
 
 _ZERO_WIDTH = re.compile("[​‌‍‎‏﻿⁠\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_DOUBLED_SPACE = re.compile(r"\s{2,}")
+_DOUBLED_SPACE = re.compile(r"\s{2,}|\t")
 _DECORATED_NUMBER = re.compile(r"^([\$€£])?\s*(-?[\d,]*\.?\d+)\s*([kKmMbB])?$")
 _MAGNITUDE = {"k": Decimal(1_000), "m": Decimal(1_000_000), "b": Decimal(1_000_000_000)}
 
@@ -76,10 +81,10 @@ def fix_invisible(value: str) -> str:
 
 
 def fix_whitespace(value: str) -> str:
-    """Strip leading/trailing whitespace and collapse any run of 2+
-    whitespace characters (spaces, tabs, newlines) to one space -- the
-    same pattern detect_whitespace_anomalies flags, so an approved fix
-    clears every value it was shown for."""
+    """Strip leading/trailing whitespace and turn any run of 2+
+    whitespace characters (spaces, tabs, newlines), or a single tab, into
+    one space -- the same pattern detect_whitespace_anomalies flags, so an
+    approved fix clears every value it was shown for."""
     return _DOUBLED_SPACE.sub(" ", value.strip())
 
 
@@ -253,6 +258,47 @@ def is_fill_candidate(column_type: str | None, filled: int, distinct: int) -> bo
     return column_type == "categorical" and filled > 0 and distinct <= max(2, filled // 2)
 
 
+def blank_only_where(
+    rows: list[dict], column: str, numeric_columns: list[str], exclude: dict[str, set[str]] | None = None
+) -> tuple[str, float, float] | None:
+    """(other column, low, high) when every blank in `column` falls in a
+    range of another numeric column that no filled row reaches -- wages
+    blank for exactly the ages 0-14, education for ages 0-2. Such blanks
+    mean "not asked / not applicable", so filling them would invent answers
+    (a toddler's wage). Needs 5+ rows on each side; None otherwise."""
+    exclude = exclude or {}
+    blank = [str(r.get(column) or "").strip() == "" for r in rows]
+    if sum(blank) < 5:
+        return None
+    for other in numeric_columns:
+        if other == column:
+            continue
+        codes = exclude.get(other, set())
+        on_blank: list[float] = []
+        on_filled: list[float] = []
+        in_order: list[float] = []
+        for r, is_blank in zip(rows, blank, strict=True):
+            raw = str(r.get(other) or "").strip()
+            value = None if raw in codes else parse_finite_float(raw)
+            if value is not None:
+                (on_blank if is_blank else on_filled).append(value)
+                in_order.append(value)
+        # A column that only rises (or falls) down the file -- a row number,
+        # an enrolment sequence -- would make any run of trailing blanks look
+        # "not applicable" (a measure that simply stopped being recorded).
+        # (Only when it's also nearly all-unique, like an index: a file sorted
+        # by age still has a real "not applicable" age range.)
+        pairs = list(zip(in_order, in_order[1:]))
+        index_like = len(set(in_order)) >= 0.9 * len(in_order)
+        if index_like and (all(a <= b for a, b in pairs) or all(a >= b for a, b in pairs)):
+            continue
+        if len(on_blank) >= 5 and len(on_filled) >= 5 and (
+            max(on_blank) < min(on_filled) or min(on_blank) > max(on_filled)
+        ):
+            return other, min(on_blank), max(on_blank)
+    return None
+
+
 def outlier_fix_params(outliers: dict, keep: list[str], action: str = "cap", *, whole_numbers: bool = False) -> dict:
     """The outliers-fix parameters from a detect_outliers result: the same
     IQR limits the check used (Q1 - 1.5 IQR, Q3 + 1.5 IQR). For a column of
@@ -340,7 +386,7 @@ def validate_fixes(fixes: dict) -> None:
             isinstance(fixes[name], list) and all(isinstance(c, str) for c in fixes[name])
         ):
             raise ValueError(f"safe fix {name!r} must be a list of column names")
-    for name in ("leading_zeros", "date_iso", "units", "outliers", "impute"):
+    for name in ("leading_zeros", "date_iso", "coded_units", "units", "outliers", "impute"):
         if name in fixes and not isinstance(fixes[name], dict):
             raise ValueError(f"safe fix {name!r} must be a mapping of column name -> setting, got {fixes[name]!r}")
     for col, width in fixes.get("leading_zeros", {}).items():
@@ -349,6 +395,15 @@ def validate_fixes(fixes: dict) -> None:
     for col, fmt in fixes.get("date_iso", {}).items():
         if not isinstance(fmt, str) or "%" not in fmt:
             raise ValueError(f"date_iso format for {col!r} must be a strptime format string, got {fmt!r}")
+    for col, rule in fixes.get("coded_units", {}).items():
+        if not isinstance(rule, dict) or set(rule) != {"low", "high", "offset", "unit"}:
+            raise ValueError(f"coded_units for {col!r} needs exactly high, low, offset, unit")
+        if rule["unit"] not in ("kg", "cm"):
+            raise ValueError(f"coded_units unit for {col!r} must be 'kg' or 'cm'")
+        if any(isinstance(rule[k], bool) or not isinstance(rule[k], (int, float)) for k in ("low", "high", "offset")):
+            raise ValueError(f"coded_units low, high and offset for {col!r} must be numbers")
+        if rule["low"] >= rule["high"]:
+            raise ValueError(f"coded_units low for {col!r} must be below high")
     for col, params in fixes.get("units", {}).items():
         if not isinstance(params, dict) or set(params) != _UNIT_PARAMS:
             raise ValueError(f"units fix for {col!r} needs exactly {', '.join(sorted(_UNIT_PARAMS))}")
@@ -398,6 +453,8 @@ def _fixers(fixes: dict) -> list[tuple[str, str, Callable[[str], str]]]:
             plan.extend((name, col, partial(fix_leading_zeros, width=w)) for col, w in fixes.get(name, {}).items())
         elif name == "date_iso":
             plan.extend((name, col, partial(fix_date_iso, source_format=f)) for col, f in fixes.get(name, {}).items())
+        elif name == "coded_units":
+            plan.extend((name, col, partial(_convert_coded, rule=r, column=col)) for col, r in fixes.get(name, {}).items())
         elif name == "units":
             plan.extend((name, col, partial(fix_units, **p)) for col, p in fixes.get(name, {}).items())
         elif name == "outliers":
@@ -412,8 +469,17 @@ def _fill(_empty: str, *, value: str) -> str:
     return value
 
 
+def _convert_coded(value: str, *, rule: dict, column: str) -> str:
+    """A value the codebook records in another unit, in the column's own
+    unit ("9088" -> "194"); anything else unchanged. The rule (range,
+    offset, unit) rather than a list of values, so re-running the rules on
+    a new release converts codes that release adds."""
+    converted = convert_coded_unit(value, (rule["low"], rule["high"], rule["offset"], rule["unit"]), column)
+    return value if converted is None else converted
+
+
 def apply_safe_fixes(
-    rows: list[dict], fixes: dict, primary_key: list[str], *, reason: str
+    rows: list[dict], fixes: dict, primary_key: list[str], *, reason: str, row_numbers: bool = False
 ) -> tuple[list[dict], list[dict]]:
     """Apply approved value-level fixes. Returns (new rows, mutations).
     Row count and order are preserved (duplicate removal is separate --
@@ -424,9 +490,11 @@ def apply_safe_fixes(
     plan = _fixers(fixes)
     out_rows: list[dict] = []
     mutations: list[dict] = []
-    for row in rows:
+    for row_number, row in enumerate(rows, start=1):
         new_row = dict(row)
         row_key = {k: row.get(k) for k in primary_key}
+        if row_numbers:  # see apply_transformations
+            row_key["row"] = row_number
         for name, column, fixer in plan:
             original = new_row.get(column)
             empty = original is None or original == ""
@@ -452,7 +520,7 @@ def apply_safe_fixes(
 
 
 def drop_duplicate_rows(
-    rows: list[dict], duplicates: list[dict], primary_key: list[str], *, reason: str
+    rows: list[dict], duplicates: list[dict], primary_key: list[str], *, reason: str, row_numbers: bool = False
 ) -> tuple[list[dict], list[dict]]:
     """Remove the rows detect_duplicate_rows flagged (each `duplicates`
     entry has row_index and duplicate_of_row_index), keeping the first
@@ -469,7 +537,7 @@ def drop_duplicate_rows(
         to_remove[i] = keep
     mutations = [
         {
-            "row_key": {k: rows[i].get(k) for k in primary_key},
+            "row_key": {k: rows[i].get(k) for k in primary_key} | ({"row": i + 1} if row_numbers else {}),
             "column": "(entire row)",
             "original_value": f"data row {i + 1}",
             "new_value": f"(removed: exact duplicate of data row {keep + 1})",
@@ -511,14 +579,17 @@ def clean_dataset(
                 raise ValueError(f"column {column!r}: {kind} would chain on {chained}")
     validate_fixes({k: v for k, v in fixes.items()})
     check_judgment_fixes(rules, fixes, primary_key)
-    out, mutations = apply_transformations(rows, rules, reason=reason)
+    # A key that repeats can't say which row a change was made in, so the
+    # log then also names the data row.
+    row_numbers = len({tuple(r.get(k) for k in primary_key) for r in rows}) < len(rows)
+    out, mutations = apply_transformations(rows, rules, reason=reason, row_numbers=row_numbers)
     mask_logged_personal_data(mutations, fixes.get("pii_mask", []))
     value_fixes = {k: v for k, v in fixes.items() if k != "drop_exact_duplicate_rows"}
-    out, fix_mutations = apply_safe_fixes(out, value_fixes, primary_key, reason=reason)
+    out, fix_mutations = apply_safe_fixes(out, value_fixes, primary_key, reason=reason, row_numbers=row_numbers)
     mutations += fix_mutations
     safety = compute_safety_report(rows, out, primary_key)
     removed: list[dict] = []
     if safety["all_passed"] and fixes.get("drop_exact_duplicate_rows"):
-        out, removed = drop_duplicate_rows(out, duplicates, primary_key, reason=reason)
+        out, removed = drop_duplicate_rows(out, duplicates, primary_key, reason=reason, row_numbers=row_numbers)
         mutations += removed
     return {"rows": out, "mutations": mutations, "safety": safety, "rows_removed": len(removed)}

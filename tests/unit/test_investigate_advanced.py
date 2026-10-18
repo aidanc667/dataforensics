@@ -413,3 +413,19 @@ def test_check_repeated_key_column_consistency_ignores_singleton_keys():
     rows = [{"participant_id": "1", "sex": "F"}, {"participant_id": "2", "sex": "M"}]
     result = check_repeated_key_column_consistency(rows, "participant_id", ["sex"])
     assert result == {}
+
+
+def test_shared_keys_skip_low_distinct_columns_and_rank_the_id_first():
+    # Regression (accuracy audit): "sex <-> sex" overlapped 100% and was
+    # offered -- and pre-selected -- as a join key.
+    parts = [{"pid": f"P{i}", "sex": "MF"[i % 2], "birth_year": str(1950 + i % 30)} for i in range(40)]
+    registry = [{"pid": f"P{i}", "sex": "MF"[i % 2], "birth_year": str(1950 + i % 30)} for i in range(40)]
+    candidates = discover_shared_key_columns({"participants.csv": parts, "registry.csv": registry})
+    assert [c["column_a"] for c in candidates] == ["pid", "birth_year"]  # no sex; pid (40/40 distinct) first
+
+
+
+def test_shared_keys_in_tiny_files_need_an_id_name():
+    tiny = {"a.csv": [{"sex": "M", "participant_id": "1"}, {"sex": "F", "participant_id": "2"}],
+            "b.csv": [{"sex": "M", "participant_id": "1"}, {"sex": "F", "participant_id": "2"}]}
+    assert [c["column_a"] for c in discover_shared_key_columns(tiny)] == ["participant_id"]

@@ -8,6 +8,7 @@ re-run all of it) and run the identical checks again on the cleaned
 output for a before/after comparison.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,12 @@ from dataforensics.advanced_checks import (
     synonym_clusters,
     temperature_columns,
 )
-from dataforensics.cleaning import find_leading_zero_candidates
+from dataforensics.cleaning import MISSING_LABEL, find_leading_zero_candidates
+from dataforensics.codebook import (
+    coded_unit_ranges,
+    convert_coded_unit,
+    no_answer_codes,
+)
 from dataforensics.dictionary import (
     build_data_dictionary,
     count_stripped_footer_lines,
@@ -102,21 +108,97 @@ from dataforensics.quality_score import compute_quality_score
 from dataforensics.summary import build_check_catalog, build_insights, build_null_table
 from dataforensics.typing_guards import is_id_like_column, is_pii_like_column
 
+_RECORD_NUMBER_NAME = re.compile(
+    r"(^|_)(person|member|line|seq|sequence|number|num|visit|wave|round|index|date|time)(_|$)", re.IGNORECASE
+)
+# Codes for a place, not a record: many people share a ZIP or a county.
+_PLACE_CODE_NAME = re.compile(r"(^|_)(zip|zipcode|postal|postcode|fips|state|county|puma|tract)(_|$)", re.IGNORECASE)
 
-def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, data_size: int) -> dict:
+
+def suggest_primary_key(rows: list[dict], columns: list[str], id_like: list[str]) -> list[str]:
+    """The default record key: the first ID-like column (not a place code
+    such as a ZIP or FIPS code) that is unique and never blank; otherwise
+    the first such column plus a record-number or date column that makes
+    every row unique ("household_id" + "person_number"). Falls back to the
+    first record ID, or else the first column that isn't a place code, so
+    the user still starts from the best guess."""
+    # Not a place code, and not personal data (a date of birth or phone
+    # number would make a poor -- and, in the audit trail, masked -- key).
+    record_ids = [c for c in id_like if not _PLACE_CODE_NAME.search(c) and not is_pii_like_column(c)]
+    fallback = record_ids[:1] or [c for c in columns if not _PLACE_CODE_NAME.search(c)][:1] or columns[:1]
+    if not rows or not fallback:
+        return fallback
+
+    def unique(key: list[str]) -> bool:
+        values = [tuple(str(r.get(k) or "").strip() for k in key) for r in rows]
+        return all(all(v) for v in values) and len(set(values)) == len(values)
+
+    for column in record_ids:  # any single record ID that identifies every row ("record_id")
+        if unique([column]):
+            return [column]
+    if record_ids:
+        partners = [
+            c for c in columns if c != record_ids[0] and _RECORD_NUMBER_NAME.search(c) and not is_pii_like_column(c)
+        ]
+        partners.sort(key=lambda c: len({r.get(c) for r in rows}))
+        for column in partners:
+            if unique([record_ids[0], column]):
+                return [record_ids[0], column]
+    return fallback  # without a record ID, the first column: files usually lead with their row ID
+
+
+def run_investigation(
+    data_path: Path,
+    *,
+    sheet: str | None,
+    dataset_type: str,
+    data_size: int,
+    codebook: dict[str, dict[str, str]] | None = None,
+) -> dict:
     """Every check's result for the dataset at `data_path`, keyed by name.
     `dataset_type` must be a DATASET_PROFILES key; `data_size` is the
     file's size in bytes (reported, not measured here, since the app may
-    be analyzing a header-deduplicated copy of the uploaded bytes)."""
+    be analyzing a header-deduplicated copy of the uploaded bytes).
+
+    `codebook` ({column: {code: label}}, from parse_codebook) adds what the
+    data alone can't show: codes labelled "Don't know" / "Refused" are
+    missing-value codes, and a range labelled with a unit and an offset
+    ("9023-9352": "Weight in kilograms (value minus 9000)") marks values
+    recorded in another unit, which statistics read converted."""
     if dataset_type != AUTO_PROFILE and dataset_type not in DATASET_PROFILES:
         raise ValueError(
             f"unknown dataset_type {dataset_type!r}; expected {AUTO_PROFILE!r} or one of {sorted(DATASET_PROFILES)}"
         )
     stripped_footer_count = count_stripped_footer_lines(data_path) if detect_file_format(data_path) == "delimited" else 0
-    dictionary = build_data_dictionary(data_path, sheet=sheet)
+    codebook = codebook or {}
     rows = read_rows(data_path, sheet=sheet)
+    # Values a codebook says are in another unit, with their value in the
+    # column's own unit: {"weight_lbs": {"9088": "194"}}.
+    # A value the codebook also labels "Refused" (9999 inside a 9000+ range)
+    # stays a no-answer code, not a measurement.
+    codebook_no_answer = no_answer_codes(codebook)
+    unit_conversions: dict[str, dict[str, str]] = {}
+    coded_unit_rules: dict[str, dict[str, float | str]] = {}
+    for col, spec in coded_unit_ranges(codebook).items():
+        present = {str(r.get(col) or "").strip() for r in rows} - codebook_no_answer.get(col, set())
+        converted = {raw: new for raw in present if (new := convert_coded_unit(raw, spec, col)) is not None}
+        if converted:
+            unit_conversions[col] = converted
+            coded_unit_rules[col] = {"low": spec[0], "high": spec[1], "offset": spec[2], "unit": spec[3]}
+    dictionary = build_data_dictionary(
+        data_path, sheet=sheet, numeric_overrides=unit_conversions, missing_codes=codebook_no_answer
+    )
     columns = list(dictionary.keys())
+    # Statistics (summaries, outliers, insights) read these rows, with the
+    # coded values converted; format checks and fixes read the raw rows.
+    stat_rows = rows if not unit_conversions else [
+        {**r, **changed} if (
+            changed := {c: m[cell] for c, m in unit_conversions.items() if (cell := str(r.get(c) or "").strip()) in m}
+        ) else r
+        for r in rows
+    ]
     id_like_defaults = [c for c, f in dictionary.items() if f.get("category") == "id"]
+    default_primary_key = suggest_primary_key(rows, columns, id_like_defaults)
     column_types = classify_column_types(dictionary, rows)
     # Computed once, shared by the "Suggested variable roles" expander
     # further down AND the quasi-identifier / birth-date cross-column
@@ -136,6 +218,19 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
     # column's "99" being flagged as a probable missing-value code.
     sentinel_columns = [c for c in columns if dictionary[c].get("category") != "id"]
     sentinels = detect_candidate_sentinels(rows, sentinel_columns)
+    # Codes the codebook labels as no answer ("7" = Don't know), found in the data.
+    for col, codes in codebook_no_answer.items():
+        if col in sentinel_columns:
+            present = {str(r.get(col) or "").strip() for r in rows} & codes
+            if present:
+                sentinels[col] = sorted(set(sentinels.get(col, [])) | present)
+    # What the codebook calls each flagged code ("7" -> "Don't know / Not
+    # sure"), so explanations cite it rather than a generic convention.
+    code_labels = {
+        col: {v: codebook[col][v] for v in vals if v in codebook_no_answer.get(col, set())}
+        for col, vals in sentinels.items()
+        if any(v in codebook_no_answer.get(col, set()) for v in vals)
+    }
     ambiguous_dates = detect_ambiguous_date_columns(rows, columns)
     # Gated on column_types, not on dictionary.py's "categorical"
     # classification. A column tips into "free_text" once its unique
@@ -229,7 +324,9 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
     # >=80% of a column's values, so genuine free-text (notes, comments)
     # never matches and is silently skipped -- no cost on a column this
     # doesn't apply to.
-    shape_outlier_findings = detect_value_shape_outliers(rows, columns, dictionary)
+    shape_outlier_findings = detect_value_shape_outliers(
+        rows, columns, dictionary, {c for c, t in column_types.items() if t == "date"}
+    )
 
     # Always on -- format-integrity checks that apply to any column,
     # regardless of dataset profile. Each is a distinct, independent
@@ -287,6 +384,10 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         future_evidence = find_future_date_evidence(rows, col)
         if future_evidence:
             future_date_findings[col] = future_evidence
+        # Birth dates aren't a timeline of observations: years between two
+        # people's birthdays is not a gap in coverage.
+        if (role_by_column.get(col) or {}).get("role") == "DATE_OF_BIRTH":
+            continue
         gap_result = detect_temporal_gaps(rows, col)
         if gap_result:
             temporal_gap_findings[col] = gap_result
@@ -415,7 +516,7 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
     )
     outlier_flagged_cell_count = sum((f.get("outliers") or {}).get("outlier_count", 0) for f in dictionary.values())
     top_code_flagged_cell_count = sum(
-        len(find_top_code_evidence(rows, c, f["top_code_spike"]["value"])) for c, f in top_code_cols_preview.items()
+        len(find_top_code_evidence(stat_rows, c, f["top_code_spike"]["value"])) for c, f in top_code_cols_preview.items()
     )
     ambiguous_date_cell_count = sum(ambiguous_dates.values())
     # Only the cells a fix would change: the suggested spelling itself is
@@ -483,24 +584,24 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         c for c in columns
         if dictionary[c]["category"] != "id" and not is_pii_like_column(c) and (dictionary[c]["null_count"] or c in sentinels)
     ]
-    heaping_findings = detect_heaping(rows, continuous_columns, dictionary, exclude_codes)
+    heaping_findings = detect_heaping(stat_rows, continuous_columns, dictionary, exclude_codes)
     # Rates are descriptive, so a large file is evenly sampled to bound
     # the targets x groups x rows cost.
     group_missingness = detect_group_missingness(
-        sample_rows(rows), missing_target_columns, grouping_columns, continuous_columns, exclude_codes
+        sample_rows(stat_rows), missing_target_columns, grouping_columns, continuous_columns, exclude_codes
     )
     redundant_column_groups = detect_redundant_columns(
         rows, [c for c in columns if dictionary[c]["category"] != "id"], dictionary
     )
-    rare_category_findings = detect_rare_categories(rows, columns, dictionary, exclude_codes)
+    rare_category_findings = detect_rare_categories(stat_rows, columns, dictionary, exclude_codes)
     age_dob_findings = detect_age_dob_mismatch(rows, role_by_column)
-    total_mismatch_findings = detect_total_mismatch(rows, columns, exclude_codes)
+    total_mismatch_findings = detect_total_mismatch(stat_rows, columns, exclude_codes)
     redundant_pairs = {
         frozenset((a, b)) for g in redundant_column_groups for a in g["columns"] for b in g["columns"] if a != b
     }
-    numeric_summary = numeric_summaries(rows, continuous_columns, exclude_codes)
-    associations = find_associations(rows, continuous_columns, grouping_columns, exclude_codes, redundant_pairs)
-    trends = find_trends(rows, date_typed_columns, continuous_columns, exclude_codes)
+    numeric_summary = numeric_summaries(stat_rows, continuous_columns, exclude_codes)
+    associations = find_associations(stat_rows, continuous_columns, grouping_columns, exclude_codes, redundant_pairs)
+    trends = find_trends(stat_rows, date_typed_columns, continuous_columns, exclude_codes)
 
     # (key_insights, built below once grouping columns are final.)
 
@@ -524,7 +625,8 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
     # column shaped like birth years are deliberately excluded -- "Low
     # confidence" heuristics that can fire on a coincidence.
     format_integrity_flagged_cell_count = (
-        sum(whitespace_anomaly_counts.values())
+        sum(sum(1 for r in rows if str(r.get(c) or "").strip() in m) for c, m in unit_conversions.items())
+        + sum(whitespace_anomaly_counts.values())
         + sum(invisible_char_counts.values())
         + sum(encoding_corruption_counts.values())
         + sum(f["decorated_count"] for f in numeric_representation_findings.values())
@@ -537,10 +639,21 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
     whitespace_only_cells = sum(
         1 for r in rows for c in columns if (v := r.get(c)) not in (None, "") and not str(v).strip()
     )
+    # "Missing" is the label the app maps text codes to: still no answer, so
+    # still missing. Without this, mapping "-99" to "Missing" raised
+    # completeness although no data was recovered. (Not counted twice when
+    # the label is itself flagged as a code, which completeness adds below.)
+    missing_label_cells = sum(
+        1
+        for r in rows
+        for c in columns
+        if str(r.get(c) or "").strip().casefold() == MISSING_LABEL.casefold()
+        and str(r.get(c) or "").strip() not in sentinels.get(c, ())
+    )
     quality = compute_quality_score(
         row_count=len(rows),
         column_count=len(columns),
-        null_cell_count=sum(f["null_count"] for f in dictionary.values()) + whitespace_only_cells,
+        null_cell_count=sum(f["null_count"] for f in dictionary.values()) + whitespace_only_cells + missing_label_cells,
         duplicate_row_count=len(dup_rows),
         zero_variance_column_count=sum(1 for f in dictionary.values() if f["is_zero_variance"]),
         ragged_row_count=ragged_row_count,
@@ -559,11 +672,11 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         for row in rows
         if (v := row.get(col)) in c["values"] and v != c["suggested_canonical"]
     )
-    negative_value_findings = detect_impossible_negatives(rows, columns, exclude_codes)
+    negative_value_findings = detect_impossible_negatives(stat_rows, columns, exclude_codes)
     longitudinal_findings = detect_longitudinal_inconsistencies(rows, columns, dictionary, role_by_column)
     zip_state_findings = detect_zip_state_mismatch(rows, columns)
     coordinate_findings = detect_coordinate_problems(rows, columns)
-    temperature_findings = detect_temperature_unit_mix(rows, columns, exclude_codes)
+    temperature_findings = detect_temperature_unit_mix(stat_rows, columns, exclude_codes)
     datetime_findings = detect_datetime_issues(rows, columns)
     text_personal_findings = detect_free_text_personal_details(rows, columns, dictionary)
     # Run on a sample of large files, then map evidence back to real row
@@ -589,7 +702,7 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         ] if c
     ]
     insight_inputs: dict[str, Any] = {
-        "rows": sample_rows(rows),
+        "rows": sample_rows(stat_rows),
         "continuous_columns": continuous_columns,
         "grouping_columns": grouping_columns,
         "exclude_codes": exclude_codes,
@@ -690,6 +803,7 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
     null_cells = sum(f["null_count"] for f in dictionary.values())
     total_cells = len(rows) * len(columns)
     insights = build_insights(
+        code_labels=code_labels,
         sentinels=sentinels,
         sentinel_counts={(col, val): len(find_sentinel_evidence(rows, col, val)) for col, vals in sentinels.items() for val in vals},
         missingness_concentration=missingness_concentration,
@@ -705,6 +819,10 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
 
     return {
         "insight_inputs": insight_inputs,
+        "unit_conversions": unit_conversions,
+        "coded_unit_rules": coded_unit_rules,
+        "code_labels": code_labels,
+        "stat_rows": stat_rows,
         "default_adjust_for": default_adjust_for,
         "scientific_notation_findings": scientific_notation_findings,
         "excel_serial_findings": excel_serial_findings,
@@ -764,6 +882,7 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         "fuzzy_exact_columns": fuzzy_exact_columns,
         "fuzzy_name_column": fuzzy_name_column,
         "id_like_defaults": id_like_defaults,
+        "default_primary_key": default_primary_key,
         "insights": insights,
         "invalid_fips_findings": invalid_fips_findings,
         "invalid_zip_findings": invalid_zip_findings,

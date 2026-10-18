@@ -457,6 +457,109 @@ def test_changing_approvals_after_apply_requires_applying_again():
     assert any("Done" in s.value for s in at.success)
 
 
+def test_date_gap_exhibit_has_a_timeline_and_birth_dates_are_never_gaps():
+    """A month with no visits in a daily series is a coverage gap, shown on a
+    timeline (the only chart that shades spans, with x2). Years between two
+    people's birthdays are not: birth dates aren't a series of observations."""
+    from datetime import date, timedelta
+
+    days = [date(2024, 1, 1) + timedelta(days=i) for i in range(60) if not 20 <= i < 50]
+    births = [date(1950 + 3 * i, 1 + i % 12, 1 + i % 28) for i in range(len(days))]
+    lines = ["visit_id,visit_date,birth_date"] + [f"V{i},{d},{b}" for i, (d, b) in enumerate(zip(days, births, strict=True))]
+    at = AppTest.from_file(str(APP_PATH), default_timeout=60)
+    at.session_state["dataforensics_data_bytes"] = ("\n".join(lines) + "\n").encode()
+    at.session_state["dataforensics_data_name"] = "visits.csv"
+    _goto(at, "issues")
+    assert not at.exception
+    titles = [m.value for m in at.markdown if "coverage gap" in m.value]
+    assert any("visit_date" in t for t in titles)
+    assert not any("birth_date" in t for t in titles)
+    assert any('"x2"' in c.proto.spec for c in at.get("vega_lite_chart"))
+
+
+def test_whitespace_evidence_shows_the_spaces():
+    # Regression (accuracy audit): " Male " was shown as "Male" -- the page
+    # collapses spaces, hiding the very thing flagged.
+    at = _goto(_messy_app(), "issues")
+    assert any("row 9 → sex = &quot;·Male·&quot;" in m.value for m in at.markdown)
+
+
+def _demo_on_insights(name: str) -> AppTest:
+    at = AppTest.from_file(str(APP_PATH), default_timeout=120)
+    at.session_state["dataforensics_data_bytes"] = (FIXTURES_DIR / "demos" / name).read_bytes()
+    at.session_state["dataforensics_data_name"] = name
+    at.run()
+    at.radio(key="dataforensics_workspace").set_value("Insights").run()
+    assert not at.exception
+    return at
+
+
+def test_insight_cards_state_true_medians_and_complete_skip_patterns():
+    """Regression (accuracy audit), values checked with pandas: race_code = 2's
+    median income_to_poverty_ratio is 339.5 (the card said 341, from the upper
+    middle value); and currently_smokes is blank for 100% of
+    smoked_100_cigarettes = 9 as well as 2 and 7 (the card said "at most 5%
+    for every other answer", leaving out the 7-row group)."""
+    acs = " ".join(m.value for m in _demo_on_insights("acs_pums_person_dc.csv").markdown)
+    assert "vs 339.50 for race_code = 2" in acs
+    brfss = " ".join(m.value for m in _demo_on_insights("brfss_survey_sample.csv").markdown)
+    assert "blank whenever smoked_100_cigarettes = 2, 7 or 9" in brfss
+    assert "at most 5% for every other answer" in brfss
+
+
+def test_no_fill_offer_for_blanks_that_mean_not_applicable():
+    """Regression (accuracy audit): ACS wages are blank for exactly the ages
+    0-14 (education 0-2, employment 0-15), and filling them offered a toddler
+    a $40,000 wage. income_to_poverty_ratio's blanks are spread across ages,
+    so it keeps its offer."""
+    at = AppTest.from_file(str(APP_PATH), default_timeout=120)
+    at.session_state["dataforensics_data_bytes"] = (FIXTURES_DIR / "demos" / "acs_pums_person_dc.csv").read_bytes()
+    at.session_state["dataforensics_data_name"] = "acs_pums_person_dc.csv"
+    at = _goto(at, "review")
+    offered = {k.rsplit("__", 1)[-1] for k in (cb.key for cb in at.checkbox) if k and "__impute__" in k}
+    assert offered == {"income_to_poverty_ratio"}
+
+
+def test_results_say_when_filled_estimates_raise_completeness():
+    at = AppTest.from_file(str(APP_PATH), default_timeout=120)
+    at.session_state["dataforensics_data_bytes"] = (FIXTURES_DIR / "demos" / "acs_pums_person_dc.csv").read_bytes()
+    at.session_state["dataforensics_data_name"] = "acs_pums_person_dc.csv"
+    at = _goto(at, "review")
+    next(cb for cb in at.checkbox if cb.key and cb.key.endswith("__impute__income_to_poverty_ratio")).check().run()
+    next(b for b in at.button if "Apply approved changes" in b.label).click().run()
+    assert not at.exception
+    assert any("Completeness rose because you chose to fill 38 empty cells" in i.value for i in at.info)
+
+
+def test_fill_never_uses_the_missing_label():
+    """Review finding: "Missing" (what codes are mapped to) is no answer, so it
+    can't be "the most common value" a gap is filled with."""
+    values = ["Missing"] * 7 + [""] * 3 + ["A"] * 6 + ["B"] * 4  # "Missing" is the most frequent text
+    lines = ["id,status"] + [f"{i},{v}" for i, v in enumerate(values)]
+    at = AppTest.from_file(str(APP_PATH), default_timeout=60)
+    at.session_state["dataforensics_data_bytes"] = ("\n".join(lines) + "\n").encode()
+    at.session_state["dataforensics_data_name"] = "status.csv"
+    at = _goto(at, "review")
+    assert not at.exception
+    offers = [m.value for m in at.markdown if "status: fill" in m.value]
+    assert offers and "most common value (A)" in offers[0]
+
+
+def test_safety_rows_show_the_cleaned_files_row_count():
+    """Found in the final walkthrough: with a duplicate removed, Safety checks
+    said "Rows 61 → 61" next to a 60-row cleaned file."""
+    lines = ["id,name,score"] + [f"{i},P{i},{i % 7}" for i in range(1, 61)] + ["3,P3,3"]
+    at = AppTest.from_file(str(APP_PATH), default_timeout=60)
+    at.session_state["dataforensics_data_bytes"] = ("\n".join(lines) + "\n").encode()
+    at.session_state["dataforensics_data_name"] = "dups.csv"
+    at = _goto(at, "review")
+    next(b for b in at.button if b.label == "Approve all recommended fixes").click().run()
+    next(b for b in at.button if "Apply approved changes" in b.label).click().run()
+    assert not at.exception
+    assert next(m for m in at.metric if m.label == "Rows").value == "61 → 60"
+    assert any("Every value fix kept every row (1 exact duplicate removed)" in m.value for m in at.markdown)
+
+
 def _approve_notes(at: AppTest) -> list[str]:
     return [m.value for m in at.markdown if 'class="df-approve-note"' in m.value]
 
@@ -552,7 +655,12 @@ def _card_titles(at: AppTest) -> list[str]:
 def test_example_dataset_comes_with_its_codebook_and_it_can_be_removed():
     at = _example_on_insights(1, "brfss_survey_sample.csv")
     assert any("brfss_survey_sample.codebook.csv" in m.value for m in at.markdown)
-    assert any("smoked_100_cigarettes = 2 (No) or 7 (Don&#x27;t know / Not sure)" in t for t in _card_titles(at))
+    # With the codebook, 7 (Don't know) and 9 (Refused) are no-answer codes,
+    # so the skip is the survey's real rule: asked only if smoked 100.
+    assert any("blank whenever smoked_100_cigarettes = 2 (No)<" in t for t in _card_titles(at))
+    # Weights the codebook records as 9000 + kg are read in pounds (pandas:
+    # mean 183.08, max 425 -- not 236 with a 9,088 "maximum").
+    assert any("Mean 183.08 vs median 175 (range 100–425)" in t for t in _card_titles(at))
     # The survey skip explains this column's other missing-data patterns.
     reasons = _held_back_reasons(at)
     assert reasons["currently_smokes is missing far more often for general_health = 1 (Excellent)"].startswith(
@@ -561,7 +669,7 @@ def test_example_dataset_comes_with_its_codebook_and_it_can_be_removed():
 
     at.button(key="dataforensics_codebook_remove").click().run(timeout=60)
     assert not at.exception
-    assert any("smoked_100_cigarettes = 2 or 7" in t for t in _card_titles(at))
+    assert any("smoked_100_cigarettes = 2, 7 or 9" in t for t in _card_titles(at))
 
 
 def test_choosing_what_to_retest_within_changes_what_is_held_back():
@@ -603,29 +711,15 @@ def test_issue_panels_show_evidence_limits_next_step_and_rule():
     assert any("The rows listed are the smaller cluster." in c.value for c in at.caption)
 
 
-def test_case_number_follows_the_file_and_findings_are_exhibits():
-    """The case number is the first 4 hex digits of the file's SHA-256, so
-    it's stable for a file and changes when the file does; each finding on
-    the Issues page is marked as an exhibit."""
-    import hashlib
-
-    data = (FIXTURES_DIR / "demos" / "messy_csv_example.csv").read_bytes()
-    case = hashlib.sha256(data).hexdigest()[:4].upper()
+def test_step_label_has_no_case_number_and_findings_are_exhibits():
+    """The step label reads "Step 3 of 5 · Issues" (the case number was
+    removed on request); each finding on the Issues page is an exhibit."""
     at = _messy_app()
     _goto(at, "issues")
     assert not at.exception
-    assert any(f"Case {case} · Step 3 of 5 · Issues" in m.value for m in at.markdown)
+    assert any("Step 3 of 5 · Issues" in m.value for m in at.markdown)
+    assert not any("Case " in m.value and "· Step" in m.value for m in at.markdown)
     assert sum('class="dataforensics-card df-exhibit"' in m.value for m in at.markdown) >= 5
-
-    # A different file is a different case.
-    changed = data + b"P099,Extra,Row,1990-01-01,,,,,,,,,\n"
-    at.session_state["dataforensics_data_bytes"] = changed
-    at.run(timeout=60)
-    assert not at.exception
-    new_case = hashlib.sha256(changed).hexdigest()[:4].upper()
-    assert new_case != case
-    assert any(f"Case {new_case} · Step 3 of 5 · Issues" in m.value for m in at.markdown)
-    assert not any(f"Case {case} ·" in m.value for m in at.markdown)
 
 
 def test_home_specimen_matches_the_real_output():
@@ -687,11 +781,11 @@ def test_issues_summary_overview_charts_and_results_fix_chart():
     # The old duplicate pointers are gone, and counts read as words, not "(s)".
     assert not any("further down this page" in c.value for c in at.caption)
     assert not any("value(s)" in r or "record(s)" in r for r in rows)
-    # Evidence charts on the exhibits, including the date-gap timeline
-    # (the only chart that shades spans, with x2).
+    # Evidence charts on the exhibits (value strips for outliers and units).
+    # The date-gap timeline is covered by a file with a real gap, below: the
+    # only "gap" here was between birthdays, which is no longer flagged.
     specs = [c.proto.spec for c in at.get("vega_lite_chart")]
-    assert len(specs) >= 3
-    assert any('"x2"' in spec for spec in specs)
+    assert len(specs) >= 2
 
     _goto(at, "review")
     fix_keys = [cb.key for cb in at.checkbox if cb.key.startswith("fix__")]
@@ -714,7 +808,7 @@ def test_issues_summary_overview_charts_and_results_fix_chart():
         for label in table.column("label").to_pylist()
     ]
     assert "Convert mixed units to one unit" in labels
-    assert "Trim leading/trailing and doubled whitespace" in labels
+    assert "Trim extra spaces and tabs" in labels
 
 
 def test_logo_starts_fresh_on_the_home_page_from_anywhere():

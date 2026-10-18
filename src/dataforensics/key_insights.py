@@ -12,6 +12,7 @@ strongest, most surprising findings come first.
 
 import math
 import re
+import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
@@ -42,6 +43,14 @@ def _fmt(x: float) -> str:
     if abs(x) >= 1000:
         return f"{x:,.0f}"
     return f"{x:,.0f}" if x == int(x) else f"{x:,.2f}"
+
+
+def _level_order(value: str) -> tuple[bool, float, str]:
+    """Sort key putting numeric codes in number order ("9" before "10")."""
+    try:
+        return (False, float(value), value)
+    except ValueError:
+        return (True, 0.0, value)
 
 
 def _card(
@@ -662,12 +671,30 @@ def build_key_insights(
                           for x in sorted(g["groups"], key=lambda x: -x["rate"])[:8]]}
         gate_levels = skip_levels(g)
         if gate_levels:
+            # The groups above leave out answers too rare to compare ("9 =
+            # Refused", 7 rows); check every answer, so the card's "at most 5%
+            # for every other answer" is true of all of them.
+            # Rates per named column: the card says all of them are blank.
+            answered: dict[str, dict[str, list[bool]]] = {n: defaultdict(list) for n in names}
+            for k, lvl in categories(gcol).items():
+                for n in names:
+                    answered[n][lvl].append(_missing_cell(rows[k].get(n), exclude_codes.get(n, set())))
+            levels = set(answered[names[0]])
+            low = {lvl: min(sum(answered[n][lvl]) / len(answered[n][lvl]) for n in names) for lvl in levels}
+            high = {lvl: max(sum(answered[n][lvl]) / len(answered[n][lvl]) for n in names) for lvl in levels}
+            extra = [lvl for lvl in levels if low[lvl] >= 0.95 and lvl not in gate_levels]
+            gate_levels = [*gate_levels, *sorted(extra, key=_level_order)]
+            others = "every other answer" if all(high[lvl] <= 0.05 for lvl in levels if lvl not in gate_levels) \
+                else "the other answers with enough rows to compare"
             # Blank for (nearly) everyone given some answers and no one given
             # the others. A designed skip if these rows answered the rest of
             # the survey; if they're blank elsewhere too, they may have
             # stopped answering.
             gate_members = {k for k, v in categories(gcol).items() if v in gate_levels}
-            hi_text = f"{gcol} = " + " or ".join(labels.text(gcol, lvl) for lvl in gate_levels)
+            gate_texts = [labels.text(gcol, lvl) for lvl in gate_levels]
+            hi_text = f"{gcol} = " + (
+                gate_texts[0] if len(gate_texts) == 1 else ", ".join(gate_texts[:-1]) + f" or {gate_texts[-1]}"
+            )
             other_cols = [c for c in all_columns if c not in names and c != gcol]
             in_group = [_missing_cell(rows[k].get(c), exclude_codes.get(c, set())) for k in gate_members for c in other_cols]
             outside = [_missing_cell(r.get(c), exclude_codes.get(c, set()))
@@ -678,7 +705,7 @@ def build_key_insights(
                 cards.append(_card(
                     "Skip pattern",
                     f"{listed} {'is' if len(names) == 1 else 'are'} blank whenever {hi_text}",
-                    f"Missing for 95%+ of {hi_text} and at most 5% for every other answer, while these rows "
+                    f"Missing for 95%+ of {hi_text} and at most 5% for {others}, while these rows "
                     f"answered the other questions ({group_blank:.0%} blank elsewhere) — most likely a question "
                     "skipped by design.",
                     "If the question was skipped by design, treat these blanks as 'not applicable' rather than "
@@ -799,7 +826,7 @@ def build_key_insights(
                 if k in vals:
                     groups[lvl].append(vals[k])
             medians = sorted(
-                ((lvl, sorted(v)[len(v) // 2]) for lvl, v in groups.items() if len(v) >= 5), key=lambda t: -t[1]
+                ((lvl, statistics.median(v)) for lvl, v in groups.items() if len(v) >= 5), key=lambda t: -t[1]
             )
             if len(medians) >= 2:
                 hidden = None

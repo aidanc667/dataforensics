@@ -4,7 +4,8 @@
 # Streamlit Cloud would install streamlit but never install the
 # dataforensics package app.py actually depends on.
 -e .
-# 1.62 is the Streamlit version the app is tested on (it uses st.pills,
-# st.segmented_control and width="stretch"); pandas Styler.map needs 2.1+.
-streamlit>=1.62
+# Pinned to the version the app is tested on, so Streamlit Cloud doesn't
+# pick up an untested release on its next rebuild. Upgrade deliberately:
+# install the new version, run the tests, then change this line.
+streamlit==1.62.0
 pandas>=2.1
