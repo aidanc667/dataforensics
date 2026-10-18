@@ -6,6 +6,7 @@ import json
 import math
 import re
 import tempfile
+import uuid
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -211,6 +212,7 @@ st.markdown(
     [data-testid="stElementContainer"]:has(.df-side-note) { margin-top: auto; }
     .df-side-note { font-size: 0.8rem; line-height: 1.5; color: var(--df-muted); padding: 0.8rem 0.1rem 0;
         border-top: 1px solid var(--df-border); }
+    .df-approve-note { font-size: 0.86rem; color: var(--df-muted); }
     .df-side-label { font-size: 0.78rem; font-weight: 600; color: var(--df-muted); margin: 1.2rem 0 0.35rem 0.1rem; }
     .df-side-meta { font-size: 0.8rem; color: var(--df-muted); padding: 0 0.1rem; line-height: 1.55; overflow-wrap: anywhere; }
     .df-side-meta b { color: var(--df-text); font-family: var(--df-mono); font-weight: 500; }
@@ -361,7 +363,7 @@ st.markdown(
     .df-hero-title { font-family: var(--df-serif) !important; font-size: 2.6rem !important; line-height: 1.12 !important;
         font-weight: 600 !important; letter-spacing: -0.02em; margin: 0 0 0.8rem !important; padding: 0 !important; color: var(--df-text); }
     /* the one marked word: a highlighter stroke, like marked-up evidence */
-    .df-hero-title .df-hl { background: linear-gradient(transparent 62%, #F3D899 62%, #F3D899 92%, transparent 92%); }
+    .df-hero-title .df-hl { white-space: nowrap; background: linear-gradient(transparent 62%, #F3D899 62%, #F3D899 92%, transparent 92%); }
     .df-hero-sub { color: var(--df-muted); font-size: 1.05rem; line-height: 1.6; max-width: 640px; margin: 0 0 1.5rem; }
     .df-hero-stats { display: flex; flex-wrap: wrap; gap: 0; margin-top: 0.4rem; }
     .df-hero-stat { display: flex; align-items: baseline; gap: 0.4rem; padding: 0 1.1rem; border-left: 1px solid var(--df-border); }
@@ -571,7 +573,7 @@ _SPECIMEN_HTML = (
 
 
 # The path shown on the first screen: what happens to a file, in order.
-_HOME_PATH = ("Upload", "Detect Issues", "Get Insights", "Review &amp; Fix", "Cleaned Dataset")
+_HOME_PATH = ("Upload", "Learn Issues &amp; Insights", "Review &amp; Fix", "Cleaned Dataset")
 
 
 def _hero_html() -> str:
@@ -581,7 +583,7 @@ def _hero_html() -> str:
     return (
         '<div class="df-hero-grid"><div class="df-hero">'
         '<div class="df-hero-eyebrow">DataForensics · Automated Data Cleaning Tool</div>'
-        '<h1 class="df-hero-title">Data Cleaning you can <span class="df-hl">Verify</span>.</h1>'
+        '<h1 class="df-hero-title">Data Cleaning with an <span class="df-hl">Audit Trail</span>.</h1>'
         '<p class="df-hero-sub">Upload a CSV, Excel or JSON file. DataForensics finds data quality issues, fixes only '
         "what you approve, and logs every change.</p>"
         '<div class="df-path" aria-label="What happens to your file">'
@@ -606,8 +608,10 @@ def _top_bar() -> None:
     # on the home page (see _go_home).
     st.button("DataForensics home", key="dataforensics_home", on_click=_go_home)
     if st.session_state.pop("dataforensics_scroll_top", False):
+        # A fresh nonce each time: an identical iframe on two runs in a row
+        # is reused, not remounted, so its script wouldn't run again.
         components.html(
-            "<script>const d = window.parent.document;"
+            f"<script>/* {uuid.uuid4().hex} */ const d = window.parent.document;"
             "for (const el of [d.querySelector('[data-testid=\"stMain\"]'), d.scrollingElement]) "
             "{ if (el) el.scrollTo({top: 0}); }</script>",
             height=0,
@@ -734,42 +738,6 @@ def _insight_chart(chart: dict) -> alt.Chart:
         )
         height = max(120, 30 * len(data) + 40)
     return _chart_theme(base.properties(height=height))
-
-
-def _missing_map(
-    rows: list[dict], null_counts: dict[str, int], max_rows: int = 150, max_columns: int = 20
-) -> alt.Chart | None:
-    """Rows x columns grid with empty cells shaded: shows at a glance which
-    columns are empty together (a skip pattern, a break-off) rather than at
-    random. Rows are an even sample of up to `max_rows`, sorted by their
-    pattern of gaps so rows with the same gaps sit together; columns with no
-    gaps are left out. None when nothing is empty."""
-    def empty(row: dict, col: str) -> bool:
-        return row.get(col) in (None, "")
-
-    # Column choice uses the whole file's counts (already computed); only the
-    # sampled rows are scanned here, so this stays cheap on large files.
-    shown = sorted((c for c, n in null_counts.items() if n), key=lambda c: -null_counts[c])[:max_columns]
-    if not shown or not rows:
-        return None
-    # Evenly spaced across the whole file, so its end (where break-offs
-    # usually are) is never cut off.
-    n_picks = min(max_rows, len(rows))
-    picks = sorted({round(k * (len(rows) - 1) / max(1, n_picks - 1)) for k in range(n_picks)})
-    sample = [rows[i] for i in picks]
-    patterns = sorted((tuple(empty(r, c) for c in shown) for r in sample), key=lambda p: (-sum(p), [not x for x in p]))
-    data = pd.DataFrame(
-        [{"row": i, "column": c, "state": "Empty" if gap else "Filled"}
-         for i, pattern in enumerate(patterns) for c, gap in zip(shown, pattern, strict=True)]
-    )
-    chart = alt.Chart(data).mark_rect().encode(
-        x=alt.X("column:N", sort=shown, title=None, axis=alt.Axis(labelAngle=-40, labelLimit=110)),
-        y=alt.Y("row:O", title=f"{len(sample):,} rows (sorted by gap pattern)", axis=alt.Axis(labels=False, ticks=False)),
-        color=alt.Color("state:N", scale=alt.Scale(domain=["Empty", "Filled"], range=[_ACCENT, "#D5DEE7"]),
-                        legend=alt.Legend(title=None, orient="top")),
-        tooltip=[alt.Tooltip("column:N", title="Column"), alt.Tooltip("state:N", title="Cell")],
-    )
-    return _chart_theme(chart.properties(height=230))
 
 
 def _value_strip(
@@ -1122,10 +1090,24 @@ def _fix_offer_row(source_key: str, fix: str, col: str, description: str, param,
                 st.caption("Percentages (e.g. 45%) are left as-is: whether they mean 45 or 0.45 depends on the column.")
 
 
-def _approval_buttons(recommended: list[str], every: list[str], where: str) -> None:
+def _approval_buttons(recommended: list[str], every: list[str], where: str, approved: int) -> None:
     if not every:
         return
-    b1, b2, _ = st.columns([2.2, 1.4, 1])
+    if not recommended:
+        # Without this the button just sat there disabled, which read as broken.
+        st.markdown(
+            '<div class="df-approve-note">Nothing on this file is safe to approve automatically — every offer below '
+            "needs your decision (for example treating outliers, masking personal data, filling gaps, or a date "
+            "order or spelling match). Tick the ones you want.</div>",
+            unsafe_allow_html=True,
+        )
+        st.button("Clear all approvals", key=f"clear_all_{where}", on_click=_set_approvals, args=(every, False))
+        return
+    b1, b2, b3 = st.columns([2.2, 1.4, 1.6], vertical_alignment="center")
+    b3.markdown(
+        f'<div class="df-approve-note">{approved} of {len(recommended)} recommended fixes approved</div>',
+        unsafe_allow_html=True,
+    )
     b1.button(
         "Approve all recommended fixes",
         icon=":material/done_all:",
@@ -1181,6 +1163,7 @@ def _approval_model(
     approved_fixes: dict = {}
     recommended: list[str] = []
     every: list[str] = []
+    defaults: dict[str, bool] = {}  # keys whose checkbox starts ticked
 
     for col, values in sentinels.items():
         for val in values:
@@ -1204,6 +1187,7 @@ def _approval_model(
             key = f"cat__{source_key}__{col}__{i}_on"
             label_collision = col in sentinels and bool({"Missing", ""} & set(cluster["values"]))
             default = cluster["confidence"] == "high" and not label_collision
+            defaults[key] = default
             every.append(key)
             if default and col not in primary_key:
                 recommended.append(key)
@@ -1385,6 +1369,7 @@ def _approval_model(
         "fix_offers": fix_offers,
         "inseparable_unit_columns": inseparable_unit_columns,
         "recommended_keys": recommended,
+        "recommended_approved": sum(1 for k in recommended if state.get(k, defaults.get(k, False))),
         "all_keys": every,
     }
 
@@ -1422,6 +1407,7 @@ def _go_to_step(step: str) -> None:
     """Button callback: move to another step page (runs before widgets
     render, so it can set the stepper's own key)."""
     st.session_state["dataforensics_step"] = step
+    st.session_state["dataforensics_scroll_top"] = True
 
 
 def _go_home() -> None:
@@ -1456,6 +1442,9 @@ def _apply_now() -> None:
     st.session_state["dataforensics_applied"] = True
     st.session_state["dataforensics_applied_at"] = datetime.now(UTC).isoformat()
     st.session_state["dataforensics_step"] = "results"
+    # Open Results at the top, where the score change is -- Streamlit keeps
+    # the scroll position, which landed the user on the audit log instead.
+    st.session_state["dataforensics_scroll_top"] = True
 
 
 def _step_nav(current: str) -> None:
@@ -1614,6 +1603,7 @@ def _rewrite_with_deduplicated_header(path: Path) -> Path:
 _pending_step = st.session_state.pop("dataforensics_pending_step", None)
 if _pending_step:
     st.session_state["dataforensics_step"] = _pending_step
+    st.session_state["dataforensics_scroll_top"] = True
 if st.session_state.get("dataforensics_data_bytes") is not None:
     st.session_state.setdefault("dataforensics_step", "overview")
 
@@ -2128,27 +2118,8 @@ if workspace == "analyze":
                 ]),
                 width="stretch",
             )
-        with chart_right, st.container(border=True):
-            flagged_by_category = Counter(c["Category"] for c in check_catalog if c["Status"] == "Flagged")
-            st.markdown(
-                '<div class="df-chart-title">Where the issues are</div>'
-                '<div class="df-chart-sub">Number of checks that flagged something, by kind of problem.</div>',
-                unsafe_allow_html=True,
-            )
-            if flagged_by_category:
-                st.altair_chart(
-                    _insight_chart({
-                        "type": "bar", "x": "", "y": "Checks flagged", "percent": False, "integer": True,
-                        "data": [{"label": k, "value": v} for k, v in flagged_by_category.most_common()],
-                    }),
-                    width="stretch",
-                )
-            else:
-                st.markdown('<div class="df-empty">Nothing flagged.</div>', unsafe_allow_html=True)
-
         if null_table:
-            gaps_left, gaps_right = st.columns(2)
-            with gaps_left, st.container(border=True):
+            with chart_right, st.container(border=True):
                 st.markdown(
                     '<div class="df-chart-title">Missing values by column</div>'
                     '<div class="df-chart-sub">Share of rows that are empty. Missing-value codes such as 9999 are '
@@ -2162,17 +2133,6 @@ if workspace == "analyze":
                     }),
                     width="stretch",
                 )
-            missing_map = _missing_map(rows, {c: dictionary[c].get("null_count", 0) or 0 for c in columns})
-            if missing_map is not None:
-                with gaps_right, st.container(border=True):
-                    st.markdown(
-                        '<div class="df-chart-title">Where the gaps are</div>'
-                        '<div class="df-chart-sub">Each row of the file as a line, empty cells shaded. Blocks that line '
-                        "up across columns are gaps that happen together — a skipped question or an unfinished "
-                        "record, not random noise.</div>",
-                        unsafe_allow_html=True,
-                    )
-                    st.altair_chart(missing_map, width="stretch")
 
         all_insight_cards = _insight_cards(investigation_args, investigation)
         key_insights = [c for c in all_insight_cards if not c.get("hidden")]
@@ -3359,7 +3319,7 @@ if workspace == "analyze":
             key=f"dataforensics_primary_key__{_source_key}",
         )
 
-        _approval_buttons(model["recommended_keys"], model["all_keys"], "top")
+        _approval_buttons(model["recommended_keys"], model["all_keys"], "top", model["recommended_approved"])
 
         if sentinels:
             st.markdown(_bucket_header("search", "Candidate missing-value codes"), unsafe_allow_html=True)
@@ -3617,7 +3577,7 @@ if workspace == "analyze":
             )
             st.session_state["dataforensics_applied"] = False
         else:
-            _approval_buttons(model["recommended_keys"], model["all_keys"], "bottom")
+            _approval_buttons(model["recommended_keys"], model["all_keys"], "bottom", model["recommended_approved"])
             st.button(
                 "Apply approved changes",
                 type="primary",
@@ -3784,7 +3744,11 @@ if workspace == "analyze":
             after_expectations = [evaluate_expectation(transformed_rows, spec) for spec in expectation_specs]
             _section("before-after", "Before → After", "The same checks, re-run on the cleaned file.")
             ba1, ba2, ba3, ba4 = st.columns(4)
-            ba1.metric("Quality score", f"{after['quality']['overall']}/100", f"{after['quality']['overall'] - quality['overall']:+d}")
+            # The change from the unrounded scores: a real but small gain shows as
+            # "+0.4", not a rounded "+0" that looks like nothing happened.
+            score_change = round(after["quality"]["overall_exact"] - quality["overall_exact"], 1)
+            ba1.metric("Quality score", f"{after['quality']['overall']}/100",
+                       f"{score_change:+.1f}".replace(".0", "") if score_change else "no change")
             after_flagged = sum(1 for c in after["check_catalog"] if c["Status"] == "Flagged")
             ba2.metric("Checks flagged", after_flagged, f"{after_flagged - checks_flagged:+d}", delta_color="inverse")
             ba3.metric("Rows", f"{len(transformed_rows):,}", f"{len(transformed_rows) - len(rows):+,}", delta_color="off")
@@ -3819,6 +3783,16 @@ if workspace == "analyze":
                 "before_after.csv",
                 key="download_before_after",
             )
+            emptied = sum(
+                1 for m in mutations if m["transformation_rule"].startswith("outliers:") and m["new_value"] == ""
+            )
+            if emptied and after["quality"]["completeness"] < quality["completeness"]:
+                st.info(
+                    f"Completeness fell because you chose to empty {_n(emptied, 'outlier value')} (Treat outliers → "
+                    "Set to empty): they're now honestly missing. Approve Fill missing values for those columns, or "
+                    "choose Cap to the limit instead, if you want them filled.",
+                    icon=":material/info:",
+                )
             st.caption(
                 "Null counts can rise after cleaning: a missing-value code (like 9999) turned into an empty cell was "
                 "always missing — it's now counted honestly, which lowers Completeness while raising Validity. "

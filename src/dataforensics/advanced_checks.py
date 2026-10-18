@@ -9,6 +9,7 @@ codes passed in `exclude`, so a -99 code is never called a negative age.
 """
 
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 from itertools import combinations
@@ -124,29 +125,56 @@ _SYNONYM_FAMILIES: dict[str, dict[str, set[str]]] = {
 _SYNONYM_MIN_COVERAGE = 0.8
 
 
+_ANSWER_PUNCTUATION = frozenset(" '-./(),&")
+
+
+def _is_answer_like(value: str) -> bool:
+    """Letters in any script (with their accents and vowel signs) and the
+    punctuation real answers use ("Other (specify)", "Male.", "Other/Unknown");
+    not digits, invisible characters, symbols or emoji."""
+    return any(ch.isalpha() for ch in value) and all(
+        unicodedata.category(ch)[0] in "LM" or ch in _ANSWER_PUNCTUATION for ch in value
+    )
+
+
 def synonym_clusters(values: list[str]) -> list[dict]:
     """Clusters of synonym codes in one column ("M", "m", "Male", "male"),
     in the same shape detect_similar_categories returns, with
     "synonym": True. The canonical is the most frequent full-word spelling
-    already in the data, or the family's standard word if none is."""
+    already in the data, or the family's standard word if none is.
+
+    Members are the values exactly as written (" M" as well as "M"): they
+    become category-mapping keys, which match raw cells, so a stripped
+    member left a padded code unmerged -- and newly counted once trimming
+    turned it into "M", lowering the score after cleaning."""
     stripped = [v.strip() for v in values if v and v.strip()]
     if not stripped:
         return []
     frequency = Counter(stripped)
+    # Coverage is measured over answer-like values only: stray numbers and
+    # spreadsheet debris ("$1,200", "1.23457E+11", "Ann\u200b") in a sex
+    # column are noise, not evidence it isn't one -- and counting them made
+    # detection flip once cleaning removed a few, so the cleaned file showed
+    # an inconsistency the original "didn't have".
+    wordlike = [v for v in stripped if _is_answer_like(v)]
+    if not wordlike:
+        return []
     best: tuple[float, dict[str, set[str]]] | None = None
     for family in _SYNONYM_FAMILIES.values():
         vocab = {w for words in family.values() for w in words}
-        coverage = sum(c for v, c in frequency.items() if v.casefold() in vocab) / len(stripped)
+        coverage = sum(c for v, c in frequency.items() if v.casefold() in vocab) / len(wordlike)
         if coverage >= _SYNONYM_MIN_COVERAGE and (best is None or coverage > best[0]):
             best = (coverage, family)
     if best is None:
         return []
+    raw_values = {v for v in values if v and v.strip()}
     clusters = []
     for standard, words in best[1].items():
-        members = sorted(v for v in frequency if v.casefold() in words)
-        if len(members) < 2:
+        spellings = {v for v in frequency if v.casefold() in words}
+        if len(spellings) < 2:  # padding alone is the whitespace check's job
             continue
-        full_words = [m for m in members if len(m) > 1 and m.casefold() == standard.casefold()]
+        members = sorted(v for v in raw_values if v.strip() in spellings)
+        full_words = [m for m in spellings if len(m) > 1 and m.casefold() == standard.casefold()]
         canonical = max(full_words, key=lambda m: (frequency[m], m)) if full_words else standard
         clusters.append({"values": members, "suggested_canonical": canonical, "confidence": "high", "synonym": True})
     return clusters

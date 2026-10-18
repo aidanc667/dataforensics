@@ -418,58 +418,32 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         len(find_top_code_evidence(rows, c, f["top_code_spike"]["value"])) for c, f in top_code_cols_preview.items()
     )
     ambiguous_date_cell_count = sum(ambiguous_dates.values())
+    # Only the cells a fix would change: the suggested spelling itself is
+    # already consistent, so counting it made a column look worse the
+    # moment one of its clusters became detectable.
     category_inconsistent_cell_count = sum(
         len(find_category_value_evidence(rows, col, v))
         for col, clusters in category_clusters.items()
         for cluster in clusters
         for v in cluster["values"]
+        if v != cluster["suggested_canonical"]
     )
-    # Outlier/top-code detection only ever runs on "free_text"-classified
-    # columns (dictionary.py's own numeric-eligible category), and
-    # category-inconsistency clustering only ever runs on "categorical"-
-    # classified columns -- these counts tell compute_quality_score how
-    # many cells were actually eligible for each check, so a severely
-    # affected numeric or categorical column isn't diluted by columns
-    # neither check could ever have touched. Non-null counts, not raw row
-    # counts: a null cell was never a candidate to be flagged as an
-    # outlier or a miscapitalized category either.
+    # How many cells each check could actually flag, so a severely affected
+    # column isn't diluted by columns the check never looks at. Non-null
+    # counts: a null cell was never a candidate for either. (Outliers and
+    # top-coding run on "free_text" columns; they're findings to review,
+    # not scored -- see quality_score.py.)
     numeric_eligible_cell_count = sum(
         len(rows) - f["null_count"] for f in dictionary.values() if f["category"] == "free_text"
     )
+    # A column with a detected cluster is eligible whatever its class:
+    # otherwise its flagged cells were scored against 0 eligible cells
+    # (a free 100) until cleaning made it look categorical.
     categorical_eligible_cell_count = sum(
-        len(rows) - f["null_count"] for f in dictionary.values() if f["category"] == "categorical"
+        len(rows) - f["null_count"]
+        for col, f in dictionary.items()
+        if f["category"] == "categorical" or col in category_clusters
     )
-    # Only the three format-integrity checks that are objectively true or
-    # false about a value (whitespace padding, an invisible/control
-    # character, a demonstrable encoding round-trip) feed the score.
-    # value-shape outliers, unit-mixing, and an age column shaped like
-    # birth years are deliberately excluded -- those are "Low confidence"
-    # heuristics that can fire on a coincidence, and folding a
-    # coincidence-based suggestion into a hard 0-100 score would overstate
-    # its certainty.
-    format_integrity_flagged_cell_count = (
-        sum(whitespace_anomaly_counts.values())
-        + sum(invisible_char_counts.values())
-        + sum(encoding_corruption_counts.values())
-    )
-
-    quality = compute_quality_score(
-        row_count=len(rows),
-        column_count=len(columns),
-        null_cell_count=sum(f["null_count"] for f in dictionary.values()),
-        duplicate_row_count=len(dup_rows),
-        zero_variance_column_count=sum(1 for f in dictionary.values() if f["is_zero_variance"]),
-        ragged_row_count=ragged_row_count,
-        sentinel_flagged_cell_count=sentinel_flagged_cell_count,
-        outlier_flagged_cell_count=outlier_flagged_cell_count,
-        top_code_flagged_cell_count=top_code_flagged_cell_count,
-        ambiguous_date_cell_count=ambiguous_date_cell_count,
-        category_inconsistent_cell_count=category_inconsistent_cell_count,
-        numeric_eligible_cell_count=numeric_eligible_cell_count,
-        categorical_eligible_cell_count=categorical_eligible_cell_count,
-        format_integrity_flagged_cell_count=format_integrity_flagged_cell_count,
-    )
-
     # Findings summary table -- reused by the downloadable audit report in
     # Step 4 so the report's "Findings" table matches exactly what was
     # shown here, rather than being independently recomputed.
@@ -542,13 +516,48 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         **find_leading_zero_candidates(rows, columns),
         **find_lost_leading_zero_columns(rows, columns, zip_fips_columns),
     }
+    # Format problems that are objectively true or false about a value, and
+    # every one fixable on approval: whitespace padding, an invisible/control
+    # character, a demonstrable encoding round-trip, a number written as text,
+    # an ID that lost its leading zeros, an Excel date serial, an ID turned
+    # into scientific notation. Value-shape outliers, unit-mixing and an age
+    # column shaped like birth years are deliberately excluded -- "Low
+    # confidence" heuristics that can fire on a coincidence.
+    format_integrity_flagged_cell_count = (
+        sum(whitespace_anomaly_counts.values())
+        + sum(invisible_char_counts.values())
+        + sum(encoding_corruption_counts.values())
+        + sum(f["decorated_count"] for f in numeric_representation_findings.values())
+        + sum(f["count"] for f in lost_leading_zero_findings.values())
+        + sum(len(v) for v in excel_serial_findings.values())
+        + sum(len(v) for v in scientific_notation_findings.values())
+    )
+    # A cell holding only spaces is as empty as a blank one; counting it as
+    # filled made trimming it look like a loss of data.
+    whitespace_only_cells = sum(
+        1 for r in rows for c in columns if (v := r.get(c)) not in (None, "") and not str(v).strip()
+    )
+    quality = compute_quality_score(
+        row_count=len(rows),
+        column_count=len(columns),
+        null_cell_count=sum(f["null_count"] for f in dictionary.values()) + whitespace_only_cells,
+        duplicate_row_count=len(dup_rows),
+        zero_variance_column_count=sum(1 for f in dictionary.values() if f["is_zero_variance"]),
+        ragged_row_count=ragged_row_count,
+        sentinel_flagged_cell_count=sentinel_flagged_cell_count,
+        ambiguous_date_cell_count=ambiguous_date_cell_count,
+        category_inconsistent_cell_count=category_inconsistent_cell_count,
+        categorical_eligible_cell_count=categorical_eligible_cell_count,
+        format_integrity_flagged_cell_count=format_integrity_flagged_cell_count,
+    )
+
     synonym_cell_count = sum(
         1
         for col, clusters in category_clusters.items()
         for c in clusters
         if c.get("synonym")
         for row in rows
-        if (v := str(row.get(col, "")).strip()) in c["values"] and v != c["suggested_canonical"]
+        if (v := row.get(col)) in c["values"] and v != c["suggested_canonical"]
     )
     negative_value_findings = detect_impossible_negatives(rows, columns, exclude_codes)
     longitudinal_findings = detect_longitudinal_inconsistencies(rows, columns, dictionary, role_by_column)

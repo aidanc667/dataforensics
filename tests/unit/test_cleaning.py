@@ -18,6 +18,7 @@ from dataforensics.cleaning import (
     fix_whitespace,
     impute_fill_value,
     is_fill_candidate,
+    looks_like_codes,
     outlier_fix_params,
     validate_fixes,
 )
@@ -408,3 +409,13 @@ def test_cap_is_exact_and_whole_number_columns_get_whole_limits():
 def test_fill_treats_columns_named_as_codes_as_categories():
     rows = [{"county_code": str(v)} for v in range(100, 140)] + [{"county_code": "105"}]
     assert impute_fill_value(rows, "county_code", as_category=True) == ("most common value", "105")
+
+
+def test_looks_like_codes():
+    assert looks_like_codes(["1", "2", "2", "5", "5"])               # rating scale
+    # Regression: 13 income-bracket codes (1-11, 77, 99) on a big survey.
+    brackets = [str(c) for c in [*range(1, 12), 77, 99]] * 40
+    assert looks_like_codes(brackets)
+    assert not looks_like_codes(["10", "20", "30", "40"])           # one-off whole numbers
+    assert not looks_like_codes([str(w) for w in range(100, 160)])   # many distinct weights
+    assert not looks_like_codes(["1.5", "2", "2"])                  # not whole numbers

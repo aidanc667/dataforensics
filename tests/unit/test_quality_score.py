@@ -10,14 +10,11 @@ def _base_kwargs(**overrides) -> dict:
         zero_variance_column_count=0,
         ragged_row_count=0,
         sentinel_flagged_cell_count=0,
-        outlier_flagged_cell_count=0,
-        top_code_flagged_cell_count=0,
         ambiguous_date_cell_count=0,
         category_inconsistent_cell_count=0,
         # Default to the full cell grid (100 * 10 = 1000) so tests that
         # aren't specifically exercising the eligible-cell-count dilution
-        # fix behave as if every column were numeric/categorical-eligible.
-        numeric_eligible_cell_count=1000,
+        # fix behave as if every column were categorical-eligible.
         categorical_eligible_cell_count=1000,
         format_integrity_flagged_cell_count=0,
     )
@@ -29,6 +26,7 @@ def test_perfect_dataset_scores_100_everywhere():
     score = compute_quality_score(**_base_kwargs())
     assert score == {
         "overall": 100,
+        "overall_exact": 100.0,
         "completeness": 100,
         "uniqueness": 100,
         "validity": 100,
@@ -53,29 +51,23 @@ def test_duplicate_rows_only_affect_uniqueness():
     assert score["completeness"] == 100
 
 
-def test_outliers_sentinels_and_top_code_affect_validity():
-    # sentinel is scored against the full 1000-cell grid (any column can
-    # carry a literal "-99"); outlier + top-code are scored against the
-    # eligible cells only, defaulted to 1000 here too, so this reduces to
-    # the same cell-pool math validity always uses; format-integrity is
-    # untouched here (defaults to 0 flagged -> a perfect 100):
+def test_sentinels_and_format_problems_affect_validity():
+    # Both are scored against the full 1000-cell grid:
     #   sentinel_score = _score(30, 1000) = 94
-    #   numeric_check_score = _score(50+20, 1000) = _score(70, 1000) = 86
-    #   format_integrity_score = _score(0, 1000) = 100
-    #   validity = worst_weighted([94, 86, 100]) = round(0.4*86 + 0.6*(280/3)) = 90
+    #   format_integrity_score = _score(70, 1000) = 86
+    #   validity = worst_weighted([94, 86]) = round(0.4*86 + 0.6*90) = 88
     score = compute_quality_score(
-        **_base_kwargs(outlier_flagged_cell_count=50, sentinel_flagged_cell_count=30, top_code_flagged_cell_count=20)
+        **_base_kwargs(sentinel_flagged_cell_count=30, format_integrity_flagged_cell_count=70)
     )
-    assert score["validity"] == 90
+    assert score["validity"] == 88
     assert score["consistency"] == 100
 
 
 def test_format_integrity_problems_affect_validity():
-    # format_integrity_score = _score(40, 1000) = 92; sentinel and numeric
-    # checks stay clean at 100 each:
-    #   validity = worst_weighted([100, 100, 92]) = round(0.4*92 + 0.6*(292/3)) = 95
+    # format_integrity_score = _score(40, 1000) = 92; sentinels stay clean at 100:
+    #   validity = worst_weighted([100, 92]) = round(0.4*92 + 0.6*96) = 94
     score = compute_quality_score(**_base_kwargs(format_integrity_flagged_cell_count=40))
-    assert score["validity"] == 95
+    assert score["validity"] == 94
     assert score["consistency"] == 100
 
 
@@ -130,14 +122,13 @@ def test_overall_weights_the_worst_subscore_more_than_a_plain_average():
 def test_one_badly_failing_dimension_pulls_overall_down_substantially():
     # A single dimension crashing to 0 must drag overall well below what
     # a plain 5-way average would produce (80) -- a dataset is only as
-    # trustworthy as its weakest documented dimension. All three validity
-    # components (sentinel, numeric, format-integrity) are maxed out here
+    # trustworthy as its weakest documented dimension. Both validity
+    # components (sentinels, format problems) are maxed out here
     # so validity genuinely bottoms out at 0, not just mostly.
     score = compute_quality_score(
         **_base_kwargs(
             row_count=10, column_count=1,  # total_cells = 10
-            outlier_flagged_cell_count=10, sentinel_flagged_cell_count=10,
-            numeric_eligible_cell_count=10, categorical_eligible_cell_count=10,
+            sentinel_flagged_cell_count=10, categorical_eligible_cell_count=10,
             format_integrity_flagged_cell_count=10,
         )
     )
@@ -152,38 +143,15 @@ def test_empty_dataset_scores_100_not_a_crash():
 
 
 def test_score_never_goes_below_zero():
-    # every cell flagged three times over (sentinel + outlier + format-
-    # integrity all covering all cells)
+    # every cell flagged twice over (sentinel + format problem)
     score = compute_quality_score(
         **_base_kwargs(
             row_count=10, column_count=1,
-            outlier_flagged_cell_count=10, sentinel_flagged_cell_count=10,
-            numeric_eligible_cell_count=10, categorical_eligible_cell_count=10,
+            sentinel_flagged_cell_count=10, categorical_eligible_cell_count=10,
             format_integrity_flagged_cell_count=10,
         )
     )
     assert score["validity"] == 0
-
-
-def test_validity_not_diluted_by_columns_ineligible_for_numeric_checks():
-    # The core bug this eligible-cell-count parameter fixes: outlier/top-
-    # code detection only ever runs on "free_text"-classified (numeric-
-    # shaped) columns -- never on an id or categorical one, the same way
-    # it would never run on a column of city names. A dataset with 10
-    # columns where only 1 is numeric-eligible, and that ONE column is
-    # 65% top-coded, is a genuinely severe problem for the data it
-    # actually measured -- not a rounding error. Scored against the full
-    # 1000-cell grid (the pre-fix behavior) this would have read
-    # _score(65, 1000) = 87; scored against the 100 cells that were
-    # actually eligible, it reads as the real problem it is.
-    score = compute_quality_score(
-        **_base_kwargs(
-            row_count=100, column_count=10,  # total_cells = 1000
-            top_code_flagged_cell_count=65,  # 65% of the ONE numeric column's 100 cells
-            numeric_eligible_cell_count=100,  # only 1 of 10 columns is numeric-eligible
-        )
-    )
-    assert score["validity"] < 50
 
 
 def test_consistency_not_diluted_by_columns_ineligible_for_category_checks():
@@ -215,3 +183,30 @@ def test_missing_value_codes_count_against_completeness():
     # 100 of 1000 cells are codes -> pass rate 0.9 -> 0.81 -> 81.
     score = compute_quality_score(**_base_kwargs(sentinel_flagged_cell_count=100))
     assert score["completeness"] == 81
+
+
+def test_overall_exact_is_the_unrounded_overall():
+    # completeness 81 (100 of 1000 null), the rest 100:
+    # 0.4*81 + 0.6*(481/5) = 32.4 + 57.72 = 90.12 -> 90.1 (overall rounds to 90).
+    score = compute_quality_score(**_base_kwargs(null_cell_count=100))
+    assert score["overall_exact"] == 90.1 and score["overall"] == 90
+
+
+def test_fixing_format_problems_raises_the_score():
+    # Regression: fixed problems the score didn't count (lost leading zeros,
+    # numbers stored as text, ...) left the score unchanged after cleaning.
+    before = compute_quality_score(**_base_kwargs(format_integrity_flagged_cell_count=124))
+    after = compute_quality_score(**_base_kwargs())
+    assert after["validity"] > before["validity"]
+    assert after["overall_exact"] > before["overall_exact"]
+
+
+def test_overall_is_overall_exact_rounded_half_up():
+    # 14 of 100 rows duplicated: uniqueness = round(0.86**2 * 100) = 74;
+    # 0.4*74 + 0.6*(474/5) = 29.6 + 56.88 = 86.48 -> overall_exact 86.5.
+    # Rounding 86.48 directly gave 86 beside "86.5", so the headline and the
+    # one-decimal change could disagree; it's now 87, from 86.5.
+    score = compute_quality_score(**_base_kwargs(duplicate_row_count=14))
+    assert score["uniqueness"] == 74
+    assert score["overall_exact"] == 86.5
+    assert score["overall"] == 87

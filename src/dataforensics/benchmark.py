@@ -283,8 +283,8 @@ def run_benchmark(n_rows: int = 1000, seed: int = 0) -> dict:
         "checks": checks,
         "clean_false_alarms": clean_false_alarms,
         "quality": {
-            "clean": clean_result["quality"]["overall"],
-            "dirty": dirty_result["quality"]["overall"],
-            "cleaned": cleaned_result["quality"]["overall"],
+            "clean": clean_result["quality"]["overall_exact"],
+            "dirty": dirty_result["quality"]["overall_exact"],
+            "cleaned": cleaned_result["quality"]["overall_exact"],
         },
     }

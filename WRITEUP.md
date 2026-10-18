@@ -213,8 +213,13 @@ $ dataforensics benchmark --rows 1000 --seeds 10
 | DF-15 Outliers (column) | 10 | 10 | 100% | 0 | 10 |
 | DF-32 Missingness tied to age (pair) | 10 | 10 | 100% | 0 | 10 |
 
-Mean quality score: clean 100.0, with errors 68.2, after approved fixes
-97.0. "Left after fixes" is by design for future dates, outliers, and
+Mean quality score: clean 100.0, with errors 97.0, after approved fixes
+97.4. The planted errors touch only a few percent of the 9,000 cells, so
+the dirty file already scores high, and what remains after fixing is mostly
+missing values (the planted gaps, and codes turned into blanks, stay missing). Statistical outliers are not part
+of the score: their limits move every time the data changes, so capping one
+could flag another and lower the score after cleaning. (An earlier version
+scored them and reported 68.2 for the dirty files.) "Left after fixes" is by design for future dates, outliers, and
 missingness patterns: the benchmark approves only the safe fixes, and
 treating outliers or filling gaps are opt-in judgment calls it leaves off. For mixed units, 9 of 10 planted mixes had overlapping
 kg/lb ranges, which are flagged but deliberately not auto-converted: a

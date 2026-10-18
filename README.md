@@ -128,7 +128,7 @@ DataForensics can surface findings such as:
 | Outliers (column) | 100% | 0 | all (never deleted, by design) |
 | Missingness tied to age | 100% | 0 | all (filled only on approval) |
 
-Mean quality score: clean 100 → with errors 68 → after approved fixes 97. On the clean files, the only check that ever fired was the coverage-gap check (1 of 10 runs), which is built to accept about a 5% chance rate. At 300 rows, recall is still 100%, but one chance missingness-by-group pair appeared across 10 runs and the coverage-gap check fired on 3 of 10 clean files (sparse random visit dates have long lulls by chance). Building the benchmark found and fixed five detector problems, and checking the real demo data found two more (see [`WRITEUP.md`](WRITEUP.md#error-injection-benchmark)).
+Mean quality score: clean 100 → with errors 97.0 → after approved fixes 97.4. The planted errors touch only a few percent of the 9,000 cells, so the score starts high; what's left after fixing is mostly missing values (the planted gaps, and codes turned into blanks), which cleaning never fills in by itself. On the clean files, the only check that ever fired was the coverage-gap check (1 of 10 runs), which is built to accept about a 5% chance rate. At 300 rows, recall is still 100%, but one chance missingness-by-group pair appeared across 10 runs and the coverage-gap check fired on 3 of 10 clean files (sparse random visit dates have long lulls by chance). Building the benchmark found and fixed five detector problems, and checking the real demo data found two more (see [`WRITEUP.md`](WRITEUP.md#error-injection-benchmark)).
 
 Every finding includes the evidence used to flag it and clearly distinguishes a **potential issue** from a confirmed error.
 

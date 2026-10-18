@@ -85,3 +85,26 @@ def test_auto_profile_picks_checks_from_the_columns():
     assert result["detected_profiles"] == ["Clinical / Research"]
     brfss = _run("brfss_survey_sample.csv", dataset_type="Auto")
     assert "fips_format" in brfss["profile_checks"] and "clinical_ranges" in brfss["profile_checks"]
+
+
+def test_score_counts_the_format_problems_cleaning_fixes(tmp_path):
+    """Regression (user report: "the score doesn't really move"): lost
+    leading zeros, numbers written as text and whitespace-only cells were
+    fixed by cleaning but never counted, so fixing them changed nothing."""
+    path = tmp_path / "planted.csv"
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["rid", "zip", "amount", "note", "city"])
+        for i in range(20):
+            writer.writerow([
+                i + 1,
+                "2134" if i < 2 else 20001 + i,  # 2 ZIPs that lost a leading zero
+                "$1,200" if i < 3 else 100 + i,  # 3 numbers written as text
+                "   " if i < 4 else f"text{i}",  # 4 whitespace-only cells
+                "Boston",
+            ])
+    result = run_investigation(path, sheet=None, dataset_type="Auto", data_size=1)
+    # 2 + 3 + 4 (a whitespace-only cell is padding, and also missing)
+    assert result["format_integrity_flagged_cell_count"] == 9
+    # 4 of 100 cells missing -> 0.96 ** 2 = 0.9216 -> 92
+    assert result["quality"]["completeness"] == 92

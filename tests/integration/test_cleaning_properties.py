@@ -41,7 +41,13 @@ _COLUMNS = [
 ]
 
 
-def _random_rows(seed: int) -> list[dict]:
+_SEX_VALUES = ["M", "Male", "male", "F", "Female", "f"]
+# Synonym codes with stray spaces: mappings match raw cells, so " M" must be
+# merged as written, not left for trimming to turn into a new "M".
+_PADDED_SEX_VALUES = [*_SEX_VALUES, " M", "male ", " F ", "Female "]
+
+
+def _random_rows(seed: int, sex_values: list[str] = _SEX_VALUES) -> list[dict]:
     rng = random.Random(seed)
     cols = ["rid", *rng.sample(_COLUMNS, rng.randint(2, 8))]
     rows = []
@@ -59,7 +65,7 @@ def _random_rows(seed: int) -> list[dict]:
             elif c in ("zip", "fips"):
                 row[c] = str(rng.randint(1000, 99999))
             elif c == "sex":
-                row[c] = rng.choice(["M", "Male", "male", "F", "Female", "f"])
+                row[c] = rng.choice(sex_values)
             elif c == "member_id":
                 row[c] = rng.choice(["00123", "00456", "01789", "00999", "123"])
             else:
@@ -274,3 +280,86 @@ def test_judgment_fix_properties(seed, tmp_path):
             value = parse_finite_float(r[col].strip())
             if value is not None and r[col].strip() not in p["keep"]:
                 assert p["lower"] <= value <= p["upper"], (col, r[col], p)
+
+
+def _never_lower(before: dict, rules: dict, fixes: dict, pk: str, tmp_path: Path) -> tuple[float, float]:
+    result = clean_dataset(before["rows"], rules, fixes, before["dup_rows"], [pk], reason="property test")
+    assert result["safety"]["all_passed"], result["safety"]
+    after = run_investigation(_write(result["rows"], tmp_path / "out.csv"), sheet=None, dataset_type="Auto", data_size=1)
+    return before["quality"]["overall_exact"], after["quality"]["overall_exact"]
+
+
+# 322/516: spelling variants in a column not classed "categorical" were scored
+# against 0 eligible cells (a free 100) until cleaning made it categorical.
+# 485/630/748: debris like "1.23457E+11" kept a sex column just under the
+# synonym cutoff until dedup removed a row, so M/Male appeared only after.
+_SCORE_DROP_SEEDS = [322, 485, 516, 630, 748]
+
+
+@pytest.mark.parametrize("seed", [*range(150), *_SCORE_DROP_SEEDS])
+def test_approved_safe_fixes_and_caps_never_lower_the_score(seed, tmp_path):
+    """Regression (user report): the quality score fell after cleaning. The
+    score now counts only problems that are facts about a value (codes,
+    format damage, spelling variants, duplicates, gaps) -- not statistical
+    outliers, whose limits move when the data changes -- so approving the
+    safe fixes, and capping outliers, can only keep or raise it. (Emptying
+    outliers honestly lowers completeness; the app says so when it happens.)"""
+    original = _random_rows(seed)
+    before = run_investigation(_write(original, tmp_path / "in.csv"), sheet=None, dataset_type="Auto", data_size=1)
+    rules, fixes = _approve_everything(before)
+    fixes = {k: v for k, v in fixes.items() if k != "impute"}
+    fixes["outliers"] = {c: {**p, "action": "cap"} for c, p in fixes["outliers"].items()}
+    score_before, score_after = _never_lower(before, rules, fixes, "rid", tmp_path)
+    assert score_after >= score_before
+
+
+@pytest.mark.parametrize("seed", range(100))
+def test_padded_synonym_codes_are_merged_and_never_lower_the_score(seed, tmp_path):
+    original = _random_rows(seed, _PADDED_SEX_VALUES)
+    before = run_investigation(_write(original, tmp_path / "in.csv"), sheet=None, dataset_type="Auto", data_size=1)
+    rules, fixes = _approve_everything(before)
+    fixes = {k: v for k, v in fixes.items() if k != "impute"}
+    fixes["outliers"] = {c: {**p, "action": "cap"} for c, p in fixes["outliers"].items()}
+    result = clean_dataset(before["rows"], rules, fixes, before["dup_rows"], ["rid"], reason="property test")
+    merged = rules["category_mappings"].get("sex", {})
+    if merged:  # every spelling the merge targeted is gone, padded ones included
+        assert not {r["sex"] for r in result["rows"]} & set(merged)
+    score_before, score_after = _never_lower(before, rules, fixes, "rid", tmp_path)
+    assert score_after >= score_before
+
+
+@pytest.mark.parametrize(
+    ("demo", "pk"),
+    [("messy_csv_example.csv", "participant_id"), ("brfss_survey_sample.csv", "respondent_id"),
+     ("acs_pums_person_dc.csv", "household_id")],
+)
+def test_cleaning_the_samples_never_lowers_the_score(demo, pk, tmp_path):
+    path = Path(__file__).parent.parent.parent / "fixtures" / "demos" / demo
+    before = run_investigation(path, sheet=None, dataset_type="Auto", data_size=1)
+    rules, fixes = _approve_everything(before)
+    rules["primary_key"] = [pk]
+    fixes = {k: v for k, v in fixes.items() if k not in ("impute", "outliers")}
+    score_before, score_after = _never_lower(before, rules, fixes, pk, tmp_path)
+    assert score_after >= score_before
+    if demo != "acs_pums_person_dc.csv":  # ACS has nothing safe to fix
+        # Regression: BRFSS's fixed codes and FIPS zeros weren't counted, so
+        # the score didn't move at all.
+        assert score_after > score_before
+
+
+@pytest.mark.parametrize("seed", [*range(60), 322, 516])
+def test_inconsistent_spellings_are_scored_against_their_own_columns(seed, tmp_path):
+    """The score's inconsistent-spelling count is the number of cells the
+    spelling merges actually change (measured by applying them and diffing),
+    and never exceeds the eligible count (seed 322 had 74 flagged against 0
+    eligible, which scored a perfect 100)."""
+    result = run_investigation(_write(_random_rows(seed), tmp_path / "in.csv"), sheet=None, dataset_type="Auto", data_size=1)
+    assert result["category_inconsistent_cell_count"] <= result["categorical_eligible_cell_count"]
+    rules, _ = _approve_everything(result)
+    merges_only = {**rules, "columns": {}, "missing_values": {}}
+    cleaned = clean_dataset(result["rows"], merges_only, {}, [], ["rid"], reason="property test")["rows"]
+    changed = sum(a[c] != b[c] for a, b in zip(result["rows"], cleaned, strict=True) for c in a)
+    if set(rules["category_mappings"]) == set(result["category_clusters"]):
+        assert result["category_inconsistent_cell_count"] == changed
+    else:  # a merge the app refuses (a code conflict) changes nothing
+        assert changed <= result["category_inconsistent_cell_count"]

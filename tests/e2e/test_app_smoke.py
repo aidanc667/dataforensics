@@ -23,6 +23,7 @@ which exercises those buttons for real (a real click, not session_state
 seeding), since that's the one path an upload-bytes fixture can't cover.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -379,7 +380,7 @@ def test_safe_fixes_apply_and_before_after_rescan():
 
     assert at.session_state["dataforensics_step"] == "results"  # Apply moves on to Results
     score = next(m for m in at.metric if m.label == "Quality score")
-    assert int(str(score.delta).replace("+", "")) > 0  # the cleaned file scores higher
+    assert float(str(score.delta).replace("+", "")) > 0  # the cleaned file scores higher
     assert any("Score and check changes" in m.value for m in at.markdown)
     labels = [d.label for d in at.get("download_button")]
     assert any("cleaning_rules.yaml" in label for label in labels)
@@ -454,6 +455,57 @@ def test_changing_approvals_after_apply_requires_applying_again():
     _goto(at, "review")
     next(b for b in at.button if "Apply approved changes" in b.label).click().run()
     assert any("Done" in s.value for s in at.success)
+
+
+def _approve_notes(at: AppTest) -> list[str]:
+    return [m.value for m in at.markdown if 'class="df-approve-note"' in m.value]
+
+
+def test_approve_all_explains_itself_when_nothing_is_safe_to_approve():
+    """Regression (user report): "Approve all recommended fixes is not
+    working". On ACS every offer is a judgment call, so the button sat there
+    disabled; now the page says why and offers only Clear all."""
+    at = AppTest.from_file(str(APP_PATH), default_timeout=60)
+    at.session_state["dataforensics_data_bytes"] = (FIXTURES_DIR / "demos" / "acs_pums_person_dc.csv").read_bytes()
+    at.session_state["dataforensics_data_name"] = "acs_pums_person_dc.csv"
+    at = _goto(at, "review")
+    assert not at.exception
+    assert any("Nothing on this file is safe to approve automatically" in n for n in _approve_notes(at))
+    assert not [b for b in at.button if b.label == "Approve all recommended fixes"]
+
+
+def test_approve_all_ticks_every_recommended_fix_and_raises_the_score():
+    at = _goto(_messy_app(), "review")
+    count = re.compile(r"(\d+) of (\d+) recommended fixes approved")
+    before = next(m for n in _approve_notes(at) if (m := count.search(n)))
+    total = int(before.group(2))
+    assert total > 0 and int(before.group(1)) < total
+    next(b for b in at.button if b.label == "Approve all recommended fixes").click().run()
+    after = next(m for n in _approve_notes(at) if (m := count.search(n)))
+    assert after.groups() == (str(total), str(total))
+    next(b for b in at.button if "Apply approved changes" in b.label).click().run()
+    assert not at.exception
+    score = next(m for m in at.metric if m.label == "Quality score")
+    assert float(str(score.delta).replace("+", "")) > 0
+
+
+def _scroll_scripts(at: AppTest) -> list[str]:
+    return [e.proto.srcdoc for e in at.get("iframe") if "scrollTo" in e.proto.srcdoc]
+
+
+def test_apply_and_step_changes_open_the_next_page_at_the_top():
+    """Regression: Apply kept the scroll position, landing on the audit log
+    below the score change; and back-to-back step changes rendered the same
+    scroll script, which Streamlit reuses instead of running again."""
+    at = _goto(_messy_app(), "review")
+    at.button(key="nav_next_review").click().run()
+    first = _scroll_scripts(at)
+    at.button(key="nav_back_results").click().run()
+    second = _scroll_scripts(at)
+    assert len(first) == 1 and len(second) == 1 and first != second
+    next(b for b in at.button if "Apply approved changes" in b.label).click().run()
+    assert at.session_state["dataforensics_step"] == "results"
+    assert len(_scroll_scripts(at)) == 1
 
 
 def test_insights_tab_holds_back_age_explained_patterns_with_reasons():
@@ -606,14 +658,18 @@ def test_home_specimen_matches_the_real_output():
     assert f"each of the {sum(n for n, _ in changed.values())} changes logged" in specimen
 
 
-def test_issues_summary_overview_gap_map_and_results_fix_chart():
+def test_issues_summary_overview_charts_and_results_fix_chart():
     """The Issues page leads with one summary of findings (each line points
-    to its exhibit or to Review & fix, nothing repeated), Overview has the
-    missing-data map, and Results charts what each approved fix changed."""
+    to its exhibit or to Review & fix, nothing repeated), Overview shows the
+    quality and missing-value charts (the issues-by-kind chart and the gap
+    map were removed on request), and Results charts what each fix changed."""
     at = _messy_app()
     _goto(at, "overview")
     assert not at.exception
-    assert any("Where the gaps are" in m.value for m in at.markdown)
+    titles = [m.value for m in at.markdown if 'class="df-chart-title"' in m.value]
+    assert any("Quality by dimension" in t for t in titles)
+    assert any("Missing values by column" in t for t in titles)
+    assert not any("Where the issues are" in t or "Where the gaps are" in t for t in titles)
 
     _goto(at, "issues")
     assert not at.exception
@@ -661,36 +717,6 @@ def test_issues_summary_overview_gap_map_and_results_fix_chart():
     assert "Trim leading/trailing and doubled whitespace" in labels
 
 
-@pytest.mark.parametrize("n_rows", [20, 299])
-def test_gap_map_samples_the_whole_file_including_its_end(n_rows):
-    # Regression (review): the map's sample stopped short of the end of the
-    # file, where unfinished records usually sit -- first for large files
-    # (rows[::step][:150]), then, after a bad fix, for small ones (a 20-row
-    # file showed only rows 1-3). The only gap is in the very last row, and
-    # every row must be in the map when the file is small.
-    import pyarrow as pa
-
-    lines = ["id,score,note"] + [f"{i},{i % 50},ok" for i in range(n_rows - 1)] + [f"{n_rows - 1},,"]
-    at = AppTest.from_file(str(APP_PATH))
-    at.session_state["dataforensics_data_bytes"] = ("\n".join(lines) + "\n").encode()
-    at.session_state["dataforensics_data_name"] = "tail_gap.csv"
-    at.session_state["dataforensics_step"] = "overview"
-    at.run(timeout=60)
-    assert not at.exception
-    states = [
-        state
-        for chart in at.get("vega_lite_chart")
-        for dataset in chart.proto.datasets
-        for table in [pa.ipc.open_stream(dataset.data.data).read_all()]
-        if "state" in table.column_names
-        for state in table.column("state").to_pylist()
-    ]
-    assert "Empty" in states
-    if n_rows <= 150:
-        # Every row is drawn: rows x gap columns (score and note) cells.
-        assert len(states) == n_rows * 2
-
-
 def test_logo_starts_fresh_on_the_home_page_from_anywhere():
     """Regression: the logo was a "#top" link -- it only jumped the scroll
     position, and after loading a dataset it never returned to the home
@@ -705,7 +731,7 @@ def test_logo_starts_fresh_on_the_home_page_from_anywhere():
     assert not at.exception
     assert at.radio(key="dataforensics_workspace").value == "Analyze & Clean"
     assert "dataforensics_data_bytes" not in at.session_state
-    assert any("Data Cleaning you can" in m.value for m in at.markdown)
+    assert any("Data Cleaning with an" in m.value for m in at.markdown)
     # No step bar and no trace of the earlier file anywhere on the page.
     assert not at.get("button_group")
     page_text = " ".join(m.value for m in [*at.markdown, *at.sidebar.markdown])

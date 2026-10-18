@@ -197,18 +197,22 @@ def fix_pii_mask(value: str) -> str:
 
 
 _CODE_MAX_LEVELS = 12
+_CODE_MAX_LEVELS_LARGE = 20
 
 
 def looks_like_codes(values: list[str]) -> bool:
-    """Whole numbers drawn from a short, repeating list (`_CODE_MAX_LEVELS`
-    distinct values or fewer): category codes or a rating scale -- employment
-    status 3, satisfaction 1-5 -- not measurements. A median of them means
-    nothing, and an IQR "outlier" among them is a valid answer."""
+    """Whole numbers drawn from a short, repeating list: category codes or a
+    rating scale -- employment status 3, satisfaction 1-5, income bracket
+    1-11 plus 77/99 -- not measurements. A median of them means nothing, and
+    an IQR "outlier" among them is a valid answer. "Short" is
+    `_CODE_MAX_LEVELS` distinct values (with some repeating), or up to
+    `_CODE_MAX_LEVELS_LARGE` when each value repeats ~10 times on average."""
     numbers = [parse_finite_float(v) for v in values]
+    if not values or not all(n is not None and n == int(n) for n in numbers):
+        return False
     distinct = len(set(values))
-    return (
-        bool(values) and all(n is not None and n == int(n) for n in numbers)
-        and distinct <= _CODE_MAX_LEVELS and distinct < len(values)
+    return (distinct <= _CODE_MAX_LEVELS and distinct < len(values)) or (
+        distinct <= _CODE_MAX_LEVELS_LARGE and distinct * 10 <= len(values)
     )
 
 

@@ -69,6 +69,29 @@ def test_synonyms_need_a_dominant_family_and_two_spellings():
     assert synonym_clusters(["Yes", "No", "Yes"]) == []  # one spelling each
 
 
+def test_spreadsheet_debris_does_not_hide_synonyms():
+    # Regression: "1.23457E+11" and "12k" contain letters, so they counted
+    # as words and held coverage at 32/41 = 78% (< 80%); dropping a couple
+    # in cleaning then made M/Male "appear" and the score fall.
+    values = ["Male"] * 8 + ["M"] * 8 + ["Female"] * 8 + ["F"] * 8 + ["1.23457E+11", "12k", "a\u200bb"] * 3
+    assert {c["suggested_canonical"] for c in synonym_clusters(values)} == {"Male", "Female"}
+
+
+def test_real_answers_still_count_against_synonym_coverage():
+    # Multi-word, punctuated and non-Latin answers are genuine categories:
+    # 4 of 8 values are sex codes -> 50%, below the cutoff, so no family.
+    values = ["Male", "M", "Female", "F", "Other (specify)", "Prefer not/say", "पुरुष", "Other"]
+    assert synonym_clusters(values) == []
+
+
+def test_padded_synonym_codes_are_members_as_written():
+    # Mappings match raw cells: " M" must be a member itself, or the merge
+    # misses it and trimming later turns it into an unmerged "M".
+    values = ["Male"] * 50 + ["Female"] * 50 + [" M"] * 5
+    (cluster,) = synonym_clusters(values)
+    assert cluster["values"] == [" M", "Male"] and cluster["suggested_canonical"] == "Male"
+
+
 def test_synonym_cluster_replaces_overlapping_fuzzy_cluster():
     fuzzy = [{"values": ["Male", "male"], "suggested_canonical": "Male"}, {"values": ["Red", "red"], "suggested_canonical": "Red"}]
     syn = [{"values": ["M", "Male", "male"], "suggested_canonical": "Male", "synonym": True}]
