@@ -15,7 +15,6 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import yaml
 
 from dataforensics.advanced_checks import find_free_text_personal_detail_rows
 from dataforensics.audit_report import (
@@ -488,11 +487,6 @@ st.markdown(
     }
 
     /* ---- File fingerprints on Results ---- */
-    .df-hashes { border: 1px solid var(--df-border); background: var(--df-surface); border-radius: 3px; margin: 0.6rem 0 1rem; }
-    .df-hashes div { display: flex; gap: 1rem; padding: 0.45rem 0.8rem; font-size: 0.84rem; flex-wrap: wrap; }
-    .df-hashes div + div { border-top: 1px solid var(--df-border); }
-    .df-hashes span { color: var(--df-muted); min-width: 11rem; }
-    .df-hashes code { background: none; color: var(--df-text); font-size: 0.8rem; word-break: break-all; padding: 0; }
 
     /* ---- Quality ring ---- */
     .df-ring { display: block; margin: 0.35rem auto 0.25rem; }
@@ -3982,40 +3976,21 @@ if workspace == "analyze":
                 + [f"Expectation: {spec_result['rule']}" for spec_result in expectation_results],
             )
 
-            st.markdown(
-                '<div class="df-hashes">'
-                f"<div><span>Input SHA-256</span><code>{input_sha256}</code></div>"
-                f"<div><span>Cleaned output SHA-256</span><code>{output_sha256}</code></div></div>",
-                unsafe_allow_html=True,
-            )
-            export_rules = {
-                **rules,
-                "safe_fixes": approved_fixes,
-                "expectations": expectation_specs,
-            }
-            rules_yaml = (
-                "# DataForensics cleaning rules -- re-run on a new release of this dataset with:\n"
-                "#   dataforensics harmonize NEW_FILE.csv --rules cleaning_rules.yaml --output cleaned.csv --execute\n"
-                + yaml.safe_dump(export_rules, sort_keys=False, allow_unicode=True)
-            )
-
-            dl1, dl2 = st.columns(2)
-            dl3, dl4 = st.columns(2)
-            dl1.download_button(
+            # Three downloads in a triangle: the cleaned file on top, centred.
+            _, top, _ = st.columns([1, 2, 1])
+            top.download_button(
                 "Cleaned CSV (analysis-ready)", icon=":material/download:", data=buffer.getvalue(),
                 file_name=f"cleaned_{st.session_state['dataforensics_data_name']}", mime="text/csv", width="stretch",
+                type="primary",
             )
-            dl2.download_button(
+            left, right = st.columns(2)
+            left.download_button(
                 "data_dictionary.html", icon=":material/download:", data=render_html(f"Data Dictionary — {st.session_state['dataforensics_data_name']} (before cleaning)", dictionary),
                 file_name="data_dictionary.html", mime="text/html", width="stretch",
             )
-            dl3.download_button(
+            right.download_button(
                 "audit_report.html", icon=":material/download:", data=audit_report_html,
                 file_name="audit_report.html", mime="text/html", width="stretch",
-            )
-            dl4.download_button(
-                "cleaning_rules.yaml", icon=":material/download:", data=rules_yaml,
-                file_name="cleaning_rules.yaml", mime="application/x-yaml", width="stretch",
             )
         _step_nav("results")
 
