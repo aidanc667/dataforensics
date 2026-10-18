@@ -17,7 +17,7 @@ Upload a CSV, Excel or JSON file. DataForensics runs 51 checks, shows you the ro
 1. **Upload** a file, or load one of the three sample datasets.
 2. **Overview and Issues** list what the checks found, most serious first, with the actual rows as evidence. Nothing has changed yet.
 3. **Review & fix** lists every fix the checks can offer. *Approve all recommended fixes* ticks the safe ones in one click; anything that needs judgment is left for you.
-4. **Results** re-runs every check on the cleaned file, shows the score before and after, and lists every change. Download the cleaned CSV, the audit trail, an HTML report and a rules file you can re-run on the next release.
+4. **Results** re-runs every check on the cleaned file, shows the score before and after, and lists every change. Download the cleaned CSV, the audit trail and an HTML report.
 
 ## What it checks
 
@@ -53,37 +53,5 @@ The Insights tab ranks the strongest patterns in the data in plain language, for
 - **Messy CSV Example**: a small synthetic intake form built to trigger every fix.
 
 Sources and details are in [`fixtures/demos/README.md`](fixtures/demos/README.md).
-
-## Run it locally
-
-```bash
-pip install -e ".[dev,viewer]"
-streamlit run app.py
-```
-
-There's also a command-line tool:
-
-```bash
-dataforensics scan fixtures/sample.csv --rules fixtures/sample_rules.yaml
-dataforensics harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output out.csv            # dry run
-dataforensics harmonize fixtures/sample.csv --rules fixtures/sample_rules.yaml --output out.csv --execute  # apply
-dataforensics benchmark --rows 1000 --seeds 10
-```
-
-Accepts CSV, TSV, JSON (an array of flat objects) and Excel. For workbooks with several sheets, you pick the sheet.
-
-## How well it works
-
-`dataforensics benchmark` plants known errors in clean synthetic data and counts what's caught. Across 10 files of 1,000 rows, every planted error type was caught, and no clean values were flagged. Approved fixes removed all the planted codes, duplicates, whitespace, hidden characters, encoding errors, spelling variants and text-formatted numbers. Outliers, future dates, missing-data patterns and kg/lb mixes whose ranges overlap are flagged but not changed automatically. Results on real public data are in [`WRITEUP.md`](WRITEUP.md).
-
-```bash
-pytest
-```
-
-runs the unit, integration and end-to-end tests.
-
-## Limits
-
-A passing check doesn't mean the data is right for your analysis. DataForensics flags what looks wrong and shows why. Deciding whether an unusual value is an error, and what a code means in your study, is still up to you.
 
 More detail: [`ARCHITECTURE.md`](ARCHITECTURE.md) (design and safety rules) · [`WRITEUP.md`](WRITEUP.md) (benchmarks and findings).

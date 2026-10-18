@@ -382,8 +382,12 @@ def test_safe_fixes_apply_and_before_after_rescan():
     score = next(m for m in at.metric if m.label == "Quality score")
     assert float(str(score.delta).replace("+", "")) > 0  # the cleaned file scores higher
     assert any("Score and check changes" in m.value for m in at.markdown)
+    # Three downloads (the rules file and the SHA-256 box were removed on request).
     labels = [d.label for d in at.get("download_button")]
-    assert any("cleaning_rules.yaml" in label for label in labels)
+    assert [x for x in labels if x != "Download"] == [
+        "Cleaned CSV (analysis-ready)", "data_dictionary.html", "audit_report.html"
+    ]
+    assert not any("SHA-256" in m.value for m in at.markdown)
 
 
 def test_expectations_are_evaluated_before_and_after():
