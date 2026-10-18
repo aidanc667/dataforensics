@@ -1,0 +1,61 @@
+column,value,label
+sex,1,Male
+sex,2,Female
+marital_status,1,Married
+marital_status,2,Divorced
+marital_status,3,Widowed
+marital_status,4,Separated
+marital_status,5,Never married
+marital_status,6,A member of an unmarried couple
+marital_status,9,Refused
+education_level,1,Never attended school or only kindergarten
+education_level,2,Grades 1 through 8
+education_level,3,Grades 9 through 11
+education_level,4,Grade 12 or GED
+education_level,5,College 1 to 3 years
+education_level,6,College 4 years or more
+education_level,9,Refused
+employment_status,1,Employed for wages
+employment_status,2,Self-employed
+employment_status,3,Out of work for 1 year or more
+employment_status,4,Out of work for less than 1 year
+employment_status,5,A homemaker
+employment_status,6,A student
+employment_status,7,Retired
+employment_status,8,Unable to work
+employment_status,9,Refused
+income_bracket,1,"Less than $10,000"
+income_bracket,2,"$10,000 to < $15,000"
+income_bracket,3,"$15,000 to < $20,000"
+income_bracket,4,"$20,000 to < $25,000"
+income_bracket,5,"$25,000 to < $35,000"
+income_bracket,6,"$35,000 to < $50,000"
+income_bracket,7,"$50,000 to < $75,000"
+income_bracket,8,"$75,000 to < $100,000"
+income_bracket,9,"$100,000 to < $150,000"
+income_bracket,10,"$150,000 to < $200,000"
+income_bracket,11,"$200,000 or more"
+income_bracket,77,Don't know / Not sure
+income_bracket,99,Refused
+general_health,1,Excellent
+general_health,2,Very good
+general_health,3,Good
+general_health,4,Fair
+general_health,5,Poor
+general_health,7,Don't know / Not sure
+general_health,9,Refused
+smoked_100_cigarettes,1,Yes
+smoked_100_cigarettes,2,No
+smoked_100_cigarettes,7,Don't know / Not sure
+smoked_100_cigarettes,9,Refused
+currently_smokes,1,Every day
+currently_smokes,2,Some days
+currently_smokes,3,Not at all
+currently_smokes,7,Don't know / Not sure
+currently_smokes,9,Refused
+diabetes_status,1,Yes
+diabetes_status,2,"Yes, but only during pregnancy"
+diabetes_status,3,No
+diabetes_status,4,"No, pre-diabetes or borderline diabetes"
+diabetes_status,7,Don't know / Not sure
+diabetes_status,9,Refused

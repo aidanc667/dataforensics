@@ -1,15 +1,17 @@
 """Deterministic, rule-based data quality scoring.
 
 Every sub-score answers one literal, documented question about cells or
-rows already flagged elsewhere in this codebase (duplicates, outliers,
-sentinels, ambiguous dates, category clusters, ragged rows, zero-variance
-columns) -- there is no machine learning and no hidden weighting here. A
+rows already flagged elsewhere in this codebase (duplicates, missing-value
+codes, format problems, ambiguous dates, category clusters, ragged rows,
+zero-variance columns) -- there is no machine learning and no hidden weighting here. A
 score is a summary of how much of the data matched a documented rule, not
 a judgment of whether the dataset is fit for any particular analysis. The
 Streamlit app displays that caveat directly alongside every score; this
 module's docstrings exist so the same caveat is legible to anyone reading
 the source instead of only the UI.
 """
+
+import math
 
 
 def _score(flagged: float, total: float) -> int:
@@ -51,60 +53,49 @@ def compute_quality_score(
     zero_variance_column_count: int,
     ragged_row_count: int,
     sentinel_flagged_cell_count: int,
-    outlier_flagged_cell_count: int,
-    top_code_flagged_cell_count: int,
     ambiguous_date_cell_count: int,
     category_inconsistent_cell_count: int,
-    numeric_eligible_cell_count: int,
     categorical_eligible_cell_count: int,
     format_integrity_flagged_cell_count: int,
 ) -> dict:
     """Five sub-scores (0-100) plus a worst-dimension-weighted `overall`.
 
-      - completeness: share of cells that are NOT null. Every column can
-        be null regardless of its type, so the whole cell grid is the
-        right denominator here -- no dilution concern.
+      - completeness: share of cells that are NOT null and NOT a candidate
+        missing-value code. Every column can be null regardless of its
+        type, so the whole cell grid is the right denominator here -- no
+        dilution concern. A code also costs validity (it masquerades as a
+        real value); once mapped to an empty cell, only completeness still
+        counts it, so cleaning codes can only raise the overall score.
       - uniqueness: share of rows that are NOT an exact duplicate of an
         earlier row.
-      - validity: combines three checks. Two have DIFFERENT eligibility
-        scopes, so each is scored against its own eligible cells, then
-        combined with the same worst-weighted formula `overall` uses (see
-        below for why) rather than pooling flagged-counts over one
-        denominator:
-          * candidate missing-value sentinels (e.g. "-99" written
-            literally into the data) can appear in any non-null cell of
-            any column, so this one IS scored against the full cell grid.
-          * statistical outliers and top-coding only ever get computed
-            for "free_text"-classified (high-cardinality, numeric-shaped)
-            columns -- dictionary.py deliberately never runs them on an
-            id or low-cardinality categorical column, the same way it
-            would never run them on a column of city names. Scoring this
-            against the full cell grid (most of which sits in columns
-            these checks could never touch) mathematically caps how low
-            this half of validity could ever read: a real dataset with
-            12 columns where only 3 are numeric-eligible could have EVERY
-            eligible cell top-coded and validity would still floor out
-            around 84, because 9 structurally-immune columns dilute the
-            denominator. Scored against `numeric_eligible_cell_count`
-            instead, a genuinely 65%-top-coded income column reads as the
-            genuine problem it is instead of a rounding error.
-          * format-integrity problems (whitespace padding, invisible/
-            control characters, encoding corruption/mojibake) can appear
-            in any non-null cell of any column, the same as sentinels, so
-            this is scored against the full cell grid too. Deliberately
-            excludes the OTHER format-related suggestions this codebase
-            surfaces (value-shape outliers, unit-mixing, an age column
-            shaped like birth years, ...) -- those are explicitly
-            "Low confidence" heuristics that can fire on a coincidence,
-            not a fact about the value the way a literal invisible
-            character or a demonstrable encoding round-trip is. Folding a
-            coincidence-based suggestion into a hard 0-100 score would
-            overstate its certainty.
+      - validity: combines two checks, each scored against the full cell
+        grid (any column can carry them) and combined with the same
+        worst-weighted formula `overall` uses:
+          * candidate missing-value codes (e.g. "-99" written literally
+            into the data);
+          * format problems that are objectively true or false about a
+            value: whitespace padding, invisible/control characters,
+            encoding corruption, numbers written as text ("$1,200", "45%"),
+            IDs that lost their leading zeros, Excel date serials, and IDs
+            turned into scientific notation. Most have an approvable fix,
+            so cleaning them visibly raises the score; a few (percentages,
+            scientific-notation IDs, whose digits are already gone) can't
+            be repaired from the file and keep counting after cleaning.
+        Statistical outliers and top-coding are deliberately NOT scored:
+        unusual is not incorrect (income is normally skewed), and an IQR
+        outlier is relative to the column's own spread -- after an
+        approved cap the spread narrows and new values become "outliers",
+        so scoring them made the score fall after cleaning. They remain
+        findings to review. Low-confidence heuristics (value-shape
+        outliers, unit mixes, an age column shaped like birth years) are
+        excluded for the same reason: they can fire on a coincidence.
       - consistency: same reasoning, split the same way -- inconsistent
-        category spellings only ever get computed for "categorical"-
-        classified columns (scored against `categorical_eligible_cell_count`),
-        while ambiguous dates get checked against every column regardless
-        of type (scored against the full cell grid).
+        category spellings (the cells a merge would change, not the
+        spelling they'd be merged onto) are scored against
+        `categorical_eligible_cell_count`, the "categorical" columns plus
+        any other column a spelling cluster was found in, while ambiguous
+        dates get checked against every column regardless of type (scored
+        against the full cell grid).
       - structural_quality: the average of two shares -- rows that are
         NOT ragged (a different field count than the header) and columns
         that are NOT zero-variance (only one distinct value across every
@@ -131,15 +122,16 @@ def compute_quality_score(
     """
     total_cells = row_count * column_count
 
-    completeness = _score(null_cell_count, total_cells)
+    # A missing-value code (9999, "Refused") is missing data written as a
+    # value, so it counts against completeness too -- otherwise cleaning
+    # it into an honest empty cell would LOWER completeness, making the
+    # score fall exactly when the data got more truthful.
+    completeness = _score(null_cell_count + sentinel_flagged_cell_count, total_cells)
     uniqueness = _score(duplicate_row_count, row_count)
 
     sentinel_score = _score(sentinel_flagged_cell_count, total_cells)
-    numeric_check_score = _score(
-        outlier_flagged_cell_count + top_code_flagged_cell_count, numeric_eligible_cell_count
-    )
     format_integrity_score = _score(format_integrity_flagged_cell_count, total_cells)
-    validity = _worst_weighted([sentinel_score, numeric_check_score, format_integrity_score])
+    validity = _worst_weighted([sentinel_score, format_integrity_score])
 
     category_score = _score(category_inconsistent_cell_count, categorical_eligible_cell_count)
     ambiguous_date_score = _score(ambiguous_date_cell_count, total_cells)
@@ -150,10 +142,16 @@ def compute_quality_score(
     )
 
     subscores = [completeness, uniqueness, validity, consistency, structural_quality]
-    overall = _worst_weighted(subscores)
+    # To one decimal, so a small real improvement (one sub-score up a few
+    # points) can be shown as "+0.4" instead of rounding to "+0".
+    overall_exact = round(0.4 * min(subscores) + 0.6 * (sum(subscores) / len(subscores)), 1)
+    # Rounded from overall_exact (half up), so the whole number can't move
+    # while the one-decimal change reads "no change", or the other way round.
+    overall = math.floor(overall_exact + 0.5)
 
     return {
         "overall": overall,
+        "overall_exact": overall_exact,
         "completeness": completeness,
         "uniqueness": uniqueness,
         "validity": validity,

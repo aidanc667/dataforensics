@@ -187,6 +187,98 @@ never actually produced).
 
 ---
 
+## Error-injection benchmark
+
+The real datasets above show what the tool finds, but not what it misses.
+`dataforensics benchmark` answers that: it generates a clean synthetic
+intake table, plants known errors at known cells, runs every check, then
+approves every suggested fix and re-runs. Ground truth comes from the
+injector, never from the detectors.
+
+```
+$ dataforensics benchmark --rows 1000 --seeds 10
+```
+
+| Check | Planted | Caught | Recall | Flags on clean items | Left after fixes |
+|---|---:|---:|---:|---:|---:|
+| DF-04 Missing-value codes (9999) | 153 | 153 | 100% | 0 | 0 |
+| DF-01 Exact duplicate rows | 50 | 50 | 100% | 0 | 0 |
+| DF-21 Whitespace | 103 | 103 | 100% | 0 | 0 |
+| DF-22 Hidden characters | 51 | 51 | 100% | 0 | 0 |
+| DF-23 Broken encoding | 51 | 51 | 100% | 0 | 0 |
+| DF-08 Inconsistent categories | 100 | 100 | 100% | 0 | 0 |
+| DF-19 Numbers written as text | 81 | 81 | 100% | 0 | 0 |
+| DF-17 Mixed units (column) | 10 | 10 | 100% | 0 | 9 |
+| DF-10 Future dates | 50 | 50 | 100% | 0 | 50 |
+| DF-15 Outliers (column) | 10 | 10 | 100% | 0 | 10 |
+| DF-32 Missingness tied to age (pair) | 10 | 10 | 100% | 0 | 10 |
+
+Mean quality score: clean 100.0, with errors 97.0, after approved fixes
+97.4. The planted errors touch only a few percent of the 9,000 cells, so
+the dirty file already scores high, and what remains after fixing is mostly
+missing values (the planted gaps, and codes turned into blanks, stay missing). Statistical outliers are not part
+of the score: their limits move every time the data changes, so capping one
+could flag another and lower the score after cleaning. (An earlier version
+scored them and reported 68.2 for the dirty files.) "Left after fixes" is by design for future dates, outliers, and
+missingness patterns: the benchmark approves only the safe fixes, and
+treating outliers or filling gaps are opt-in judgment calls it leaves off. For mixed units, 9 of 10 planted mixes had overlapping
+kg/lb ranges, which are flagged but deliberately not auto-converted: a
+value of 105 could be either unit.
+
+On the clean files, the only check that fired was the coverage-gap check,
+in 1 of 10 runs (a 4-day lull in daily visits); it is calibrated to accept
+roughly a 5% chance rate. At 300 rows per file, recall stays at 100%,
+but one chance missingness-by-group pair appeared across 10 runs and the
+coverage-gap check fired on 3 of 10 clean files: with sparse random visit
+dates, long lulls happen by chance, and the check deliberately stays
+sensitive enough to catch a multi-month outage in a regular series.
+
+### What the benchmark caught in the tool itself
+
+The first runs were not this clean. Each problem below was fixed and now
+has a regression test that fails on the old code:
+
+1. **Coverage gaps flagged ordinary lulls.** Daily data with a 2-3 day
+   lull, and business-day data's every weekend, read as "gaps". Gaps must
+   now exceed the median by 3+ days, be rarer than the 95th percentile,
+   and, for irregular arrivals, be longer than random arrivals would
+   plausibly produce (a geometric-gap bound with a ~5% false-alarm rate).
+2. **A missing month was never flagged.** The rule was "2x the median
+   gap", and a skipped month is 59-62 days against a ~31-day median. Now
+   1.75x.
+3. **First name + sex counted as identity evidence.** On data with common
+   first names, nearly every name collided. Sex no longer counts toward
+   the two-signal minimum for "same entity under two IDs".
+4. **Mixed units were missed 70% of the time.** Real adult weights in kg
+   (50-110) and lb (110-240) overlap, so there was no clean gap to split
+   on. A second method now tests splits directly, and only accepts one
+   that makes the column far more uniform once converted (calibrated on
+   simulated mixes vs. naturally two-humped columns). Overlapping mixes
+   are marked not separable, so no automatic conversion is offered.
+5. **Missingness-by-group flagged chance gaps in small groups.** A
+   two-proportion z >= 3 screen was added alongside the 15-point gap rule;
+   chance pairs at 300 rows dropped from 12 to 1 across 10 runs.
+
+### Found on the real demo data
+
+* **BRFSS (CDC):** 116 cells of 7777/9999 codes in weight and height; 76%
+  of weights end in 0 or 5 (about 20% expected), clustering at 200, 160 and
+  150 lb, a sign of self-reported values; weights coded as 9000 + kg (max
+  9088), which the outlier check flags; and rare `height_ft_in` codes such as
+  9105 (metric heights stored in an imperial column).
+* **ACS PUMS (Census):** wages missing for 36% of people under 35 vs 0% of
+  those 35 and older (mostly children, a skip pattern), and income heaping
+  at round thousands.
+* **Two more fixes from checking real data, not the benchmark.** Cleaning
+  BRFSS's codes into blanks *lowered* the quality score (93 to 92), because
+  a code counted against validity but a blank counted against
+  completeness. Codes now count as missing in completeness too, so
+  cleaning them can't lower the score. And income recorded to the nearest
+  $1,000 read as 100% "heaping" until heaping was measured at each
+  column's own rounding level.
+
+---
+
 ## Summary & Next Steps
 
 Across all three real sources, the most common real-world issue wasn't

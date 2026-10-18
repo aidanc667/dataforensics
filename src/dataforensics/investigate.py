@@ -19,6 +19,7 @@ project's entire design philosophy exists to reject.
 
 import hashlib
 import json
+import math
 import re
 from collections import Counter
 from datetime import UTC, datetime
@@ -130,6 +131,23 @@ def _is_negation_pair(normalized_a: str, normalized_b: str) -> bool:
     return any(longer == prefix + shorter for prefix in _NEGATION_PREFIXES)
 
 
+def _is_clean_text(value: str) -> bool:
+    return not (
+        _WHITESPACE_ANOMALY_PATTERN.search(value)
+        or _INVISIBLE_CHAR_PATTERN.search(value)
+        or _looks_like_mojibake(value)
+    )
+
+
+def _clean_text(value: str) -> str:
+    """The same repairs the safe fixes make, in the same order (encoding,
+    hidden characters, whitespace -- cleaning.FIX_ORDER), so a repaired
+    canonical is stable under them."""
+    text = repair_mojibake(value) or value
+    text = _INVISIBLE_CHAR_PATTERN.sub(lambda m: " " if m.group() == "\xa0" else "", text)
+    return re.sub(r"\s{2,}", " ", text.strip())
+
+
 def detect_similar_categories(values: list[str], threshold: int = 85) -> list[dict]:
     """Cluster near-duplicate category values within one column (e.g.
     "Male" / "male" / "MALE") using rapidfuzz string similarity.
@@ -200,10 +218,19 @@ def detect_similar_categories(values: list[str], threshold: int = 85) -> list[di
         # before a letter), exactly backwards, suggesting a merge INTO
         # the messier value instead of out of it -- and finally to plain
         # alphabetical order for full determinism.
+        #
+        # Cleanliness outranks frequency, though: a canonical that itself
+        # has padding, a hidden character or mojibake would be undone by
+        # the matching safe fix, and the two approved changes would fight
+        # (the cleaning property tests caught " a" winning over "a" and
+        # re-applying forever). If every member is unclean, the suggestion
+        # is the most frequent member with that formatting repaired.
         def _canonical_rank(v: str) -> tuple:
-            return (-frequency[v], v != v.strip(), v)
+            return (not _is_clean_text(v), -frequency[v], v)
 
         canonical = min(members, key=_canonical_rank)
+        if not _is_clean_text(canonical):
+            canonical = _clean_text(canonical) or canonical
         clusters.append(
             {
                 "values": sorted(members),
@@ -211,6 +238,23 @@ def detect_similar_categories(values: list[str], threshold: int = 85) -> list[di
                 "confidence": "high" if all_exact else "medium",
             }
         )
+    # A repaired canonical (not itself in the data) can equal a member of
+    # another cluster ("cafÃ©" -> "café", while "café"/"Café" cluster
+    # separately). Two approved merges would then chain, so such clusters
+    # are combined onto the other cluster's canonical.
+    merged = True
+    while merged:
+        merged = False
+        for cluster in clusters:
+            other = next(
+                (c for c in clusters if c is not cluster and cluster["suggested_canonical"] in c["values"]), None
+            )
+            if other is not None:
+                other["values"] = sorted(set(other["values"]) | set(cluster["values"]))
+                other["confidence"] = "medium" if "medium" in (cluster["confidence"], other["confidence"]) else "high"
+                clusters.remove(cluster)
+                merged = True
+                break
     return clusters
 
 
@@ -244,6 +288,7 @@ _ROLE_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
     ("RACE_OR_ETHNICITY", re.compile(r"(^|_)(race|ethnicity)(_|$)", re.IGNORECASE)),
     ("NAME", re.compile(r"(^|_)(name|full_?name|patient_?name|participant_?name)(_|$)", re.IGNORECASE)),
     ("ZIP_OR_POSTAL", re.compile(r"(^|_)(zip|zip_?code|postal_?code)(_|$)", re.IGNORECASE)),
+    ("DISTANCE", re.compile(r"(^|_)(distance|dist|km|miles?|mileage)(_|$)", re.IGNORECASE)),
 ]
 
 
@@ -671,6 +716,9 @@ CLINICAL_RANGE_RULES: list[dict] = [
 ]
 
 _SURVEY_WEIGHT_PATTERN = re.compile(r"(^|_)(wt|wgt|weight)(_|\d|$)", re.IGNORECASE)
+# A unit in the name ("weight_lbs", "wt_kg") means a measured body weight,
+# not a sampling weight.
+_BODY_MEASURE_UNIT = re.compile(r"(^|_)(lbs?|kgs?|kilos?|pounds?|kilograms?|grams?|g|oz|ounces?|st|stone)(_|$)", re.IGNORECASE)
 
 # FIPS: 2-digit (state) or 5-digit (state+county) numeric string. Leading
 # zeros matter (Alabama is "01"), so this matches the raw string, never a
@@ -700,6 +748,42 @@ DATASET_PROFILES = {
     "Clinical / Research": ["clinical_ranges", "conflicting_id_records"],
     "Geographic": ["fips_format", "zip_format"],
 }
+
+
+AUTO_PROFILE = "Auto"
+# Column names that mark records about people in a study or care setting --
+# where the same ID on two rows that disagree is a real problem.
+_CLINICAL_ID_NAME = re.compile(r"(^|_)(patient|participant|subject|mrn|visit|encounter|admission)(_|$)", re.IGNORECASE)
+
+
+def infer_profile_checks(columns: list[str]) -> tuple[list[str], list[str]]:
+    """(profile checks to run, profile names they come from), chosen from
+    the column names so the user never has to pick a dataset profile:
+
+    - Clinical / Research: plausible-range checks when a column matches a
+      clinical range rule (age, height_cm, weight_kg, BMI); the same-ID
+      conflict check only when columns name patients/participants/visits.
+    - Geographic: FIPS / ZIP format checks when such columns exist.
+    - Survey: the sampling-weight flag when a column looks like one.
+    """
+    checks: list[str] = []
+    profiles: list[str] = []
+    if any(match_clinical_range_rule(c) for c in columns):
+        checks.append("clinical_ranges")
+    if any(_CLINICAL_ID_NAME.search(c) for c in columns):
+        checks.append("conflicting_id_records")
+    if checks:
+        profiles.append("Clinical / Research")
+    if find_fips_like_columns(columns):
+        checks.append("fips_format")
+    if find_zip_like_columns(columns):
+        checks.append("zip_format")
+    if find_fips_like_columns(columns) or find_zip_like_columns(columns):
+        profiles.append("Geographic")
+    if detect_survey_weight_columns(columns):
+        checks.append("survey_weight_columns")
+        profiles.append("Survey")
+    return checks, profiles or ["General"]
 
 
 def match_clinical_range_rule(column: str) -> dict | None:
@@ -986,6 +1070,16 @@ def _looks_like_mojibake(value: str) -> bool:
     return candidate != value and any(ord(ch) > 127 for ch in candidate)
 
 
+def repair_mojibake(value: str) -> str | None:
+    """The repaired text for a mojibake value ("JosÃ©" -> "José"), or None
+    if `value` doesn't look like mojibake. Uses the exact round trip
+    `_looks_like_mojibake` tests, so a value is only ever repaired when
+    the detector flagged it."""
+    if not _looks_like_mojibake(value):
+        return None
+    return value.encode("cp1252").decode("utf-8")
+
+
 def detect_encoding_corruption(rows: list[dict], columns: list[str]) -> dict[str, int]:
     """Column -> count of non-null values that look like UTF-8 text
     mis-decoded as Windows-1252/Latin-1 (mojibake) -- see
@@ -1132,7 +1226,13 @@ _UNIT_CONVERSION_FACTORS: dict[str, list[tuple[str, str, float]]] = {
     "WEIGHT": [("kg", "lb", 2.20462)],
     "HEIGHT": [("cm", "in", 2.54), ("m", "ft", 3.28084)],
     "INCOME": [("dollars", "thousands of dollars", 1000.0)],
+    # unit_a is always the low-valued cluster: the same distance is a
+    # bigger number in km than in miles.
+    "DISTANCE": [("mi", "km", 1.60934)],
 }
+# Semantic roles detect_unit_inconsistency can examine at all -- a dataset
+# with none of them never had the check applied.
+UNIT_CHECK_ROLES = frozenset(_UNIT_CONVERSION_FACTORS)
 _UNIT_MIN_CLUSTER_SIZE = 3
 _UNIT_RATIO_TOLERANCE = 0.05
 
@@ -1158,7 +1258,9 @@ def _find_bimodal_split(values: list[float]) -> tuple[list[float], list[float]] 
     return sorted_vals[:best_index], sorted_vals[best_index:]
 
 
-def detect_unit_inconsistency(rows: list[dict], role_by_column: dict) -> dict[str, dict]:
+def detect_unit_inconsistency(
+    rows: list[dict], role_by_column: dict, exclude: dict[str, set[str]] | None = None
+) -> dict[str, dict]:
     """For a column whose inferred semantic role has a known unit-pair
     (WEIGHT: kg/lb, HEIGHT: cm/in or m/ft, INCOME: dollars/thousands),
     split its numeric values into two clusters at the largest gap and
@@ -1170,9 +1272,19 @@ def detect_unit_inconsistency(rows: list[dict], role_by_column: dict) -> dict[st
 
     Returns {column: {low_count, high_count, low_median, high_median,
     observed_ratio, expected_factor, unit_a, unit_b, boundary,
-    minority_side}} for columns where a match was found. `boundary` and
-    `minority_side` are for `find_unit_inconsistency_evidence` to classify
-    individual rows without repeating the clustering.
+    minority_side, minority_min, minority_max, separable}} for columns
+    where a match was found. `exclude` holds each column's candidate
+    missing-value codes, which are never treated as measurements.
+    `minority_min`/`minority_max` bound the values that plausibly belong to
+    the minority unit (within 3x the conversion factor of the majority's
+    median), so a stray code or typo beyond them is never converted.
+    `boundary` and `minority_side` are for `find_unit_inconsistency_evidence`
+    to classify individual rows without repeating the clustering.
+
+    `separable` is False when the two units' ranges overlap (found by
+    `_find_overlapping_unit_split`): the column is still flagged, but no
+    per-value conversion should be offered, since a value in the overlap
+    (105 could be kg or lb) can't be assigned to a unit from its size.
     """
     results: dict[str, dict] = {}
     for column, role in role_by_column.items():
@@ -1181,44 +1293,139 @@ def detect_unit_inconsistency(rows: list[dict], role_by_column: dict) -> dict[st
         candidates = _UNIT_CONVERSION_FACTORS.get(role.get("role", ""))
         if not candidates:
             continue
+        codes = (exclude or {}).get(column, set())
         values = []
         for row in rows:
             raw = str(row.get(column, "")).strip()
-            if raw == "":
+            if raw == "" or raw in codes:
                 continue
             parsed = parse_finite_float(raw)
             if parsed is not None and parsed > 0:
                 values.append(parsed)
         split = _find_bimodal_split(values)
-        if split is None:
+        match = None
+        if split is not None:
+            low, high = split
+            observed_ratio = _median(high) / _median(low)
+            for unit_a, unit_b, factor in candidates:
+                if abs(observed_ratio - factor) / factor <= _UNIT_RATIO_TOLERANCE:
+                    # Only a real jump between the clusters makes per-value
+                    # assignment trustworthy; a hairline "largest gap" in
+                    # dense, overlapping data doesn't.
+                    match = (low, high, unit_a, unit_b, factor, high[0] / low[-1] >= _UNIT_SEPARABLE_MIN_JUMP)
+                    break
+        if match is None:
+            # The two units' ranges often overlap in real data (50-110 kg
+            # vs 110-240 lb), leaving no clean gap for the split above.
+            for unit_a, unit_b, factor in candidates:
+                overlapped = _find_overlapping_unit_split(values, factor)
+                if overlapped is not None:
+                    match = (*overlapped, unit_a, unit_b, factor, False)
+                    break
+        if match is None:
             continue
-        low, high = split
-        observed_ratio = _median(high) / _median(low)
-        for unit_a, unit_b, factor in candidates:
-            if abs(observed_ratio - factor) / factor <= _UNIT_RATIO_TOLERANCE:
-                results[column] = {
-                    "low_count": len(low),
-                    "high_count": len(high),
-                    "low_median": _median(low),
-                    "high_median": _median(high),
-                    "observed_ratio": observed_ratio,
-                    "expected_factor": factor,
-                    "unit_a": unit_a,
-                    "unit_b": unit_b,
-                    "boundary": low[-1],
-                    "minority_side": "low" if len(low) <= len(high) else "high",
-                }
-                break
+        low, high, unit_a, unit_b, factor, separable = match
+        minority_side = "low" if len(low) <= len(high) else "high"
+        if minority_side == "high":
+            # Capped at boundary x factor too: a converted value then always
+            # lands on the majority side, so re-applying the fix is a no-op.
+            cap = min(_median(low) * factor * 3, low[-1] * factor)
+            plausible = [v for v in high if v <= cap]
+        else:
+            plausible = [v for v in low if v >= _median(high) / (factor * 3)]
+        if not plausible:
+            continue
+        results[column] = {
+            "low_count": len(low),
+            "high_count": len(high),
+            "low_median": _median(low),
+            "high_median": _median(high),
+            "observed_ratio": _median(high) / _median(low),
+            "expected_factor": factor,
+            "unit_a": unit_a,
+            "unit_b": unit_b,
+            "boundary": low[-1],
+            "minority_side": minority_side,
+            "minority_min": min(plausible),
+            "minority_max": max(plausible),
+            "separable": separable,
+        }
     return results
 
 
+# Calibrated on simulated columns: genuine kg/lb mixes (5-50% minority,
+# uniform or normal, with or without extreme codes) scored 0.47-0.67;
+# columns that aren't unit mixes (children + adults, adult-weight-like
+# lognormal, normal, a pound column with 9000+ codes) scored >= 0.79.
+# 0.72 sits between. Known blind spot: an implausibly wide skewed
+# distribution (lognormal sigma 0.6, a 7x spread) scores ~0.6.
+_UNIT_OVERLAP_MAX_CV_RATIO = 0.72
+_UNIT_SEPARABLE_MIN_JUMP = 1.1
+_UNIT_OVERLAP_MAX_VALUES = 5_000
+_UNIT_OVERLAP_SPLIT_STEPS = 200
+
+
+def _cv(values: list[float]) -> float:
+    mean = sum(values) / len(values)
+    if mean == 0:
+        return 0.0
+    return (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5 / mean
+
+
+def _find_overlapping_unit_split(values: list[float], factor: float) -> tuple[list[float], list[float]] | None:
+    """For two unit clusters whose ranges overlap: try splits across the
+    sorted values and keep one where (a) the clusters' median ratio is
+    within tolerance of `factor` and (b) converting the high cluster back
+    by `factor` makes the whole column far more uniform (coefficient of
+    variation down to <= 60% of the original). (b) is what separates a
+    genuine two-unit mix from a naturally wide or skewed distribution,
+    which some split can always make look like any ratio. Returns the
+    split with the lowest converted CV, or None."""
+    sorted_vals = sorted(v for v in values if v > 0)
+    if len(sorted_vals) < 4 * _UNIT_MIN_CLUSTER_SIZE:
+        return None
+    # Values far beyond any unit mix (e.g. BRFSS's 9000 + kg codes in a
+    # pound column) would dominate the spread and make almost any split
+    # look like it "explains" the column, so they're left out of the fit.
+    mid = _median(sorted_vals)
+    sorted_vals = [v for v in sorted_vals if mid / (3 * factor) <= v <= mid * 3 * factor]
+    if len(sorted_vals) > _UNIT_OVERLAP_MAX_VALUES:
+        # Evenly spaced order statistics keep the distribution's shape
+        # while bounding the (splits x values) cost on very large files.
+        step = len(sorted_vals) / _UNIT_OVERLAP_MAX_VALUES
+        sorted_vals = [sorted_vals[int(i * step)] for i in range(_UNIT_OVERLAP_MAX_VALUES)]
+    n = len(sorted_vals)
+    if n < 4 * _UNIT_MIN_CLUSTER_SIZE:
+        return None
+    original_cv = _cv(sorted_vals)
+    if original_cv == 0:
+        return None
+    best: tuple[float, int] | None = None
+    step = max(1, n // _UNIT_OVERLAP_SPLIT_STEPS)
+    for k in range(_UNIT_MIN_CLUSTER_SIZE, n - _UNIT_MIN_CLUSTER_SIZE + 1, step):
+        low, high = sorted_vals[:k], sorted_vals[k:]
+        if abs(_median(high) / _median(low) - factor) / factor > _UNIT_RATIO_TOLERANCE:
+            continue
+        converted_cv = _cv(low + [v / factor for v in high])
+        if converted_cv <= _UNIT_OVERLAP_MAX_CV_RATIO * original_cv and (best is None or converted_cv < best[0]):
+            best = (converted_cv, k)
+    if best is None:
+        return None
+    return sorted_vals[: best[1]], sorted_vals[best[1]:]
+
+
 def find_unit_inconsistency_evidence(
-    rows: list[dict], column: str, boundary: float, minority_side: str
+    rows: list[dict],
+    column: str,
+    boundary: float,
+    minority_side: str,
+    value_range: tuple[float, float] | None = None,
 ) -> list[tuple[int, str]]:
     """Real (row_index, raw_value) pairs for the minority cluster
     `detect_unit_inconsistency` found in `column` (the smaller of the two
     unit-conversion-matched clusters, on whichever side of `boundary`
-    `minority_side` names)."""
+    `minority_side` names). `value_range` (minority_min, minority_max) limits
+    evidence to the values a units fix would actually convert."""
     evidence = []
     for i, row in enumerate(rows):
         raw = str(row.get(column, "")).strip()
@@ -1228,7 +1435,8 @@ def find_unit_inconsistency_evidence(
         if parsed is None or parsed <= 0:
             continue
         is_low = parsed <= boundary
-        if (minority_side == "low") == is_low:
+        in_range = value_range is None or value_range[0] <= parsed <= value_range[1]
+        if (minority_side == "low") == is_low and in_range:
             evidence.append((i, raw))
     return evidence
 
@@ -1278,7 +1486,12 @@ def find_future_date_evidence(rows: list[dict], column: str) -> list[tuple[int, 
 
 
 _TEMPORAL_GAP_MIN_DATES = 5
-_TEMPORAL_GAP_MULTIPLE_THRESHOLD = 2.0
+# 1.75, not 2: a missing month in a monthly series is a 59-62 day gap
+# against a ~31-day median, which a 2x rule (62) let through.
+_TEMPORAL_GAP_MULTIPLE_THRESHOLD = 1.75
+_TEMPORAL_GAP_MIN_EXTRA_DAYS = 3
+_TEMPORAL_GAP_MIN_GAPS_FOR_PERCENTILE = 20
+_TEMPORAL_GAP_IRREGULAR_CV = 0.3
 
 
 def detect_temporal_gaps(rows: list[dict], column: str) -> dict | None:
@@ -1307,10 +1520,36 @@ def detect_temporal_gaps(rows: list[dict], column: str) -> dict | None:
     median_gap = gaps_sorted[n // 2] if n % 2 else (gaps_sorted[n // 2 - 1] + gaps_sorted[n // 2]) / 2
     if median_gap <= 0:
         return None
+    # A gap must also be at least `_TEMPORAL_GAP_MIN_EXTRA_DAYS` beyond the
+    # median (found by the error-injection benchmark: daily data with a 2-3
+    # day lull, or business-day data's every weekend, isn't a gap).
+    threshold = max(median_gap * _TEMPORAL_GAP_MULTIPLE_THRESHOLD, median_gap + _TEMPORAL_GAP_MIN_EXTRA_DAYS)
+    p95: float | None = None
+    # Irregular arrivals (gap CV >= 0.3, e.g. visits on random days) have
+    # long gaps by chance. Day-level gaps from random arrivals are roughly
+    # geometric: P(gap >= g) = q^(g-1), q = 1 - 1/mean. Only a gap so long
+    # that ANY of n such gaps reaching it has under a 5% chance is flagged.
+    # A regular schedule (daily, monthly) has a low CV and keeps the
+    # multiple-of-the-median rule, where a single missing month must still
+    # stand out.
+    # Regularity is judged on the ordinary gaps only (those below the base
+    # threshold): otherwise one big outage would make a regular monthly
+    # series look "irregular" and raise the bar above the outage itself.
+    ordinary = [g for g in gaps if g < threshold]
+    if n >= _TEMPORAL_GAP_MIN_GAPS_FOR_PERCENTILE and len(ordinary) >= _TEMPORAL_GAP_MIN_GAPS_FOR_PERCENTILE:
+        mean_gap = sum(ordinary) / len(ordinary)
+        gap_cv = (sum((g - mean_gap) ** 2 for g in ordinary) / len(ordinary)) ** 0.5 / mean_gap
+        if gap_cv >= _TEMPORAL_GAP_IRREGULAR_CV and mean_gap > 1:
+            q = 1 - 1 / mean_gap
+            threshold = max(threshold, 1 + math.log(0.05 / n) / math.log(q))
+            # ...and rarer than the 95th percentile. Only for irregular
+            # arrivals: in a regular series, two equal missing months would
+            # each sit AT the percentile and both go unreported.
+            p95 = gaps_sorted[min(n - 1, int(0.95 * n))]
     flagged = [
         {"after": parsed[i - 1].isoformat(), "before": parsed[i].isoformat(), "gap_days": gaps[i - 1]}
         for i in range(1, len(parsed))
-        if gaps[i - 1] >= median_gap * _TEMPORAL_GAP_MULTIPLE_THRESHOLD
+        if gaps[i - 1] >= threshold and (p95 is None or gaps[i - 1] > p95)
     ]
     if not flagged:
         return None
@@ -1402,7 +1641,7 @@ def detect_survey_weight_columns(columns: list[str]) -> list[str]:
     warn against treating it as an ordinary numeric variable (e.g.
     flagging it for outliers) without realizing what it actually
     represents."""
-    return [c for c in columns if _SURVEY_WEIGHT_PATTERN.search(c)]
+    return [c for c in columns if _SURVEY_WEIGHT_PATTERN.search(c) and not _BODY_MEASURE_UNIT.search(c)]
 
 
 def check_referential_integrity(parent_values: set, child_values: set) -> dict:
@@ -1660,7 +1899,7 @@ def detect_missingness_co_occurrence(rows: list[dict], columns: list[str]) -> li
 # (a "notes" field with an email address typed into it) is still caught.
 # --------------------------------------------------------------------- #
 
-_PII_CONTENT_PATTERNS: list[tuple[str, re.Pattern]] = [
+PII_CONTENT_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
     ("email address", re.compile(r"\b[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}\b")),
     # Requires a separator between digit groups (dash/dot/space, optional
@@ -1693,7 +1932,7 @@ def detect_pii_content(rows: list[dict], columns: list[str]) -> dict[str, dict[s
             raw = str(row.get(col, ""))
             if raw == "":
                 continue
-            for label, pattern in _PII_CONTENT_PATTERNS:
+            for label, pattern in PII_CONTENT_PATTERNS:
                 if pattern.search(raw):
                     counts[label] = counts.get(label, 0) + 1
         if counts:
@@ -1712,7 +1951,7 @@ def find_pii_content_evidence(rows: list[dict], column: str) -> list[tuple[int, 
         raw = str(row.get(column, ""))
         if raw == "":
             continue
-        for label, pattern in _PII_CONTENT_PATTERNS:
+        for label, pattern in PII_CONTENT_PATTERNS:
             if pattern.search(raw):
                 evidence.append((i, label))
                 break

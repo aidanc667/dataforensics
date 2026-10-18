@@ -251,3 +251,32 @@ def test_merge_files_on_key_never_mutates_inputs():
     merge_files_on_key(file_a, file_b, "pid", "pid", "a.csv", "b.csv")
     assert file_a == file_a_copy
     assert file_b == file_b_copy
+
+
+def test_codes_then_categories_on_the_same_column():
+    from dataforensics.harmonize import apply_transformations
+
+    rows = [{"id": "1", "s": "-99"}, {"id": "2", "s": "never"}, {"id": "3", "s": "Never"}]
+    rules = {
+        "primary_key": ["id"],
+        "missing_values": {"s": {"-99": ""}},
+        "category_mappings": {"s": {"never": "Never"}},
+    }
+    out, mutations = apply_transformations(rows, rules)
+    assert [r["s"] for r in out] == ["", "Never", "Never"]
+    assert len(mutations) == 2
+
+
+def test_codes_then_categories_is_idempotent():
+    from dataforensics.harmonize import apply_transformations
+
+    rules = {"primary_key": ["id"], "missing_values": {"s": {"-99": ""}}, "category_mappings": {"s": {"never": "Never"}}}
+    once, _ = apply_transformations([{"id": "1", "s": "-99"}, {"id": "2", "s": "never"}], rules)
+    twice, mutations = apply_transformations(once, rules)
+    assert twice == once and mutations == []
+
+
+def test_category_output_that_is_a_code_conflicts():
+    from dataforensics.config_schema import find_mapping_conflicts
+
+    assert find_mapping_conflicts({"N/A": ""}, {"n/a ": "N/A"}) == ["N/A"]

@@ -146,8 +146,8 @@ def build_investigation_findings(
     it isn't missing from the one document a user actually keeps. Always
     tier "info" and confidence "N/A": these are plain comparisons, never
     framed as a significance test, and there is no apply mechanism for
-    them (DataForensics never imputes), so they're always fully
-    unresolved by construction, same as an outlier or top-coding finding.
+    them (DataForensics only fills gaps you approve), so they're always fully
+    unresolved by construction, same as a top-coding finding.
 
     "resolved" is determined from `mutations` (what was ACTUALLY applied,
     the ground truth), not from checkbox state -- a sentinel/category
@@ -301,6 +301,10 @@ def build_investigation_findings(
             "total": len(items),
         })
 
+    def fixed_by(rule: str, col: str) -> bool:
+        """Whether an applied change came from the `rule` fix on `col`."""
+        return any(m["transformation_rule"] == f"{rule}:{col}" for m in mutations)
+
     for col, counts in (pii_content_findings or {}).items():
         total = sum(counts.values())
         kinds = ", ".join(f"{count} {label}(s)" for label, count in counts.items())
@@ -310,9 +314,9 @@ def build_investigation_findings(
             "evidence": [],
             "more": 0,
             "detection": "This column's name did not match a known PII naming pattern, but at least one cell value contains a substring shaped like an SSN, email address, or phone number.",
-            "suggested_action": "Review manually — consider masking this column in any report or export if it does contain real personal data.",
+            "suggested_action": "Review manually — or approve Mask personal data in text on Review & fix to remove it from the output.",
             "confidence": "Medium",
-            "resolved": 0,
+            "resolved": total if fixed_by("pii_mask", col) else 0,
             "total": total,
         })
 
@@ -550,7 +554,7 @@ def build_investigation_findings(
                 "detection": "Statistically unusual relative to the rest of this column (IQR method) or a disproportionate share of values sit at the observed maximum (possible top-coding).",
                 "suggested_action": "Review manually — unusual is not the same as incorrect (e.g. income is normally right-skewed).",
                 "confidence": "Low",
-                "resolved": 0,
+                "resolved": 1 if fixed_by("outliers", col) else 0,
                 "total": 1,
             })
 
@@ -628,7 +632,7 @@ def build_investigation_findings(
                 ),
                 "suggested_action": (
                     "Missingness pattern detected; statistical handling (e.g. multiple imputation) "
-                    "requires analyst judgment. DataForensics never imputes."
+                    "requires analyst judgment. DataForensics never fills gaps unless you approve it (Review & fix → Fill missing values)."
                 ),
                 "confidence": "N/A",
                 "resolved": 0,
@@ -652,7 +656,7 @@ def build_investigation_findings(
             ),
             "suggested_action": (
                 "Missingness pattern detected; statistical handling requires analyst judgment. "
-                "DataForensics never imputes."
+                "DataForensics never fills gaps unless you approve it (Review & fix → Fill missing values)."
             ),
             "confidence": "N/A",
             "resolved": 0,
@@ -704,6 +708,10 @@ def build_audit_report_html(
     validation_report: dict,
     applied_at: str,
     dataset_type: str,
+    input_sha256: str | None = None,
+    output_sha256: str | None = None,
+    rows_removed: int = 0,
+    checks_performed: list[str] | None = None,
 ) -> str:
     """The full DataForensics Data Investigation Report: what did I
     receive, what does the data look like, what deserves attention, what
@@ -732,6 +740,11 @@ def build_audit_report_html(
     else:
         readiness_status, readiness_icon = "Ready with review", "🟢"
 
+    # `safety` describes the 1:1 value-level transform (its row counts are
+    # before any approved duplicate removal); the final file is shorter by
+    # `rows_removed`, and every row count shown below reflects that.
+    final_row_count = safety["row_count"]["after"] - rows_removed
+    value_mutations = [m for m in mutations if m["transformation_rule"] != "drop_exact_duplicate_row"]
     null_count_before = sum(f["null_count"] for f in dictionary.values())
     null_count_after = sum(1 for row in transformed_rows for v in row.values() if v == "")
     rows_changed = len({tuple(sorted(m["row_key"].items())) for m in mutations})
@@ -769,6 +782,8 @@ def build_audit_report_html(
     <p class="headline">{len(rows):,} record(s) · {len(columns)} variable(s) · {esc(format_bytes(file_size_bytes))}</p>
     <table class="kv"><tbody>
         <tr><th>File name</th><td>{esc(file_name)}</td></tr>
+        {f"<tr><th>Input SHA-256</th><td><code>{esc(input_sha256)}</code></td></tr>" if input_sha256 else ""}
+        {f"<tr><th>Cleaned output SHA-256</th><td><code>{esc(output_sha256)}</code></td></tr>" if output_sha256 else ""}
         <tr><th>Numeric variables</th><td>{type_counts.get('numeric', 0)}</td></tr>
         <tr><th>Categorical variables</th><td>{type_counts.get('categorical', 0)}</td></tr>
         <tr><th>Date variables</th><td>{type_counts.get('date', 0)}</td></tr>
@@ -841,6 +856,11 @@ def build_audit_report_html(
     # ---------------------------------------------------------------- #
     # 6. Transformation Log
     # ---------------------------------------------------------------- #
+    rows_deleted_text = (
+        f"{rows_removed:,} — exact duplicate rows, removed only because you approved it, each re-verified as identical to the row kept"
+        if rows_removed
+        else "0 — no row removal was approved"
+    )
     if mutations:
         log_rows = "".join(
             f"<tr><td>{esc(m['column'])}</td><td>{esc(m['original_value'])}</td><td>{esc(m['new_value'])}</td>"
@@ -853,8 +873,8 @@ def build_audit_report_html(
         </tr></thead><tbody>{log_rows}</tbody></table>
         <table class="kv"><tbody>
             <tr><th>Rows changed</th><td>{rows_changed:,}</td></tr>
-            <tr><th>Values changed</th><td>{len(mutations):,}</td></tr>
-            <tr><th>Rows deleted</th><td>0 — DataForensics never deletes rows</td></tr>
+            <tr><th>Values changed</th><td>{len(value_mutations):,}</td></tr>
+            <tr><th>Rows deleted</th><td>{rows_deleted_text}</td></tr>
             <tr><th>Columns deleted</th><td>0 — DataForensics never deletes columns</td></tr>
         </tbody></table>
         """
@@ -865,7 +885,11 @@ def build_audit_report_html(
     # 7. Integrity Verification
     # ---------------------------------------------------------------- #
     integrity_checks = [
-        ("Row count preserved", safety["row_count"]["passed"]),
+        (
+            "Row count preserved by every value-level change"
+            + (f" (then {rows_removed:,} approved duplicate row(s) removed)" if rows_removed else ""),
+            safety["row_count"]["passed"],
+        ),
         ("Column set preserved", safety["column_count"]["passed"]),
         ("No primary-key values collapsed together", safety["primary_key_uniqueness"]["passed"]),
         ("No unapproved values changed", True),  # unmodified_columns is proven byte-identical below
@@ -874,7 +898,7 @@ def build_audit_report_html(
     integrity_rows = "".join(f"<li>{'✅' if passed else '❌'} {esc(label)}</li>" for label, passed in integrity_checks)
     integrity_section = f"""
     <table class="kv"><tbody>
-        <tr><th>Rows</th><td>{safety['row_count']['before']:,} → {safety['row_count']['after']:,}</td></tr>
+        <tr><th>Rows</th><td>{safety['row_count']['before']:,} → {final_row_count:,}</td></tr>
         <tr><th>Columns</th><td>{safety['column_count']['before']} → {safety['column_count']['after']}</td></tr>
         <tr><th>Missing values</th><td>{null_count_before:,} → {null_count_after:,}</td></tr>
         <tr><th>Unique primary-key values</th><td>{safety['primary_key_uniqueness']['before']:,} → {safety['primary_key_uniqueness']['after']:,}</td></tr>
@@ -914,18 +938,25 @@ def build_audit_report_html(
     # ---------------------------------------------------------------- #
     # 10. Reproducibility & Provenance
     # ---------------------------------------------------------------- #
+    checks_text = (
+        esc(", ".join(checks_performed))
+        if checks_performed
+        else (
+            "duplicate rows, candidate missing-value sentinels, ambiguous dates, inconsistent category spellings, "
+            "statistical outliers (IQR), top-coding, substantial missingness, cross-column temporal ordering, "
+            "potential duplicate entities, and (if selected) domain-profile checks"
+        )
+    )
     provenance_section = f"""
     <table class="kv"><tbody>
         <tr><th>Original file</th><td>{esc(file_name)}</td></tr>
         <tr><th>Date/time processed (UTC)</th><td>{esc(applied_at)}</td></tr>
         <tr><th>DataForensics version</th><td>{esc(__version__)}</td></tr>
         <tr><th>Dataset type profile</th><td>{esc(dataset_type)}</td></tr>
-        <tr><th>Checks performed</th><td>duplicate rows, candidate missing-value sentinels, ambiguous dates,
-            inconsistent category spellings, statistical outliers (IQR), top-coding, substantial missingness,
-            cross-column temporal ordering, potential duplicate entities, and (if selected) domain-profile checks</td></tr>
+        <tr><th>Checks performed</th><td>{checks_text}</td></tr>
         <tr><th>Transformations approved</th><td>{len(mutations):,}</td></tr>
-        <tr><th>Records before → after</th><td>{safety['row_count']['before']:,} → {safety['row_count']['after']:,}</td></tr>
-        <tr><th>Values changed</th><td>{len(mutations):,}</td></tr>
+        <tr><th>Records before → after</th><td>{safety['row_count']['before']:,} → {final_row_count:,}</td></tr>
+        <tr><th>Values changed</th><td>{len(value_mutations):,}</td></tr>
     </tbody></table>
     <p class="muted">This report and the exported cleaned CSV together are the audit log for this run —
     the same inputs and the same approvals reproduce the same output.</p>

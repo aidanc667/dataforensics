@@ -50,7 +50,11 @@ def test_load_rules_defaults_missing_optional_sections(tmp_path):
     assert rules["weights_strata"] == {"columns": []}
 
 
-def test_load_rules_rejects_column_in_both_missing_values_and_category_mappings(tmp_path):
+def test_load_rules_allows_disjoint_code_and_category_mappings_on_one_column(tmp_path):
+    # Requirement change: this used to be rejected outright. Codes now
+    # apply first, then category merges, so a column may use both as long
+    # as no value is in both maps or rewritten from one into the other
+    # (those conflicts are covered by the tests further down).
     f = tmp_path / "rules.yaml"
     f.write_text(
         "version: 1\n"
@@ -63,8 +67,9 @@ def test_load_rules_rejects_column_in_both_missing_values_and_category_mappings(
         "  sex:\n"
         "    M: Male\n"
     )
-    with pytest.raises(RulesConfigError):
-        load_rules(f)
+    rules = load_rules(f)
+    assert rules["missing_values"]["sex"] == {"9": "Unknown"}
+    assert rules["category_mappings"]["sex"] == {"M": "Male"}
 
 
 def test_load_rules_rejects_chained_category_mappings(tmp_path):
@@ -436,3 +441,75 @@ def test_find_chained_keys_ignores_self_mappings():
 
 def test_find_chained_keys_empty_mapping():
     assert find_chained_keys({}) == []
+
+
+def test_app_exported_rules_with_safe_fixes_and_expectations_load(tmp_path):
+    """The exact shape the app's "Download rules" button writes."""
+    import yaml as _yaml
+
+    exported = {
+        "version": 1,
+        "primary_key": ["participant_id"],
+        "columns": {"admission_date": {"type": "date", "format": "%m/%d/%Y"}},
+        "missing_values": {"weight": {"9999": ""}},
+        "category_mappings": {},
+        "weights_strata": {"columns": []},
+        "safe_fixes": {
+            "whitespace": ["sex"],
+            "units": {"weight_lbs": {"boundary": 90.5, "minority_side": "low", "factor": 2.20462, "minority_min": 40.0, "minority_max": 90.5}},
+            "date_iso": {"admission_date": "%m/%d/%Y"},
+            "drop_exact_duplicate_rows": True,
+        },
+        "expectations": [{"type": "range", "column": "weight", "min": 50.0, "max": 500.0}],
+    }
+    path = tmp_path / "cleaning_rules.yaml"
+    path.write_text(_yaml.safe_dump(exported, sort_keys=False))
+    loaded = load_rules(path)
+    assert loaded["safe_fixes"] == exported["safe_fixes"]
+    assert loaded["expectations"] == exported["expectations"]
+
+
+def test_rules_without_new_sections_default_to_empty(tmp_path):
+    path = tmp_path / "r.yaml"
+    path.write_text("version: 1\nprimary_key: [id]\ncolumns: {}\n")
+    loaded = load_rules(path)
+    assert loaded["safe_fixes"] == {}
+    assert loaded["expectations"] == []
+
+
+def test_malformed_expectations_section_rejected(tmp_path):
+    path = tmp_path / "r.yaml"
+    path.write_text("version: 1\nprimary_key: [id]\ncolumns: {}\nexpectations: {type: range}\n")
+    with pytest.raises(RulesConfigError, match="expectations"):
+        load_rules(path)
+
+
+def _rules_with(tmp_path, missing: dict, categories: dict):
+    import yaml as _yaml
+
+    path = tmp_path / "r.yaml"
+    path.write_text(
+        _yaml.safe_dump(
+            {"version": 1, "primary_key": ["id"], "columns": {}, "missing_values": missing, "category_mappings": categories}
+        )
+    )
+    return path
+
+
+def test_column_may_have_both_code_and_category_mappings_when_disjoint(tmp_path):
+    # The Messy CSV example's smoking_status needs both: -99 is a code and
+    # never/NEVER are spelling variants of Never.
+    path = _rules_with(tmp_path, {"smoking": {"-99": ""}}, {"smoking": {"never": "Never", "NEVER": "Never"}})
+    assert load_rules(path)["category_mappings"]["smoking"]["never"] == "Never"
+
+
+def test_value_in_both_mappings_is_rejected(tmp_path):
+    path = _rules_with(tmp_path, {"smoking": {"Unknown": ""}}, {"smoking": {"Unknown": "unknown"}})
+    with pytest.raises(RulesConfigError, match="'Unknown'"):
+        load_rules(path)
+
+
+def test_code_mapped_onto_a_category_key_is_rejected(tmp_path):
+    path = _rules_with(tmp_path, {"smoking": {"-99": "never"}}, {"smoking": {"never": "Never"}})
+    with pytest.raises(RulesConfigError, match="'never'"):
+        load_rules(path)

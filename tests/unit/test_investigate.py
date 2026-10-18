@@ -23,6 +23,7 @@ from dataforensics.investigate import (
     detect_numeric_representation_inconsistency,
     detect_similar_categories,
     detect_survey_weight_columns,
+    infer_profile_checks,
     detect_unit_inconsistency,
     detect_value_shape_outliers,
     detect_whitespace_anomalies,
@@ -986,6 +987,176 @@ def test_detect_temporal_gaps_no_finding_for_regular_intervals():
     assert detect_temporal_gaps(rows, "visit_date") is None
 
 
+def test_detect_temporal_gaps_ignores_weekends_in_business_day_data():
+    # Regression: Mon-Fri data has a 3-day Fri->Mon gap every week (3x the
+    # 1-day median), which used to flag every weekend as a coverage gap.
+    start = datetime(2024, 1, 1, tzinfo=UTC).date()  # a Monday
+    days = [start + timedelta(days=d) for d in range(140) if (start + timedelta(days=d)).weekday() < 5]
+    rows = [{"d": d.isoformat()} for d in days]
+    assert detect_temporal_gaps(rows, "d") is None
+    # A real two-week outage in the same data is still caught.
+    outage = [d for d in days if not (start + timedelta(days=50) <= d < start + timedelta(days=64))]
+    result = detect_temporal_gaps([{"d": d.isoformat()} for d in outage], "d")
+    assert result is not None
+    # Last day kept: day 49 (Mon 2024-02-19); first after: day 64 (Tue 2024-03-05).
+    assert [g["gap_days"] for g in result["gaps"]] == [15]
+
+
+def test_detect_temporal_gaps_ignores_chance_lulls_in_random_arrivals():
+    # Regression (error-injection benchmark): visits on random days have
+    # 4-6 day lulls purely by chance; those aren't coverage gaps.
+    import random
+
+    start = datetime(2023, 1, 1, tzinfo=UTC).date()
+    for seed in range(10):
+        rng = random.Random(seed)
+        rows = [{"d": (start + timedelta(days=rng.randint(0, 364))).isoformat()} for _ in range(300)]
+        assert detect_temporal_gaps(rows, "d") is None, f"seed {seed}"
+
+
+def test_detect_temporal_gaps_still_flags_missing_month_in_monthly_series():
+    start = datetime(2020, 1, 1, tzinfo=UTC).date()
+    months = [start.replace(year=2020 + m // 12, month=m % 12 + 1) for m in range(36) if m != 20]
+    result = detect_temporal_gaps([{"d": d.isoformat()} for d in months], "d")
+    assert result is not None
+    assert len(result["gaps"]) == 1
+    assert result["gaps"][0]["after"] == "2021-08-01"
+
+
+def _monthly(n_months: int, skip: set[int]) -> list[dict]:
+    start = datetime(2020, 1, 1, tzinfo=UTC).date()
+    return [
+        {"d": start.replace(year=2020 + m // 12, month=m % 12 + 1).isoformat()} for m in range(n_months) if m not in skip
+    ]
+
+
+def test_detect_temporal_gaps_flags_one_missing_month_in_short_series():
+    # 22 months with one missing = exactly 20 gaps, where a 95th-percentile
+    # filter on a regular series made the largest gap unflaggable.
+    result = detect_temporal_gaps(_monthly(22, {10}), "d")
+    assert result is not None and len(result["gaps"]) == 1
+
+
+def test_detect_temporal_gaps_flags_two_equal_missing_months():
+    result = detect_temporal_gaps(_monthly(36, {8, 20}), "d")
+    assert result is not None
+    assert [g["gap_days"] for g in result["gaps"]] == [61, 61]  # both Sep: Aug 1 -> Oct 1
+
+
 def test_detect_temporal_gaps_none_with_too_few_distinct_dates():
     rows = [{"visit_date": "2024-01-01"}, {"visit_date": "2024-06-01"}]
     assert detect_temporal_gaps(rows, "visit_date") is None
+
+
+def _weights(seed: int, kg: int, lb: int, kids: int = 0) -> list[dict]:
+    import random
+
+    rng = random.Random(seed)
+    values = [rng.uniform(50, 110) for _ in range(kg)]
+    values += [rng.uniform(50, 110) * 2.20462 for _ in range(lb)]
+    values += [rng.uniform(3, 40) for _ in range(kids)]
+    return [{"weight": f"{v:.1f}"} for v in values]
+
+
+def test_detect_unit_inconsistency_finds_overlapping_kg_lb_mix_but_marks_it_inseparable():
+    # 50-110 kg overlaps 110-243 lb: no clean gap, so the original
+    # largest-gap split can't see it (found by the error-injection benchmark).
+    roles = {"weight": {"role": "WEIGHT"}}
+    for seed in range(5):
+        result = detect_unit_inconsistency(_weights(seed, kg=900, lb=100), roles)
+        assert "weight" in result, f"seed {seed}"
+        assert result["weight"]["separable"] is False
+        assert result["weight"]["unit_b"] == "lb"
+
+
+def test_detect_unit_inconsistency_ignores_children_plus_adults():
+    roles = {"weight": {"role": "WEIGHT"}}
+    for seed in range(5):
+        assert detect_unit_inconsistency(_weights(seed, kg=900, lb=0, kids=100), roles) == {}
+
+
+def test_detect_unit_inconsistency_clean_gap_is_separable():
+    rows = [{"weight": str(v)} for v in [60, 62, 65, 70, 72, 75]] + [{"weight": str(round(v * 2.20462, 1))} for v in [61, 66, 71]]
+    result = detect_unit_inconsistency(rows, {"weight": {"role": "WEIGHT"}})
+    assert result["weight"]["separable"] is True
+
+
+def test_detect_unit_inconsistency_not_fooled_by_extreme_codes():
+    # Regression (real BRFSS demo data): once the 7777/9999 codes are
+    # cleaned out, the pound column still holds a few 9000+kg-coded values,
+    # which used to make it read as a kg/lb mix.
+    import csv
+    from pathlib import Path
+
+    path = Path(__file__).parent.parent.parent / "fixtures" / "demos" / "brfss_survey_sample.csv"
+    with open(path) as fh:
+        rows = [{"weight": r["weight_lbs"]} for r in csv.DictReader(fh) if r["weight_lbs"] not in ("", "7777", "9999")]
+    assert any(float(r["weight"]) > 9000 for r in rows)
+    assert detect_unit_inconsistency(rows, {"weight": {"role": "WEIGHT"}}) == {}
+
+
+def test_detect_temporal_gaps_flags_long_outage_in_monthly_series():
+    # Regression: a 6-month outage pushed the series' gap CV past the
+    # "irregular arrivals" cutoff, whose chance bound then hid the outage.
+    result = detect_temporal_gaps(_monthly(36, {10, 11, 12, 13, 14}), "d")
+    assert result is not None
+    assert [g["gap_days"] for g in result["gaps"]] == [182]  # 2020-10-01 -> 2021-04-01
+
+
+def test_detect_temporal_gaps_flags_two_missing_quarters():
+    result = detect_temporal_gaps(_monthly(36, {4, 5, 20, 21}), "d")
+    assert result is not None and len(result["gaps"]) == 2
+
+
+def test_similar_categories_never_suggest_a_padded_canonical():
+    # Regression (cleaning property tests): " a" outnumbered "a", became the
+    # suggested canonical, and the whitespace fix then undid the merge --
+    # two approved changes fighting on every re-run.
+    clusters = detect_similar_categories([" a"] * 5 + ["a"] * 2 + ["b"] * 5)
+    assert clusters[0]["suggested_canonical"] == "a"
+    # Every member padded: the suggestion is the repaired form.
+    clusters = detect_similar_categories([" x"] * 5 + ["x  "] * 3 + ["y"] * 5)
+    assert clusters[0]["suggested_canonical"] == "x"
+
+
+def test_repaired_canonical_never_chains_into_another_cluster():
+    # "cafÃ©"/"CAFÃ©" repair to "café", which is itself a member of the
+    # "café"/"Café" cluster -- merged into one cluster, so no chain.
+    from dataforensics.config_schema import find_chained_keys
+
+    values = ["cafÃ©"] * 3 + ["CAFÃ©"] * 2 + ["café"] * 2 + ["Café"] * 5 + ["tea"] * 5
+    clusters = detect_similar_categories(values)
+    mapping = {v: c["suggested_canonical"] for c in clusters for v in c["values"] if v != c["suggested_canonical"]}
+    assert find_chained_keys(mapping) == []
+
+
+def test_codes_are_not_clustered_as_spelling_variants(tmp_path):
+    from dataforensics.pipeline import run_investigation
+
+    path = tmp_path / "c.csv"
+    path.write_text("id,s\n" + "".join(f"{i},{['N/A', 'n/a', 'Yes', 'yes', 'No'][i % 5]}\n" for i in range(60)))
+    result = run_investigation(path, sheet=None, dataset_type="General", data_size=1)
+    assert set(result["sentinels"]["s"]) == {"N/A", "n/a"}
+    clustered = {v for c in result["category_clusters"].get("s", []) for v in c["values"]}
+    assert clustered == {"Yes", "yes"}
+
+
+def test_body_weight_columns_are_not_survey_weights():
+    # "weight_lbs" is a measured weight, not a sampling weight.
+    assert detect_survey_weight_columns(["weight_lbs", "wt_kg", "weight_g", "perwt", "wt_final"]) == ["wt_final"]
+
+
+def test_infer_profile_checks_from_column_names():
+    # Nothing domain-specific: just the general checks.
+    assert infer_profile_checks(["id", "name", "score"]) == ([], ["General"])
+    # An age column gets the plausible-range check, but not the stricter
+    # same-ID conflict check, which needs patient/participant/visit names.
+    assert infer_profile_checks(["id", "age", "score"]) == (["clinical_ranges"], ["Clinical / Research"])
+    checks, profiles = infer_profile_checks(["participant_id", "age", "bmi"])
+    assert checks == ["clinical_ranges", "conflicting_id_records"] and profiles == ["Clinical / Research"]
+    # Geographic and survey columns add their own checks.
+    checks, profiles = infer_profile_checks(["state_fips", "zip_code", "wt_final"])
+    assert checks == ["fips_format", "zip_format", "survey_weight_columns"]
+    assert profiles == ["Geographic", "Survey"]
+    # A body-weight column alone doesn't make it a survey.
+    assert infer_profile_checks(["weight_lbs"]) == ([], ["General"])

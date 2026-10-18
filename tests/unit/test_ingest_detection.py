@@ -73,3 +73,33 @@ def test_deduplicate_header_no_change_when_no_duplicates():
     from dataforensics.ingest import deduplicate_header
 
     assert deduplicate_header(["id", "age", "sex"]) == ["id", "age", "sex"]
+
+
+def test_small_valid_utf8_file_is_not_misread_as_another_encoding(tmp_path):
+    # Regression: charset_normalizer guessed Windows-1251 for this file,
+    # turning "An\u200bn" into "AnвЂ‹n" on load.
+    from dataforensics.dictionary import read_rows
+
+    f = tmp_path / "x.csv"
+    f.write_bytes("id,name,city\n1,An\u200bn,Den\u200bver\n2,Bob\xa0,X\n3,\u200b,Y\n".encode("utf-8"))
+    assert detect_encoding(f) == "utf-8"
+    rows = read_rows(f)
+    assert rows[0]["name"] == "An\u200bn"
+    assert rows[1]["name"] == "Bob\xa0"
+
+
+def test_utf16_files_are_not_taken_for_utf8(tmp_path):
+    # BOM-less UTF-16 of ASCII text is valid UTF-8 byte for byte (with NULs),
+    # so the UTF-8 shortcut must not claim it.
+    from dataforensics.dictionary import read_rows
+
+    for name, data in (
+        ("bom.csv", "id,name\n1,Zoë\n2,Ann\n".encode("utf-16")),
+        ("nobom.csv", "id,name\n1,Zoe\n2,Ann\n".encode("utf-16-le")),
+    ):
+        f = tmp_path / name
+        f.write_bytes(data)
+        assert detect_encoding(f) != "utf-8", name
+        rows = read_rows(f)
+        assert [r["name"] for r in rows][-1] == "Ann", name
+        assert "\x00" not in "".join(rows[0].keys()), name

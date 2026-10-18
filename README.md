@@ -83,6 +83,52 @@ DataForensics can surface findings such as:
 * FIPS, ZIP, and other identifier formatting issues
 * Potential referential-integrity problems across files, a candidate join key that isn't actually unique, and field-level value discrepancies between two files sharing a key (record-by-record for a one-to-one relationship, or consistency-across-repeated-keys for a one-to-many relationship)
 * An accurate, previewable row-merge of two files on a confirmed key — offered only after the checks above, never automatic
+* Round-number heaping (self-reported weights clustering at 150, 160, 200)
+* Missing rates that differ by group ("income missing for 36% of people under 35 vs 0% of those 35+")
+* Redundant columns, rare category levels, age that disagrees with date of birth, and totals that don't equal the sum of their parts
+* Your own expectations — ranges, required, unique, allowed values, and if-then rules for skip logic and impossible combinations
+* Spreadsheet damage: IDs turned into scientific notation, dates stored as Excel numbers (45000), and codes that lost their leading zeros
+* Synonym codes for one category (M / Male, Y / Yes / True), impossible negatives (negative age, count, price), and unusual combinations of common values
+* Repeated records of one person over time where age goes down or birth date/sex changes
+* ZIP codes in the wrong state, latitude/longitude out of range or swapped, temperatures mixing °F and °C, distances mixing miles and km
+* Date-times mixing time zones or with impossible times; street addresses and titled names in free text; placeholder/junk text; text cut off at a field limit
+
+## Cleaning, verification, and insights
+
+* **51 automated checks** (DF-01 to DF-51), each reported as Flagged, Passed, or Not applicable — a check that needs columns the dataset doesn't have is never shown as "Passed". The app's **Checks** page (sidebar) lists every check, what it looks for, and whether it's fixable on approval or flag-only.
+* **Safe fixes on approval:** trim whitespace, remove hidden characters, repair broken encoding, convert `$50,000`/`50k` to plain numbers, restore leading zeros in ZIP/FIPS codes and other IDs, convert Excel date numbers to dates, rewrite dates as YYYY-MM-DD, merge synonym codes, convert separable unit mixes, and remove exact duplicate rows. Each shows a before → after preview of real rows first. **Approve all recommended fixes** ticks every safe fix, duplicate removal, missing-value code and high-confidence spelling merge in one click; date order (MM/DD vs DD/MM) and fuzzy spelling matches are left for you to decide. Nothing changes until you click Apply.
+* **Judgment calls on approval, never part of Approve all:** treat outliers (cap to the IQR limits, or set to empty — missing-value codes like 9999 are left alone), mask SSNs, emails and phone numbers found inside text (the audit trail never records the original), and fill missing values with the column's median or most common value (shown before you approve; not offered for ID, personal-data, date or free-text columns). They run after the other fixes — so a kg value converted to lb is no longer an outlier — and every changed cell is logged.
+* **Before → after re-check:** after Apply, every check runs again on the cleaned file and the score and check changes are shown side by side.
+* **Audit trail:** every changed cell (original value, new value, rule, timestamp) on screen and as CSV; input and output SHA-256 hashes in the audit report.
+* **Reusable rules:** download `cleaning_rules.yaml` and re-apply the same cleaning to the next release with `dataforensics harmonize ... --execute`.
+* **Insights tab:** the strongest, least obvious patterns as ranked plain-language cards with charts — groups that are several times as likely to have an outcome, group differences, strong relationships, missing-data patterns tied to a group (e.g. income missing far more often for people under 35), how concentrated a total is, dominant values, trends over time, and long-tailed distributions. Each card says why it's useful; the full statistics tables sit underneath. Descriptive and unweighted, with a caveat about chance findings. Every pattern gets a second look before it's shown:
+  * **Confounding:** it's re-tested within groups of age and sex (by default; any other column can be added on the tab). One that mostly disappears when like is compared with like — e.g. in the ACS sample, "income is missing far more often for the 4th person in a household", which is really about children — is held back with the reason; one that survives says so ("Holds after accounting for age_years (1.9×)"), and one age only shrinks says "Partly explained by age_years". Each group is compared with *other* people of similar age, never with a baseline it dominates itself.
+  * **True by definition:** links between columns that measure the same thing (wages ↔ total income) are held back, but only when the names match *and* the data agrees: one is part of a column named as the total, a ratio/average-style column strongly tracks the other, or one column predicts the other almost perfectly.
+  * **Skip patterns vs break-offs:** a question blank for exactly the people a previous answer screens out is labelled a designed skip, and the skip is used to explain that column's other missing-data patterns; if those rows are also blank in many other columns (more than 10%, and more than twice everyone else's rate), they're flagged as a possible break-off instead.
+  * **Codebooks:** upload a `column,value,label` CSV and coded values read as "3 (Widowed)". The two real example datasets come with their official ACS/BRFSS codebooks.
+
+  Held-back patterns (up to 12, one per column pair) are listed with their reasons under the cards, so a pattern that fails the second look is shown as held back rather than simply disappearing.
+* **Checks tab:** every check as a searchable, filterable card: what it looks for, why it matters, and whether it's fixable on approval or flag-only.
+
+## Measured detection: error-injection benchmark
+
+`dataforensics benchmark` plants known errors in clean synthetic data and measures what's caught. Ground truth comes from the injector, never the detectors. 10 seeds × 1,000 rows:
+
+| Planted error | Recall | Flags on clean items | Left after approved fixes |
+|---|---:|---:|---:|
+| Missing-value codes (9999) | 100% | 0 | 0 |
+| Exact duplicate rows | 100% | 0 | 0 |
+| Whitespace | 100% | 0 | 0 |
+| Hidden characters | 100% | 0 | 0 |
+| Broken encoding | 100% | 0 | 0 |
+| Inconsistent categories | 100% | 0 | 0 |
+| Numbers written as text | 100% | 0 | 0 |
+| Mixed kg/lb units (column) | 100% | 0 | 9 of 10 (overlapping ranges: flagged, not auto-converted) |
+| Future dates | 100% | 0 | all (detection only, by design) |
+| Outliers (column) | 100% | 0 | all (never deleted, by design) |
+| Missingness tied to age | 100% | 0 | all (filled only on approval) |
+
+Mean quality score: clean 100 → with errors 97.0 → after approved fixes 97.4. The planted errors touch only a few percent of the 9,000 cells, so the score starts high; what's left after fixing is mostly missing values (the planted gaps, and codes turned into blanks), which cleaning never fills in by itself. On the clean files, the only check that ever fired was the coverage-gap check (1 of 10 runs), which is built to accept about a 5% chance rate. At 300 rows, recall is still 100%, but one chance missingness-by-group pair appeared across 10 runs and the coverage-gap check fired on 3 of 10 clean files (sparse random visit dates have long lulls by chance). Building the benchmark found and fixed five detector problems, and checking the real demo data found two more (see [`WRITEUP.md`](WRITEUP.md#error-injection-benchmark)).
 
 Every finding includes the evidence used to flag it and clearly distinguishes a **potential issue** from a confirmed error.
 
@@ -90,10 +136,10 @@ Every finding includes the evidence used to flag it and clearly distinguishes a 
 
 The tool is intentionally conservative.
 
-* **No automatic deletion of outliers**
+* **No automatic deletion of outliers** (exact duplicate rows can be removed, but only when you approve it, and each removed row is re-verified as identical first)
 * **No automatic imputation**
 * **No automatic fuzzy deduplication** — a fuzzy near-duplicate entity is always a suggestion, never auto-merged
-* **No automatic unit conversion**
+* **No automatic unit conversion** — a kg/lb mix is converted only on approval, and only when the two units' ranges are cleanly separated; overlapping mixes are flagged but never converted
 * **No silent category remapping**
 * **No merging of separate datasets without explicit review and approval** — the Multi-File Relationships tab's merge step shows a full preview (row counts, matched/unmatched, which columns disagree) before producing anything
 * **No claims that a dataset is scientifically valid simply because checks pass**
@@ -242,4 +288,4 @@ Its job is narrower:
 
 For the detailed architecture, safety invariants, data schemas, transformation rules, and implementation decisions, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-For the real-dataset benchmark and findings, see [`WRITEUP.md`](WRITEUP.md).
+For the real-dataset benchmark, the error-injection benchmark, and findings, see [`WRITEUP.md`](WRITEUP.md).
