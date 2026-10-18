@@ -228,14 +228,25 @@ def build_data_dictionary(path: Path, include_raw_samples: bool = False, sheet: 
     return result
 
 
+def _quantile(sorted_vals: list[float], p: float) -> float:
+    """Linear-interpolation quantile of an already-sorted, non-empty list."""
+    position = p * (len(sorted_vals) - 1)
+    lower = int(position)
+    upper = min(lower + 1, len(sorted_vals) - 1)
+    return sorted_vals[lower] + (sorted_vals[upper] - sorted_vals[lower]) * (position - lower)
+
+
 def detect_outliers(values: list[float]) -> dict:
     if len(values) < 4:
         return {"method": "IQR", "outlier_count": 0, "outlier_indices": []}
 
     sorted_vals = sorted(values)
     n = len(sorted_vals)
-    q1 = sorted_vals[(n - 1) // 4]
-    q3 = sorted_vals[(3 * (n - 1)) // 4]
+    # Interpolated quartiles -- the same as Excel's QUARTILE.INC, pandas and
+    # numpy -- so the IQR shown can be checked in a spreadsheet. (Taking the
+    # nearest lower value made the displayed IQR disagree with all of them.)
+    q1 = _quantile(sorted_vals, 0.25)
+    q3 = _quantile(sorted_vals, 0.75)
     iqr = q3 - q1
     lower = q1 - 1.5 * iqr
     upper = q3 + 1.5 * iqr

@@ -10,6 +10,7 @@ built in one testable place instead of inline in the Streamlit script.
 import csv
 import io
 
+from dataforensics.patterns import heaping_share_text
 from dataforensics.typing_guards import is_pii_like_column
 
 # Shown in place of a PII-like primary-key value in the audit trail. Same
@@ -305,7 +306,7 @@ def build_insights(
             {
                 "Type": "Heaping",
                 "Column(s)": col,
-                "Insight": f"{h['share']:.0%} of values end in 0 or 5 (about 20% expected), clustering at {top}; "
+                "Insight": f"{heaping_share_text(h)} (about 20% expected), clustering at {top}; "
                 "values look estimated or self-reported rather than measured.",
             }
         )
@@ -339,7 +340,9 @@ def build_insights(
 
 
 _QUALITY_FIELDS = [
-    ("overall", "Quality score (overall)"),
+    # The one-decimal score, as the app shows it: the rounded one put "+4"
+    # in the report beside "+3.1" on screen.
+    ("overall_exact", "Quality score (overall)"),
     ("completeness", "Completeness"),
     ("consistency", "Consistency"),
     ("validity", "Validity"),
@@ -357,7 +360,7 @@ def build_before_after(before_quality: dict, after_quality: dict, before_catalog
             "Measure": label,
             "Before": before_quality[key],
             "After": after_quality[key],
-            "Change": after_quality[key] - before_quality[key],
+            "Change": round(after_quality[key] - before_quality[key], 1),
         }
         for key, label in _QUALITY_FIELDS
     ]

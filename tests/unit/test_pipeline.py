@@ -108,3 +108,49 @@ def test_score_counts_the_format_problems_cleaning_fixes(tmp_path):
     assert result["format_integrity_flagged_cell_count"] == 9
     # 4 of 100 cells missing -> 0.96 ** 2 = 0.9216 -> 92
     assert result["quality"]["completeness"] == 92
+
+
+def test_default_key_is_a_unique_one():
+    # Regression (accuracy audit): household_id alone repeats in ACS, so the
+    # audit trail couldn't say which person a change was made to.
+    from dataforensics.pipeline import suggest_primary_key
+
+    acs = [{"household_id": f"H{i // 3}", "person_number": str(i % 3 + 1), "age": str(20 + i)} for i in range(9)]
+    assert suggest_primary_key(acs, ["household_id", "person_number", "age"], ["household_id"]) == [
+        "household_id", "person_number"
+    ]
+    # A unique single ID column wins over combining a repeating one.
+    visits = [{"subject_id": f"S{i // 2}", "record_id": f"R{i}", "visit": str(i % 2)} for i in range(6)]
+    assert suggest_primary_key(visits, ["subject_id", "record_id", "visit"], ["subject_id", "record_id"]) == ["record_id"]
+    unique = [{"id": str(i)} for i in range(4)]
+    assert suggest_primary_key(unique, ["id"], ["id"]) == ["id"]
+
+
+def test_the_missing_label_still_counts_as_missing(tmp_path):
+    # Regression (accuracy audit): text codes are mapped to "Missing", which
+    # counted as filled -- completeness rose although nothing was recovered.
+    def completeness(fill: str) -> int:
+        path = tmp_path / f"f{len(fill)}.csv"
+        with open(path, "w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["id", "status"])
+            for i in range(20):
+                writer.writerow([i, fill if i < 4 else ("Never" if i % 2 else "Current")])
+        return run_investigation(path, sheet=None, dataset_type="Auto", data_size=1)["quality"]["completeness"]
+
+    # 4 of 40 cells have no answer either way: 0.9 ** 2 = 0.81 -> 81.
+    assert completeness("") == completeness("Missing") == 81
+
+
+def test_default_key_skips_place_codes_personal_data_and_blank_ids():
+    from dataforensics.pipeline import suggest_primary_key
+
+    # A unique ZIP still identifies a place, not a record: the row ID wins.
+    rows = [{"rid": f"R{i}", "zip": f"0{1000 + i}"} for i in range(5)]
+    assert suggest_primary_key(rows, ["rid", "zip"], ["zip"]) == ["rid"]
+    # A repeating household ID is never paired with a date of birth.
+    people = [{"household_id": f"H{i // 2}", "birth_date": f"19{50 + i}-01-01", "x": str(i)} for i in range(6)]
+    assert suggest_primary_key(people, ["household_id", "birth_date", "x"], ["household_id"]) == ["household_id"]
+    # An ID with a blank cell isn't unique; with no partner the first ID stays the default.
+    blank = [{"id": "" if i == 2 else str(i)} for i in range(4)]
+    assert suggest_primary_key(blank, ["id"], ["id"]) == ["id"]

@@ -26,7 +26,9 @@ from dataforensics.audit_report import (
 from dataforensics.cleaning import (
     FIX_LABELS,
     JUDGMENT_FIXES,
+    MISSING_LABEL,
     apply_safe_fixes,
+    blank_only_where,
     clean_dataset,
     impute_fill_value,
     is_fill_candidate,
@@ -87,6 +89,7 @@ from dataforensics.investigate import (
     reconcile_shared_records,
 )
 from dataforensics.key_insights import build_key_insights
+from dataforensics.patterns import heaping_share_text
 from dataforensics.pipeline import run_investigation
 from dataforensics.report import render_html
 from dataforensics.summary import (
@@ -377,7 +380,10 @@ st.markdown(
     .df-path .df-path-arrow { color: var(--df-accent); }
     @media (max-width: 900px) { .df-hero-title, .df-hero-grid .df-hero-title { font-size: 2rem !important; } }
 
-    .df-sample { padding: 0.15rem 0; }
+    .df-sample { padding: 0.15rem 0 0.5rem; }
+    /* Streamlit pulls markdown up 1rem to cancel a trailing <p> margin; these rows have
+       no <p>, so the text overflowed its row and crowded the box's bottom edge. */
+    [data-testid="stMarkdownContainer"]:has(> .df-sample) { margin-bottom: 0; }
     .df-row-rule { border-top: 1px solid var(--df-border); margin: 0.2rem 0; }
     .df-sample-tag { font-family: var(--df-mono); font-size: 0.74rem; color: var(--df-accent); }
     .df-sample-title { font-weight: 600; font-size: 1rem; color: var(--df-text); margin: 0.2rem 0 0.15rem; }
@@ -902,7 +908,7 @@ def _visualize_whitespace(value: str) -> str:
 _PII_EVIDENCE_MASK = "[masked: potential identifier pattern detected]"
 
 
-def _evidence_lines(column: str, evidence: list[tuple[int, str]]) -> list[str]:
+def _evidence_lines(column: str, evidence: list[tuple[int, str]], *, show_spaces: bool = False) -> list[str]:
     """Format (row_index, raw_value) evidence pairs as "row N -> column =
     value" lines, masking the value for a PII-like column the same way
     every other value shown in this app is masked -- an evidence panel
@@ -911,7 +917,10 @@ def _evidence_lines(column: str, evidence: list[tuple[int, str]]) -> list[str]:
     pii = is_pii_like_column(column)
     lines = []
     for row_index, value in evidence:
-        shown = _PII_EVIDENCE_MASK if pii else value
+        # The page collapses spaces, so whitespace evidence (" Male ") would
+        # otherwise show as "Male" -- hiding the very thing being flagged.
+        # Plain text (the panel escapes it): quoted, each space drawn as "·".
+        shown = _PII_EVIDENCE_MASK if pii else ('"' + value.replace(" ", "·").replace("\t", "→") + '"' if show_spaces else value)
         lines.append(f"row {row_index + 1:,} → {column} = {shown}")
     return lines
 
@@ -1135,6 +1144,7 @@ def _approval_model(
     columns: list[str],
     column_types: dict,
     id_like_defaults: list[str],
+    default_primary_key: list[str],
     sentinels: dict,
     ambiguous_dates: dict,
     category_clusters: dict,
@@ -1156,7 +1166,7 @@ def _approval_model(
     values: the Results page has none.) Also returns the fix offers and the
     approval-key lists the Approve-all / Clear-all buttons act on."""
     state = st.session_state
-    primary_key = state.get(f"dataforensics_primary_key__{source_key}", id_like_defaults[:1] or columns[:1]) or columns[:1]
+    primary_key = state.get(f"dataforensics_primary_key__{source_key}", default_primary_key) or columns[:1]
     approved_sentinels: dict[str, dict[str, str]] = {}
     approved_categories: dict[str, dict[str, str]] = {}
     approved_date_formats: dict[str, str] = {}
@@ -1172,7 +1182,7 @@ def _approval_model(
             if col not in primary_key:
                 recommended.append(f"{key}_on")
             if state.get(f"{key}_on", False):
-                default_label = "" if column_types.get(col) == "numeric" else "Missing"
+                default_label = "" if column_types.get(col) == "numeric" else MISSING_LABEL
                 approved_sentinels.setdefault(col, {})[val] = state.get(f"{key}_label", default_label)
 
     for col in ambiguous_dates:
@@ -1185,7 +1195,7 @@ def _approval_model(
     for col, clusters in category_clusters.items():
         for i, cluster in enumerate(clusters):
             key = f"cat__{source_key}__{col}__{i}_on"
-            label_collision = col in sentinels and bool({"Missing", ""} & set(cluster["values"]))
+            label_collision = col in sentinels and bool({MISSING_LABEL, ""} & set(cluster["values"]))
             default = cluster["confidence"] == "high" and not label_collision
             defaults[key] = default
             every.append(key)
@@ -1319,20 +1329,32 @@ def _approval_model(
         g["column"] for g in group_missingness
         if g["kind"] == "category" and g["highest"]["rate"] >= 0.95 and g["lowest"]["rate"] <= 0.02
     }
+    numeric_columns = [c for c in columns if column_types.get(c) == "numeric"]
     fill_offers = []
     for col in columns:
         if col in off_limits or col in skip_columns or col in pii_content_findings:
             continue
+        # Blank only for ages 0-14 (wages), 0-2 (education): not asked, so
+        # "not applicable" -- a fill would give a toddler a salary.
+        if blank_only_where(staged, col, numeric_columns, {c: set(v) for c, v in sentinels.items()}):
+            continue
         empties = [(i, "") for i, r in enumerate(staged) if r.get(col) in (None, "")]
-        filled_values = [str(r.get(col)).strip() for r in staged if r.get(col) not in (None, "")]
+        # A code mapped to "Missing" is no answer either: it can't be the fill
+        # value, and it counts toward "mostly empty".
+        no_answer = len(empties) + sum(1 for r in staged if str(r.get(col) or "").strip().casefold() == MISSING_LABEL.casefold())
+        filled_values = [
+            v for r in staged
+            if r.get(col) not in (None, "") and (v := str(r.get(col)).strip()).casefold() != MISSING_LABEL.casefold()
+        ]
         if (
             not empties
             # Mostly empty: a fill would make up most of the column.
-            or len(empties) > len(staged) / 2
+            or no_answer > len(staged) / 2
             or not is_fill_candidate(column_types.get(col), len(filled_values), len(set(filled_values)))
         ):
             continue
-        fill = impute_fill_value(staged, col, set(sentinels.get(col, [])), as_category=bool(_CODE_NAME.search(col)))
+        exclude = {*sentinels.get(col, []), MISSING_LABEL, MISSING_LABEL.lower(), MISSING_LABEL.upper()}
+        fill = impute_fill_value(staged, col, exclude, as_category=bool(_CODE_NAME.search(col)))
         if fill is None:
             continue
         method, value = fill
@@ -1354,7 +1376,7 @@ def _approval_model(
         + sum(
             1 for col, clusters in category_clusters.items() for i, c in enumerate(clusters)
             if state.get(f"cat__{source_key}__{col}__{i}_on",
-                         c["confidence"] == "high" and not (col in sentinels and bool({"Missing", ""} & set(c["values"]))))
+                         c["confidence"] == "high" and not (col in sentinels and bool({MISSING_LABEL, ""} & set(c["values"]))))
         )
         + sum(len(v) for v in approved_fixes.values() if isinstance(v, (list, dict)))
         + (1 if approved_fixes.get("drop_exact_duplicate_rows") else 0)
@@ -1999,6 +2021,7 @@ if workspace == "analyze":
         columns=columns,
         column_types=column_types,
         id_like_defaults=id_like_defaults,
+        default_primary_key=investigation["default_primary_key"],
         sentinels=sentinels,
         ambiguous_dates=ambiguous_dates,
         category_clusters=category_clusters,
@@ -2436,10 +2459,15 @@ if workspace == "analyze":
         if heaping_findings:
             attention_log.append("warning")
             with st.expander(f"{_n(len(heaping_findings), 'column')} with round-number heaping", icon=":material/warning:"):
-                st.caption("Values ending in 0 or 5 far more often than the ~20% expected by chance — typical of estimated or self-reported answers.")
+                st.caption(
+                    "Round numbers far more often than the ~20% expected by chance — typical of estimated or "
+                    "self-reported answers. A column recorded in thousands is measured in thousands."
+                )
                 for col, h in heaping_findings.items():
                     top = ", ".join(f"{v} ({c})" for v, c in h["top_values"])
-                    st.markdown(f"- **{_esc(col)}**: {h['share']:.0%} end in 0/5 (index {h['index']}; 100 = none) — most common: {_esc(top)}")
+                    st.markdown(
+                        f"- **{_esc(col)}**: {heaping_share_text(h)} (index {h['index']}; 100 = none) — most common: {_esc(top)}"
+                    )
 
         if rare_category_findings:
             attention_log.append("warning")
@@ -2780,7 +2808,7 @@ if workspace == "analyze":
                 )
                 _evidence_panel(
                     rule=f"{col} has a value with leading/trailing whitespace or 2+ consecutive internal spaces.",
-                    lines=_evidence_lines(col, find_whitespace_anomaly_evidence(rows, col)),
+                    lines=_evidence_lines(col, find_whitespace_anomaly_evidence(rows, col), show_spaces=True),
                     not_known="Whether this whitespace was intentional, or an export/copy-paste artifact.",
                     recommended_action="Review manually — DataForensics never trims or reformats a value automatically.",
                 )
@@ -3315,7 +3343,7 @@ if workspace == "analyze":
             "Primary key column(s)",
             help="The column(s) that identify a record — used to find duplicate and conflicting records.",
             options=columns,
-            default=id_like_defaults[:1] or columns[:1],
+            default=investigation["default_primary_key"],
             key=f"dataforensics_primary_key__{_source_key}",
         )
 
@@ -3338,7 +3366,7 @@ if workspace == "analyze":
                         # column is all numbers; text columns get an explicit label.
                         c3.text_input(
                             "Map to (blank = empty cell)",
-                            value="" if column_types.get(col) == "numeric" else "Missing",
+                            value="" if column_types.get(col) == "numeric" else MISSING_LABEL,
                             key=f"{key}_label",
                             label_visibility="collapsed",
                             placeholder="(empty cell)",
@@ -3398,7 +3426,7 @@ if workspace == "analyze":
                         # A cluster containing a code's default label ("Missing", or a
                         # blank) would rewrite that code's output, which the app
                         # refuses -- so it's neither pre-ticked nor recommended.
-                        label_collision = col in sentinels and bool({"Missing", ""} & set(cluster["values"]))
+                        label_collision = col in sentinels and bool({MISSING_LABEL, ""} & set(cluster["values"]))
                         st.session_state.setdefault(f"{key}_on", cluster["confidence"] == "high" and not label_collision)
                         c1.checkbox("approve", key=f"{key}_on", label_visibility="collapsed")
                         values_str = " / ".join(f'"{_visualize_whitespace(v)}"' for v in cluster["values"])
@@ -3793,11 +3821,20 @@ if workspace == "analyze":
                     "choose Cap to the limit instead, if you want them filled.",
                     icon=":material/info:",
                 )
+            filled = sum(1 for m in mutations if m["transformation_rule"].startswith("impute:"))
+            if filled and after["quality"]["completeness"] > quality["completeness"]:
+                st.info(
+                    f"Completeness rose because you chose to fill {_n(filled, 'empty cell')} with an estimate (the "
+                    "column's median or most common value). The score measures the file, not whether those estimates "
+                    "are right — the audit trail lists every filled cell.",
+                    icon=":material/info:",
+                )
             st.caption(
-                "Null counts can rise after cleaning: a missing-value code (like 9999) turned into an empty cell was "
-                "always missing — it's now counted honestly, which lowers Completeness while raising Validity. "
-                "Checks that only describe the data (heaping, missingness patterns) don't change; outliers and gaps "
-                "change only if you approved treating or filling them under Judgment calls."
+                "Null counts can rise after cleaning: a missing-value code (like 9999) turned into an empty cell or "
+                "\"Missing\" was always missing, and the score counted it as missing before too — so the change "
+                "itself doesn't move Completeness (a label you typed yourself is counted as an answer). Checks that "
+                "only describe the data (heaping, missingness patterns) don't change; outliers and gaps change only "
+                "if you approved treating or filling them under Judgment calls."
             )
             _table_with_download(
                 f"Audit Trail ({len(mutations):,} change{'s' if len(mutations) != 1 else ''})",

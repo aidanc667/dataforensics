@@ -97,6 +97,16 @@ def detect_heaping(
     return results
 
 
+def heaping_share_text(finding: dict) -> str:
+    """What the heaping share measures, in words: "76% of values end in 0
+    or 5", or -- for a column recorded in thousands, where every value ends
+    in 0 -- "91% of values are multiples of 5,000"."""
+    resolution = finding.get("resolution", 1)
+    if resolution == 1:
+        return f"{finding['share']:.0%} of values end in 0 or 5"
+    return f"{finding['share']:.0%} of values are multiples of {5 * resolution:,}"
+
+
 # --------------------------------------------------------------------- #
 # Missingness rates by group
 # --------------------------------------------------------------------- #

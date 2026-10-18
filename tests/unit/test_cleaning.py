@@ -1,6 +1,7 @@
 import pytest
 
 from dataforensics.cleaning import (
+    blank_only_where,
     PII_MASK_PLACEHOLDER,
     apply_safe_fixes,
     check_judgment_fixes,
@@ -419,3 +420,52 @@ def test_looks_like_codes():
     assert not looks_like_codes(["10", "20", "30", "40"])           # one-off whole numbers
     assert not looks_like_codes([str(w) for w in range(100, 160)])   # many distinct weights
     assert not looks_like_codes(["1.5", "2", "2"])                  # not whole numbers
+
+
+def test_blank_only_where_finds_not_applicable_blanks():
+    # Wages blank for exactly the ages 0-14, never for 15+: not asked, so a
+    # fill would give a child a salary (the ACS sample's real pattern).
+    ages = [(i * 37) % 60 for i in range(60)]  # every age 0-59 once, not in file order
+    rows = [{"age": str(a), "wages": "" if a < 15 else str(1000 * a)} for a in ages]
+    assert blank_only_where(rows, "wages", ["age"]) == ("age", 0.0, 14.0)
+
+
+def test_blank_only_where_ignores_blanks_spread_across_the_range():
+    rows = [{"age": str(a), "wages": "" if a % 7 == 0 else "100"} for a in ((i * 37) % 60 for i in range(60))]
+    assert blank_only_where(rows, "wages", ["age"]) is None
+
+
+def test_blank_only_where_needs_five_rows_on_each_side():
+    rows = [{"age": str(a), "wages": "" if a < 3 else "100"} for a in ((i * 37) % 60 for i in range(60))]
+    assert blank_only_where(rows, "wages", ["age"]) is None
+
+
+def test_audit_names_the_row_when_the_key_repeats():
+    # Regression (accuracy audit): ACS's default key (household_id) repeats
+    # within a household, so "household_id=H1" couldn't say whose cell changed.
+    rows = [{"hh": "H1", "p": "1", "x": " a"}, {"hh": "H1", "p": "2", "x": " b"}]
+    rules = {"version": 1, "primary_key": ["hh"], "columns": {}, "missing_values": {}, "category_mappings": {}}
+    result = clean_dataset(rows, rules, {"whitespace": ["x"]}, [], ["hh"], reason="test")
+    assert [m["row_key"] for m in result["mutations"]] == [{"hh": "H1", "row": 1}, {"hh": "H1", "row": 2}]
+
+
+def test_audit_key_has_no_row_number_when_the_key_is_unique():
+    rows = [{"hh": "H1", "x": " a"}, {"hh": "H2", "x": " b"}]
+    rules = {"version": 1, "primary_key": ["hh"], "columns": {}, "missing_values": {}, "category_mappings": {}}
+    result = clean_dataset(rows, rules, {"whitespace": ["x"]}, [], ["hh"], reason="test")
+    assert [m["row_key"] for m in result["mutations"]] == [{"hh": "H1"}, {"hh": "H2"}]
+
+
+def test_blank_only_where_ignores_a_row_order_column():
+    # A measure that stopped being recorded for the last records: blanks sit
+    # in one range of the row sequence, but that's not "not applicable".
+    rows = [{"seq": str(i), "bp": "" if i >= 40 else "120"} for i in range(50)]
+    assert blank_only_where(rows, "bp", ["seq"]) is None
+
+
+def test_blank_only_where_still_works_on_a_file_sorted_by_age():
+    # Age rises down the file but repeats -- not an index -- so the
+    # "not applicable" range is still recognised.
+    ages = sorted((i * 37) % 60 for i in range(120))
+    rows = [{"age": str(a), "wages": "" if a < 15 else "100"} for a in ages]
+    assert blank_only_where(rows, "wages", ["age"]) == ("age", 0.0, 14.0)

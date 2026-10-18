@@ -47,6 +47,9 @@ FIX_ORDER = (
 # Fixes that need a person's judgment -- never ticked by "Approve all
 # recommended fixes".
 JUDGMENT_FIXES = ("outliers", "pii_mask", "impute")
+# What a missing-value code in a text column is mapped to by default (a
+# number column gets an empty cell). Still missing, and scored as missing.
+MISSING_LABEL = "Missing"
 
 FIX_LABELS = {
     "invisible": "Remove hidden/invisible characters",
@@ -253,6 +256,47 @@ def is_fill_candidate(column_type: str | None, filled: int, distinct: int) -> bo
     return column_type == "categorical" and filled > 0 and distinct <= max(2, filled // 2)
 
 
+def blank_only_where(
+    rows: list[dict], column: str, numeric_columns: list[str], exclude: dict[str, set[str]] | None = None
+) -> tuple[str, float, float] | None:
+    """(other column, low, high) when every blank in `column` falls in a
+    range of another numeric column that no filled row reaches -- wages
+    blank for exactly the ages 0-14, education for ages 0-2. Such blanks
+    mean "not asked / not applicable", so filling them would invent answers
+    (a toddler's wage). Needs 5+ rows on each side; None otherwise."""
+    exclude = exclude or {}
+    blank = [str(r.get(column) or "").strip() == "" for r in rows]
+    if sum(blank) < 5:
+        return None
+    for other in numeric_columns:
+        if other == column:
+            continue
+        codes = exclude.get(other, set())
+        on_blank: list[float] = []
+        on_filled: list[float] = []
+        in_order: list[float] = []
+        for r, is_blank in zip(rows, blank, strict=True):
+            raw = str(r.get(other) or "").strip()
+            value = None if raw in codes else parse_finite_float(raw)
+            if value is not None:
+                (on_blank if is_blank else on_filled).append(value)
+                in_order.append(value)
+        # A column that only rises (or falls) down the file -- a row number,
+        # an enrolment sequence -- would make any run of trailing blanks look
+        # "not applicable" (a measure that simply stopped being recorded).
+        # (Only when it's also nearly all-unique, like an index: a file sorted
+        # by age still has a real "not applicable" age range.)
+        pairs = list(zip(in_order, in_order[1:]))
+        index_like = len(set(in_order)) >= 0.9 * len(in_order)
+        if index_like and (all(a <= b for a, b in pairs) or all(a >= b for a, b in pairs)):
+            continue
+        if len(on_blank) >= 5 and len(on_filled) >= 5 and (
+            max(on_blank) < min(on_filled) or min(on_blank) > max(on_filled)
+        ):
+            return other, min(on_blank), max(on_blank)
+    return None
+
+
 def outlier_fix_params(outliers: dict, keep: list[str], action: str = "cap", *, whole_numbers: bool = False) -> dict:
     """The outliers-fix parameters from a detect_outliers result: the same
     IQR limits the check used (Q1 - 1.5 IQR, Q3 + 1.5 IQR). For a column of
@@ -413,7 +457,7 @@ def _fill(_empty: str, *, value: str) -> str:
 
 
 def apply_safe_fixes(
-    rows: list[dict], fixes: dict, primary_key: list[str], *, reason: str
+    rows: list[dict], fixes: dict, primary_key: list[str], *, reason: str, row_numbers: bool = False
 ) -> tuple[list[dict], list[dict]]:
     """Apply approved value-level fixes. Returns (new rows, mutations).
     Row count and order are preserved (duplicate removal is separate --
@@ -424,9 +468,11 @@ def apply_safe_fixes(
     plan = _fixers(fixes)
     out_rows: list[dict] = []
     mutations: list[dict] = []
-    for row in rows:
+    for row_number, row in enumerate(rows, start=1):
         new_row = dict(row)
         row_key = {k: row.get(k) for k in primary_key}
+        if row_numbers:  # see apply_transformations
+            row_key["row"] = row_number
         for name, column, fixer in plan:
             original = new_row.get(column)
             empty = original is None or original == ""
@@ -452,7 +498,7 @@ def apply_safe_fixes(
 
 
 def drop_duplicate_rows(
-    rows: list[dict], duplicates: list[dict], primary_key: list[str], *, reason: str
+    rows: list[dict], duplicates: list[dict], primary_key: list[str], *, reason: str, row_numbers: bool = False
 ) -> tuple[list[dict], list[dict]]:
     """Remove the rows detect_duplicate_rows flagged (each `duplicates`
     entry has row_index and duplicate_of_row_index), keeping the first
@@ -469,7 +515,7 @@ def drop_duplicate_rows(
         to_remove[i] = keep
     mutations = [
         {
-            "row_key": {k: rows[i].get(k) for k in primary_key},
+            "row_key": {k: rows[i].get(k) for k in primary_key} | ({"row": i + 1} if row_numbers else {}),
             "column": "(entire row)",
             "original_value": f"data row {i + 1}",
             "new_value": f"(removed: exact duplicate of data row {keep + 1})",
@@ -511,14 +557,17 @@ def clean_dataset(
                 raise ValueError(f"column {column!r}: {kind} would chain on {chained}")
     validate_fixes({k: v for k, v in fixes.items()})
     check_judgment_fixes(rules, fixes, primary_key)
-    out, mutations = apply_transformations(rows, rules, reason=reason)
+    # A key that repeats can't say which row a change was made in, so the
+    # log then also names the data row.
+    row_numbers = len({tuple(r.get(k) for k in primary_key) for r in rows}) < len(rows)
+    out, mutations = apply_transformations(rows, rules, reason=reason, row_numbers=row_numbers)
     mask_logged_personal_data(mutations, fixes.get("pii_mask", []))
     value_fixes = {k: v for k, v in fixes.items() if k != "drop_exact_duplicate_rows"}
-    out, fix_mutations = apply_safe_fixes(out, value_fixes, primary_key, reason=reason)
+    out, fix_mutations = apply_safe_fixes(out, value_fixes, primary_key, reason=reason, row_numbers=row_numbers)
     mutations += fix_mutations
     safety = compute_safety_report(rows, out, primary_key)
     removed: list[dict] = []
     if safety["all_passed"] and fixes.get("drop_exact_duplicate_rows"):
-        out, removed = drop_duplicate_rows(out, duplicates, primary_key, reason=reason)
+        out, removed = drop_duplicate_rows(out, duplicates, primary_key, reason=reason, row_numbers=row_numbers)
         mutations += removed
     return {"rows": out, "mutations": mutations, "safety": safety, "rows_removed": len(removed)}

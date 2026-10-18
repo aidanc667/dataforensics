@@ -7,6 +7,7 @@ from dataforensics.patterns import (
     detect_redundant_columns,
     detect_total_mismatch,
     find_total_candidates,
+    heaping_share_text,
 )
 
 FREE = {"category": "free_text"}
@@ -178,3 +179,12 @@ def test_age_dob_prefers_visit_style_reference_date():
     rows = [{"age": "38", "dob": "1985-03-04", "updated_date": "2026-01-01", "visit_date": "2024-01-10"}]
     # Against updated_date the age would look 2 years off; against the visit it's right.
     assert detect_age_dob_mismatch(rows, roles) == {}
+
+
+def test_heaping_text_names_the_unit_it_was_measured_in():
+    # Regression (accuracy audit): incomes recorded in hundreds all end in 0,
+    # yet the text said "91% of values end in 0 or 5". At a resolution of 100
+    # the share measured is multiples of 500.
+    assert heaping_share_text({"share": 0.76, "resolution": 1}) == "76% of values end in 0 or 5"
+    assert heaping_share_text({"share": 0.91, "resolution": 100}) == "91% of values are multiples of 500"
+    assert heaping_share_text({"share": 0.6, "resolution": 1000}) == "60% of values are multiples of 5,000"

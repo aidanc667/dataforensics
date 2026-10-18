@@ -192,15 +192,17 @@ def test_rows_to_csv_round_trips_and_handles_empty():
 
 
 def test_before_after_reports_scores_and_only_changed_checks():
-    q_before = {"overall": 70, "completeness": 90, "consistency": 60, "validity": 50, "uniqueness": 100, "structural_quality": 100}
-    q_after = {**q_before, "overall": 85, "validity": 95, "completeness": 85}
+    q_before = {"overall": 70, "overall_exact": 70.4, "completeness": 90, "consistency": 60, "validity": 50,
+                "uniqueness": 100, "structural_quality": 100}
+    q_after = {**q_before, "overall": 85, "overall_exact": 85.0, "validity": 95, "completeness": 85}
     before = _all_zero()
     before.update(missing_value_codes=116, whitespace=4, statistical_outliers=13)
     after = _all_zero()
     after.update(statistical_outliers=13)
     rows = build_before_after(q_before, q_after, build_check_catalog(before), build_check_catalog(after))
     by_measure = {r["Measure"]: r for r in rows}
-    assert by_measure["Quality score (overall)"] == {"Measure": "Quality score (overall)", "Before": 70, "After": 85, "Change": 15}
+    # The one-decimal score, as the app shows it (85.0 - 70.4 = 14.6, not a rounded 15).
+    assert by_measure["Quality score (overall)"] == {"Measure": "Quality score (overall)", "Before": 70.4, "After": 85.0, "Change": 14.6}
     assert by_measure["Completeness"]["Change"] == -5
     changed_checks = [r["Measure"] for r in rows[6:]]
     assert changed_checks == [
@@ -211,7 +213,7 @@ def test_before_after_reports_scores_and_only_changed_checks():
 
 
 def test_before_after_rejects_mismatched_catalogs():
-    q = {k: 100 for k in ("overall", "completeness", "consistency", "validity", "uniqueness", "structural_quality")}
+    q = {k: 100 for k in ("overall", "overall_exact", "completeness", "consistency", "validity", "uniqueness", "structural_quality")}
     with pytest.raises(ValueError, match="DF-01"):
         build_before_after(q, q, build_check_catalog(_all_zero()), [])
 

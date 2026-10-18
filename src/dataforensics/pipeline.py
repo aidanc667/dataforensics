@@ -8,6 +8,7 @@ re-run all of it) and run the identical checks again on the cleaned
 output for a before/after comparison.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ from dataforensics.advanced_checks import (
     synonym_clusters,
     temperature_columns,
 )
-from dataforensics.cleaning import find_leading_zero_candidates
+from dataforensics.cleaning import MISSING_LABEL, find_leading_zero_candidates
 from dataforensics.dictionary import (
     build_data_dictionary,
     count_stripped_footer_lines,
@@ -102,6 +103,44 @@ from dataforensics.quality_score import compute_quality_score
 from dataforensics.summary import build_check_catalog, build_insights, build_null_table
 from dataforensics.typing_guards import is_id_like_column, is_pii_like_column
 
+_RECORD_NUMBER_NAME = re.compile(
+    r"(^|_)(person|member|line|seq|sequence|number|num|visit|wave|round|index|date|time)(_|$)", re.IGNORECASE
+)
+# Codes for a place, not a record: many people share a ZIP or a county.
+_PLACE_CODE_NAME = re.compile(r"(^|_)(zip|zipcode|postal|postcode|fips|state|county|puma|tract)(_|$)", re.IGNORECASE)
+
+
+def suggest_primary_key(rows: list[dict], columns: list[str], id_like: list[str]) -> list[str]:
+    """The default record key: the first ID-like column (not a place code
+    such as a ZIP or FIPS code) that is unique and never blank; otherwise
+    the first such column plus a record-number or date column that makes
+    every row unique ("household_id" + "person_number"). Falls back to the
+    first record ID, or else the first column that isn't a place code, so
+    the user still starts from the best guess."""
+    # Not a place code, and not personal data (a date of birth or phone
+    # number would make a poor -- and, in the audit trail, masked -- key).
+    record_ids = [c for c in id_like if not _PLACE_CODE_NAME.search(c) and not is_pii_like_column(c)]
+    fallback = record_ids[:1] or [c for c in columns if not _PLACE_CODE_NAME.search(c)][:1] or columns[:1]
+    if not rows or not fallback:
+        return fallback
+
+    def unique(key: list[str]) -> bool:
+        values = [tuple(str(r.get(k) or "").strip() for k in key) for r in rows]
+        return all(all(v) for v in values) and len(set(values)) == len(values)
+
+    for column in record_ids:  # any single record ID that identifies every row ("record_id")
+        if unique([column]):
+            return [column]
+    if record_ids:
+        partners = [
+            c for c in columns if c != record_ids[0] and _RECORD_NUMBER_NAME.search(c) and not is_pii_like_column(c)
+        ]
+        partners.sort(key=lambda c: len({r.get(c) for r in rows}))
+        for column in partners:
+            if unique([record_ids[0], column]):
+                return [record_ids[0], column]
+    return fallback  # without a record ID, the first column: files usually lead with their row ID
+
 
 def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, data_size: int) -> dict:
     """Every check's result for the dataset at `data_path`, keyed by name.
@@ -117,6 +156,7 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
     rows = read_rows(data_path, sheet=sheet)
     columns = list(dictionary.keys())
     id_like_defaults = [c for c, f in dictionary.items() if f.get("category") == "id"]
+    default_primary_key = suggest_primary_key(rows, columns, id_like_defaults)
     column_types = classify_column_types(dictionary, rows)
     # Computed once, shared by the "Suggested variable roles" expander
     # further down AND the quasi-identifier / birth-date cross-column
@@ -287,6 +327,10 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         future_evidence = find_future_date_evidence(rows, col)
         if future_evidence:
             future_date_findings[col] = future_evidence
+        # Birth dates aren't a timeline of observations: years between two
+        # people's birthdays is not a gap in coverage.
+        if (role_by_column.get(col) or {}).get("role") == "DATE_OF_BIRTH":
+            continue
         gap_result = detect_temporal_gaps(rows, col)
         if gap_result:
             temporal_gap_findings[col] = gap_result
@@ -537,10 +581,21 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
     whitespace_only_cells = sum(
         1 for r in rows for c in columns if (v := r.get(c)) not in (None, "") and not str(v).strip()
     )
+    # "Missing" is the label the app maps text codes to: still no answer, so
+    # still missing. Without this, mapping "-99" to "Missing" raised
+    # completeness although no data was recovered. (Not counted twice when
+    # the label is itself flagged as a code, which completeness adds below.)
+    missing_label_cells = sum(
+        1
+        for r in rows
+        for c in columns
+        if str(r.get(c) or "").strip().casefold() == MISSING_LABEL.casefold()
+        and str(r.get(c) or "").strip() not in sentinels.get(c, ())
+    )
     quality = compute_quality_score(
         row_count=len(rows),
         column_count=len(columns),
-        null_cell_count=sum(f["null_count"] for f in dictionary.values()) + whitespace_only_cells,
+        null_cell_count=sum(f["null_count"] for f in dictionary.values()) + whitespace_only_cells + missing_label_cells,
         duplicate_row_count=len(dup_rows),
         zero_variance_column_count=sum(1 for f in dictionary.values() if f["is_zero_variance"]),
         ragged_row_count=ragged_row_count,
@@ -764,6 +819,7 @@ def run_investigation(data_path: Path, *, sheet: str | None, dataset_type: str, 
         "fuzzy_exact_columns": fuzzy_exact_columns,
         "fuzzy_name_column": fuzzy_name_column,
         "id_like_defaults": id_like_defaults,
+        "default_primary_key": default_primary_key,
         "insights": insights,
         "invalid_fips_findings": invalid_fips_findings,
         "invalid_zip_findings": invalid_zip_findings,

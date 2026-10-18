@@ -42,3 +42,11 @@ def test_top_code_spike_detected_for_census_style_capping():
 def test_no_top_code_spike_for_smoothly_distributed_values():
     values = list(range(1, 101))
     assert detect_top_code_spike(values) is None
+
+
+def test_quartiles_are_interpolated_like_excel_quartile_inc():
+    # Regression (accuracy audit): quartiles were the nearest lower value, so
+    # the IQR shown disagreed with Excel, pandas and numpy. For 1..8, Excel's
+    # QUARTILE.INC gives Q1 = 1 + 0.25*7 = 2.75 and Q3 = 1 + 0.75*7 = 6.25.
+    result = detect_outliers([8, 3, 1, 6, 2, 7, 5, 4])
+    assert (result["q1"], result["q3"], result["iqr"]) == (2.75, 6.25, 3.5)

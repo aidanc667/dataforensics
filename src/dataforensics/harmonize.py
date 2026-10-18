@@ -243,7 +243,7 @@ def plan_transformations(rows: list[dict], rules: dict) -> list[dict]:
 
 
 def apply_transformations(
-    rows: list[dict], rules: dict, *, reason: str = "Specified in the rules file"
+    rows: list[dict], rules: dict, *, reason: str = "Specified in the rules file", row_numbers: bool = False
 ) -> tuple[list[dict], list[dict]]:
     """Apply `rules`'s missing_values/category_mappings to `rows`.
 
@@ -252,6 +252,10 @@ def apply_transformations(
     the rules file" for the CLI's --rules path, or "Approved by user during
     interactive review" for an app that assembled rules from clicked
     approvals). It does not affect behavior, only the audit trail.
+
+    `row_numbers` adds the data row number to each mutation's row key, for
+    a primary key that repeats (otherwise two people in one household
+    would share a key and the log couldn't say whose cell changed).
     """
     primary_key = rules["primary_key"]
     missing_values = rules.get("missing_values", {})
@@ -260,7 +264,7 @@ def apply_transformations(
     transformed = []
     mutations = []
 
-    for row in rows:
+    for row_number, row in enumerate(rows, start=1):
         new_row = dict(row)
         # Known limitation: row_key is not masked even if a primary_key column
         # is itself PII-like (e.g. primary_key: [ssn]). Masking it would break
@@ -268,6 +272,8 @@ def apply_transformations(
         # so this is a deliberate scope boundary, not an oversight — avoid
         # choosing a PII-pattern column as a primary key if this matters.
         row_key = {k: row.get(k) for k in primary_key}
+        if row_numbers:
+            row_key["row"] = row_number
 
         for column, sentinel_map in missing_values.items():
             original = new_row.get(column)
