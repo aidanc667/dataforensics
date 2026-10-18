@@ -146,8 +146,8 @@ def build_investigation_findings(
     it isn't missing from the one document a user actually keeps. Always
     tier "info" and confidence "N/A": these are plain comparisons, never
     framed as a significance test, and there is no apply mechanism for
-    them (DataForensics never imputes), so they're always fully
-    unresolved by construction, same as an outlier or top-coding finding.
+    them (DataForensics only fills gaps you approve), so they're always fully
+    unresolved by construction, same as a top-coding finding.
 
     "resolved" is determined from `mutations` (what was ACTUALLY applied,
     the ground truth), not from checkbox state -- a sentinel/category
@@ -301,6 +301,10 @@ def build_investigation_findings(
             "total": len(items),
         })
 
+    def fixed_by(rule: str, col: str) -> bool:
+        """Whether an applied change came from the `rule` fix on `col`."""
+        return any(m["transformation_rule"] == f"{rule}:{col}" for m in mutations)
+
     for col, counts in (pii_content_findings or {}).items():
         total = sum(counts.values())
         kinds = ", ".join(f"{count} {label}(s)" for label, count in counts.items())
@@ -310,9 +314,9 @@ def build_investigation_findings(
             "evidence": [],
             "more": 0,
             "detection": "This column's name did not match a known PII naming pattern, but at least one cell value contains a substring shaped like an SSN, email address, or phone number.",
-            "suggested_action": "Review manually — consider masking this column in any report or export if it does contain real personal data.",
+            "suggested_action": "Review manually — or approve Mask personal data in text on Review & fix to remove it from the output.",
             "confidence": "Medium",
-            "resolved": 0,
+            "resolved": total if fixed_by("pii_mask", col) else 0,
             "total": total,
         })
 
@@ -550,7 +554,7 @@ def build_investigation_findings(
                 "detection": "Statistically unusual relative to the rest of this column (IQR method) or a disproportionate share of values sit at the observed maximum (possible top-coding).",
                 "suggested_action": "Review manually — unusual is not the same as incorrect (e.g. income is normally right-skewed).",
                 "confidence": "Low",
-                "resolved": 0,
+                "resolved": 1 if fixed_by("outliers", col) else 0,
                 "total": 1,
             })
 
@@ -628,7 +632,7 @@ def build_investigation_findings(
                 ),
                 "suggested_action": (
                     "Missingness pattern detected; statistical handling (e.g. multiple imputation) "
-                    "requires analyst judgment. DataForensics never imputes."
+                    "requires analyst judgment. DataForensics never fills gaps unless you approve it (Review & fix → Fill missing values)."
                 ),
                 "confidence": "N/A",
                 "resolved": 0,
@@ -652,7 +656,7 @@ def build_investigation_findings(
             ),
             "suggested_action": (
                 "Missingness pattern detected; statistical handling requires analyst judgment. "
-                "DataForensics never imputes."
+                "DataForensics never fills gaps unless you approve it (Review & fix → Fill missing values)."
             ),
             "confidence": "N/A",
             "resolved": 0,

@@ -215,8 +215,8 @@ $ dataforensics benchmark --rows 1000 --seeds 10
 
 Mean quality score: clean 100.0, with errors 68.2, after approved fixes
 97.0. "Left after fixes" is by design for future dates, outliers, and
-missingness patterns (DataForensics never deletes or imputes to make a
-finding disappear). For mixed units, 9 of 10 planted mixes had overlapping
+missingness patterns: the benchmark approves only the safe fixes, and
+treating outliers or filling gaps are opt-in judgment calls it leaves off. For mixed units, 9 of 10 planted mixes had overlapping
 kg/lb ranges, which are flagged but deliberately not auto-converted: a
 value of 105 could be either unit.
 

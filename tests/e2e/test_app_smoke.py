@@ -710,3 +710,111 @@ def test_logo_starts_fresh_on_the_home_page_from_anywhere():
     assert not at.get("button_group")
     page_text = " ".join(m.value for m in [*at.markdown, *at.sidebar.markdown])
     assert "messy_csv_example.csv" not in page_text.replace("Sample output · messy_csv_example.csv", "")
+
+
+def test_judgment_call_fixes_are_offered_separately_and_applied_when_ticked():
+    """Treating outliers, masking personal data in text and filling missing
+    values are offered on Review & fix under "Judgment calls", are never
+    ticked by Approve all, and are applied and logged when ticked."""
+    at = _messy_app()
+    _goto(at, "review")
+    assert not at.exception
+    assert any("Judgment calls" in m.value for m in at.markdown)
+    judgment = [cb.key for cb in at.checkbox if cb.key.split("__")[2] in ("outliers", "pii_mask", "impute")]
+    kinds = {k.split("__")[2] for k in judgment}
+    # No fill offer here: the file's only gaps are in free text (notes) and a
+    # personal-data column (spouse_name), where a "most common value" fill
+    # would copy an arbitrary sentence or name into every gap.
+    assert kinds == {"outliers", "pii_mask"}, kinds
+
+    def judgment_keys() -> list[str]:
+        return [cb.key for cb in at.checkbox if cb.key.split("__")[2] in ("outliers", "pii_mask", "impute")]
+
+    next(b for b in at.button if b.label == "Approve all recommended fixes").click().run()
+    assert not any(at.checkbox(key=k).value for k in judgment_keys())
+    # With the kg -> lb conversion approved, the converted weights are no
+    # longer outliers: the offer is worked out on the data as it will be.
+    assert not any("__outliers__" in k for k in judgment_keys())
+
+    # Leave the conversion off, so the kg weights are outliers to treat.
+    at.checkbox(key=next(cb.key for cb in at.checkbox if "__units__" in cb.key)).uncheck().run()
+    outlier_key = next(k for k in judgment_keys() if "__outliers__" in k)
+    at.radio(key=f"{outlier_key}__action").set_value("Set to empty").run()
+    for key in judgment_keys():
+        at.checkbox(key=key).check()
+    at.run()
+    next(b for b in at.button if "Apply approved changes" in b.label).click().run()
+    assert not at.exception
+    # The chosen action reached the applied fixes.
+    assert '"action": "blank"' in at.session_state["dataforensics_applied_signature"]
+    # The audit trail shows what happened: the outliers emptied, the text
+    # masked -- and no phone number or email anywhere in it.
+    audit = next(d.value for d in at.dataframe if "Change #" in d.value.columns)
+    outlier_rows = audit[audit["Rule"].str.startswith("outliers:")]
+    assert len(outlier_rows) and (outlier_rows["New value"] == "").all()
+    masked = audit[audit["Rule"].str.startswith("pii_mask:")]
+    assert len(masked) and masked["New value"].str.contains("removed]", regex=False).all()
+    assert not audit.astype(str).apply(lambda col: col.str.contains("@|555-", regex=True)).any().any()
+    import pyarrow as pa
+
+    labels = [
+        label
+        for chart in at.get("vega_lite_chart")
+        for dataset in chart.proto.datasets
+        for table in [pa.ipc.open_stream(dataset.data.data).read_all()]
+        if "label" in table.column_names
+        for label in table.column("label").to_pylist()
+    ]
+    assert {"Treat outliers", "Mask personal data in text"} <= set(labels)
+
+
+def test_fill_missing_values_on_real_survey_gaps():
+    """BRFSS has real gaps in numeric and category columns: each gets a fill
+    offer showing the value (median / most common value) it would use."""
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["dataforensics_data_bytes"] = (FIXTURES_DIR / "demos" / "brfss_survey_sample.csv").read_bytes()
+    at.session_state["dataforensics_data_name"] = "brfss_survey_sample.csv"
+    at.session_state["dataforensics_step"] = "review"
+    at.run(timeout=60)
+    assert not at.exception
+    fill_keys = [cb.key for cb in at.checkbox if "__impute__" in cb.key]
+    assert fill_keys
+    titles = [m.value for m in at.markdown if "Fill missing values" in m.value]
+    # Measurements get the median; category codes (employment status 1-9)
+    # the most common code -- a median of codes would mean nothing.
+    assert any("weight_lbs: fill" in t and "with the median (" in t for t in titles)
+    assert any("employment_status: fill" in t and "with the most common value (" in t for t in titles)
+    # currently_smokes is blank exactly when smoked_100_cigarettes = 2 (No): a
+    # survey skip, "not applicable" -- never offered for filling.
+    assert not any("__impute__currently_smokes" in k for k in fill_keys)
+    weight_title = next(t for t in titles if "weight_lbs: fill" in t)
+    promised = int(weight_title.split("weight_lbs: fill ")[1].split(" ")[0])
+    for key in fill_keys:
+        at.checkbox(key=key).check()
+    at.run()
+    next(b for b in at.button if "Apply approved changes" in b.label).click().run()
+    assert not at.exception
+    # Exactly the cells the offer said, each filled with the value it showed.
+    audit = next(d.value for d in at.dataframe if "Change #" in d.value.columns)
+    filled = audit[audit["Rule"] == "impute:weight_lbs"]
+    assert len(filled) == promised
+    shown_value = weight_title.split("with the median (")[1].split(")")[0]
+    assert (filled["New value"] == shown_value).all()
+
+
+def test_rating_scales_get_no_outlier_offer():
+    """Regression (review): a skewed 1-5 rating has IQR "outliers" (the 1s),
+    but they're valid answers; capping a 1 to a 2 would change what the
+    person said. Number-coded categories get no outlier offer."""
+    ratings = ["1"] + ["2"] * 3 + ["3"] * 6 + ["4"] * 40 + ["5"] * 50
+    lines = ["id,satisfaction,weight"] + [f"{i},{r},{150 + i % 30}" for i, r in enumerate(ratings)]
+    lines[1] = "0,1,900"  # one genuine far-out weight, for contrast
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["dataforensics_data_bytes"] = ("\n".join(lines) + "\n").encode()
+    at.session_state["dataforensics_data_name"] = "ratings.csv"
+    at.session_state["dataforensics_step"] = "review"
+    at.run(timeout=60)
+    assert not at.exception
+    outlier_keys = [cb.key for cb in at.checkbox if "__outliers__" in cb.key]
+    assert not any(k.endswith("__satisfaction") for k in outlier_keys)
+    assert any(k.endswith("__weight") for k in outlier_keys)

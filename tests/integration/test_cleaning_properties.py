@@ -18,7 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from dataforensics.cleaning import clean_dataset, unit_fix_params
+from dataforensics.cleaning import clean_dataset, impute_fill_value, outlier_fix_params, unit_fix_params
+from dataforensics.typing_guards import parse_finite_float
 from dataforensics.config_schema import find_chained_keys, find_mapping_conflicts
 from dataforensics.investigate import detect_duplicate_rows
 from dataforensics.pipeline import run_investigation
@@ -101,7 +102,6 @@ def _approve_everything(result: dict) -> tuple[dict, dict]:
         "missing_values": missing_values,
         "category_mappings": category_mappings,
     }
-    [c for c in result["columns"] if c != "rid"]
     fixes: dict = {
         "whitespace": [c for c in result["whitespace_anomaly_counts"] if c != "rid"],
         "invisible": [c for c in result["invisible_char_counts"] if c != "rid"],
@@ -111,6 +111,22 @@ def _approve_everything(result: dict) -> tuple[dict, dict]:
         "excel_dates": [c for c in result["excel_serial_findings"] if c != "rid"],
         "date_iso": date_formats,
         "units": {c: unit_fix_params(u) for c, u in result["unit_inconsistency_findings"].items() if u["separable"]},
+        # The judgment calls, applied broadly (the app offers them to fewer
+        # columns): outliers capped (or, for every other column, emptied and
+        # then filled), gaps filled.
+        "outliers": {
+            c: outlier_fix_params(e["outliers"], list(result["sentinels"].get(c, [])), "cap" if k % 2 else "blank")
+            for k, (c, e) in enumerate(result["dictionary"].items())
+            if c != "rid" and (e.get("outliers") or {}).get("outlier_count") and "q1" in e["outliers"]
+        },
+        "impute": {
+            c: fill[1]
+            for c in result["columns"]
+            if c != "rid"
+            and result["dictionary"][c].get("null_count")
+            and result["column_types"].get(c) in ("numeric", "categorical")
+            and (fill := impute_fill_value(result["rows"], c, set(result["sentinels"].get(c, []))))
+        },
         "drop_exact_duplicate_rows": True,
     }
     return rules, fixes
@@ -186,3 +202,75 @@ def test_cleaning_properties(seed, tmp_path):
     # duplicate row is removed -- which is a new finding, not a failed fix.)
     for col, mapping in rules["category_mappings"].items():
         assert not {r[col] for r in cleaned} & set(mapping), col
+    # Filled columns have no empty cells left; capped columns no numbers
+    # outside the limits (missing-value codes they keep aside).
+    for col in fixes["impute"]:
+        assert all(r[col] not in ("", None) for r in cleaned), col
+    for col, p in fixes["outliers"].items():
+        for r in cleaned:
+            value = parse_finite_float(str(r[col]).strip())
+            if value is not None and str(r[col]).strip() not in p["keep"]:
+                assert p["lower"] <= value <= p["upper"], (col, r[col], p)
+
+
+def _judgment_rows(seed: int) -> list[dict]:
+    """Data the judgment-call fixes are for: numeric columns with gaps,
+    far-out values and a 9999 missing-value code, a category column with
+    gaps, and free text that sometimes holds an email or phone number."""
+    rng = random.Random(seed)
+    rows = []
+    for i in range(rng.randint(40, 120)):
+        roll = rng.random()
+        weight = "" if roll < 0.1 else "9999" if roll < 0.14 else f"{rng.gauss(170, 15):.1f}"
+        if 0.14 <= roll < 0.2:
+            weight = f"{rng.choice([20, 900, 1500]) + rng.random():.1f}"  # far outside the rest
+        rows.append({
+            "rid": f"R{i:04d}",
+            "weight": weight,
+            "score": "" if rng.random() < 0.15 else str(rng.randint(40, 60) if rng.random() > 0.05 else rng.randint(300, 500)),
+            "status": "" if rng.random() < 0.2 else rng.choice(["active", "inactive", "pending"]),
+            "notes": rng.choice([
+                "routine visit", "follow up next week", "no complaints",
+                f"call {rng.randint(200, 999)}-555-{rng.randint(1000, 9999)}", f"email p{i}@example.org",
+            ]),
+        })
+    return rows
+
+
+@pytest.mark.parametrize("seed", range(60))
+def test_judgment_fix_properties(seed, tmp_path):
+    original = _judgment_rows(seed)
+    before = run_investigation(_write(original, tmp_path / "in.csv"), sheet=None, dataset_type="General", data_size=1)
+    rules, fixes = _approve_everything(before)
+    fixes["pii_mask"] = [c for c in before["pii_content_findings"] if c != "rid"]
+    # The generator guarantees every judgment fix has something to do.
+    assert fixes["impute"] and fixes["outliers"] and fixes["pii_mask"], (fixes["impute"], fixes["outliers"])
+    result = clean_dataset(before["rows"], rules, fixes, before["dup_rows"], ["rid"], reason="property test")
+    assert result["safety"]["all_passed"], result["safety"]
+    cleaned = result["rows"]
+    rules_used = {m["transformation_rule"].split(":")[0] for m in result["mutations"]}
+    assert {"impute", "outliers", "pii_mask"} <= rules_used
+
+    # The log explains every change except on masked columns, where no
+    # entry may carry the personal data (so originals can't be replayed):
+    # those columns are checked separately below.
+    masked_cols = set(fixes["pii_mask"])
+    unmasked = [m for m in result["mutations"] if m["column"] not in masked_cols]
+    assert not any("@example.org" in str(m) or "-555-" in str(m) for m in result["mutations"])
+    replayed = _replay(before["rows"], unmasked)
+    for row, done in zip(replayed, cleaned, strict=True):
+        for col in masked_cols:
+            row[col] = done[col]
+    assert replayed == cleaned
+    assert all("@example.org" not in r["notes"] and "-555-" not in r["notes"] for r in cleaned)
+    # Idempotent.
+    again = clean_dataset(cleaned, rules, fixes, detect_duplicate_rows(cleaned), ["rid"], reason="property test")
+    assert again["mutations"] == [] and again["rows"] == cleaned
+    # Filled columns have no gaps; capped columns no numbers past the limits.
+    for col in fixes["impute"]:
+        assert all(r[col] != "" for r in cleaned), col
+    for col, p in fixes["outliers"].items():
+        for r in cleaned:
+            value = parse_finite_float(r[col].strip())
+            if value is not None and r[col].strip() not in p["keep"]:
+                assert p["lower"] <= value <= p["upper"], (col, r[col], p)

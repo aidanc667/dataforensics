@@ -1899,7 +1899,7 @@ def detect_missingness_co_occurrence(rows: list[dict], columns: list[str]) -> li
 # (a "notes" field with an email address typed into it) is still caught.
 # --------------------------------------------------------------------- #
 
-_PII_CONTENT_PATTERNS: list[tuple[str, re.Pattern]] = [
+PII_CONTENT_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
     ("email address", re.compile(r"\b[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}\b")),
     # Requires a separator between digit groups (dash/dot/space, optional
@@ -1932,7 +1932,7 @@ def detect_pii_content(rows: list[dict], columns: list[str]) -> dict[str, dict[s
             raw = str(row.get(col, ""))
             if raw == "":
                 continue
-            for label, pattern in _PII_CONTENT_PATTERNS:
+            for label, pattern in PII_CONTENT_PATTERNS:
                 if pattern.search(raw):
                     counts[label] = counts.get(label, 0) + 1
         if counts:
@@ -1951,7 +1951,7 @@ def find_pii_content_evidence(rows: list[dict], column: str) -> list[tuple[int, 
         raw = str(row.get(column, ""))
         if raw == "":
             continue
-        for label, pattern in _PII_CONTENT_PATTERNS:
+        for label, pattern in PII_CONTENT_PATTERNS:
             if pattern.search(raw):
                 evidence.append((i, label))
                 break

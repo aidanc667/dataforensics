@@ -97,6 +97,7 @@ DataForensics can surface findings such as:
 
 * **51 automated checks** (DF-01 to DF-51), each reported as Flagged, Passed, or Not applicable — a check that needs columns the dataset doesn't have is never shown as "Passed". The app's **Checks** page (sidebar) lists every check, what it looks for, and whether it's fixable on approval or flag-only.
 * **Safe fixes on approval:** trim whitespace, remove hidden characters, repair broken encoding, convert `$50,000`/`50k` to plain numbers, restore leading zeros in ZIP/FIPS codes and other IDs, convert Excel date numbers to dates, rewrite dates as YYYY-MM-DD, merge synonym codes, convert separable unit mixes, and remove exact duplicate rows. Each shows a before → after preview of real rows first. **Approve all recommended fixes** ticks every safe fix, duplicate removal, missing-value code and high-confidence spelling merge in one click; date order (MM/DD vs DD/MM) and fuzzy spelling matches are left for you to decide. Nothing changes until you click Apply.
+* **Judgment calls on approval, never part of Approve all:** treat outliers (cap to the IQR limits, or set to empty — missing-value codes like 9999 are left alone), mask SSNs, emails and phone numbers found inside text (the audit trail never records the original), and fill missing values with the column's median or most common value (shown before you approve; not offered for ID, personal-data, date or free-text columns). They run after the other fixes — so a kg value converted to lb is no longer an outlier — and every changed cell is logged.
 * **Before → after re-check:** after Apply, every check runs again on the cleaned file and the score and check changes are shown side by side.
 * **Audit trail:** every changed cell (original value, new value, rule, timestamp) on screen and as CSV; input and output SHA-256 hashes in the audit report.
 * **Reusable rules:** download `cleaning_rules.yaml` and re-apply the same cleaning to the next release with `dataforensics harmonize ... --execute`.
@@ -125,7 +126,7 @@ DataForensics can surface findings such as:
 | Mixed kg/lb units (column) | 100% | 0 | 9 of 10 (overlapping ranges: flagged, not auto-converted) |
 | Future dates | 100% | 0 | all (detection only, by design) |
 | Outliers (column) | 100% | 0 | all (never deleted, by design) |
-| Missingness tied to age | 100% | 0 | all (never imputed, by design) |
+| Missingness tied to age | 100% | 0 | all (filled only on approval) |
 
 Mean quality score: clean 100 → with errors 68 → after approved fixes 97. On the clean files, the only check that ever fired was the coverage-gap check (1 of 10 runs), which is built to accept about a 5% chance rate. At 300 rows, recall is still 100%, but one chance missingness-by-group pair appeared across 10 runs and the coverage-gap check fired on 3 of 10 clean files (sparse random visit dates have long lulls by chance). Building the benchmark found and fixed five detector problems, and checking the real demo data found two more (see [`WRITEUP.md`](WRITEUP.md#error-injection-benchmark)).
 

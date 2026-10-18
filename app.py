@@ -24,13 +24,19 @@ from dataforensics.audit_report import (
 )
 from dataforensics.cleaning import (
     FIX_LABELS,
+    JUDGMENT_FIXES,
     apply_safe_fixes,
     clean_dataset,
+    impute_fill_value,
+    is_fill_candidate,
+    looks_like_codes,
+    outlier_fix_params,
     unit_fix_params,
 )
 from dataforensics.codebook import CodebookError, parse_codebook
 from dataforensics.config_schema import find_chained_keys, find_mapping_conflicts
 from dataforensics.dictionary import (
+    detect_outliers,
     find_outlier_evidence,
     find_top_code_evidence,
     read_rows,
@@ -42,6 +48,7 @@ from dataforensics.expectations import (
     validate_expectation,
 )
 from dataforensics.harmonize import (
+    apply_transformations,
     column_union,
     merge_files_on_key,
 )
@@ -66,6 +73,7 @@ from dataforensics.investigate import (
     find_ambiguous_date_evidence,
     find_category_value_evidence,
     find_encoding_corruption_evidence,
+    find_fips_like_columns,
     find_invisible_character_evidence,
     find_numeric_representation_evidence,
     find_pii_content_evidence,
@@ -74,6 +82,7 @@ from dataforensics.investigate import (
     find_value_shape_outlier_evidence,
     find_whitespace_anomaly_evidence,
     find_year_like_value_evidence,
+    find_zip_like_columns,
     reconcile_shared_records,
 )
 from dataforensics.key_insights import build_key_insights
@@ -86,7 +95,11 @@ from dataforensics.summary import (
     build_check_reference,
     rows_to_csv,
 )
-from dataforensics.typing_guards import COMMON_SENTINEL_STRINGS, is_pii_like_column
+from dataforensics.typing_guards import (
+    COMMON_SENTINEL_STRINGS,
+    is_pii_like_column,
+    parse_finite_float,
+)
 from dataforensics.validation import validate
 
 # One logo file for both the browser-tab favicon and the in-app brand mark.
@@ -1068,6 +1081,47 @@ def _remove_codebook() -> None:
     st.session_state.pop("dataforensics_codebook", None)
 
 
+def _fix_offer_row(source_key: str, fix: str, col: str, description: str, param, evidence: list[tuple[int, str]]) -> None:
+    """One approvable fix on Review & fix: checkbox, what it does, and a
+    before -> after preview of the first rows it changes."""
+    key = f"fix__{source_key}__{fix}__{col}"
+    with st.container(border=True):
+        c1, c2 = st.columns([0.5, 4])
+        c1.checkbox("approve", key=key, label_visibility="collapsed")
+        c2.markdown(
+            f'<span class="dataforensics-badge dataforensics-badge-{"warning" if fix in JUDGMENT_FIXES else "high"}">'
+            f"{_esc(FIX_LABELS[fix])}</span>"
+            f'<div class="dataforensics-card-title">{_esc(col)}: {_esc(description)}</div>',
+            unsafe_allow_html=True,
+        )
+        if fix == "outliers":
+            c2.radio(
+                "What to do with them", ["Cap to the limit", "Set to empty"], key=f"{key}__action", horizontal=True,
+                help="Capping keeps the row's other values usable; setting to empty treats the value as unknown "
+                "(a fill for the emptied values is then offered under Fill missing values).",
+            )
+        with st.expander("Preview: before → after"):
+            if fix == "pii_mask":
+                # The evidence is which pattern matched, never the text itself.
+                lines = [f"row {i + 1:,}: {label} → replaced with a marker" for i, label in evidence[:8]]
+            else:
+                preview_fixes: dict = {fix: param if param is not None else [col]}
+                if fix in ("leading_zeros", "date_iso", "units", "outliers", "impute"):
+                    preview_fixes = {fix: {col: param}}
+                preview, _ = apply_safe_fixes([{col: v} for _, v in evidence[:8]], preview_fixes, [], reason="preview")
+                pii = is_pii_like_column(col)
+                lines = [
+                    f"row {i + 1:,}: " + ("[masked]" if pii else
+                                          f"{_visualize_whitespace(before) or '(empty)'} → {_visualize_whitespace(after[col]) or '(empty)'}")
+                    for (i, before), after in zip(evidence[:8], preview, strict=True)
+                ]
+            st.markdown('<div class="dataforensics-card-evidence">' + "<br>".join(lines) + "</div>", unsafe_allow_html=True)
+            if len(evidence) > 8:
+                st.caption(f"...and {len(evidence) - 8:,} more.")
+            if fix == "numeric_format":
+                st.caption("Percentages (e.g. 45%) are left as-is: whether they mean 45 or 0.45 depends on the column.")
+
+
 def _approval_buttons(recommended: list[str], every: list[str], where: str) -> None:
     if not every:
         return
@@ -1080,9 +1134,16 @@ def _approval_buttons(recommended: list[str], every: list[str], where: str) -> N
         args=(recommended, True),
         disabled=not recommended,
         help="Ticks every safe fix, duplicate removal, missing-value code and high-confidence spelling merge. "
-        "Date order (MM/DD vs DD/MM) and fuzzy spelling matches stay for you to decide.",
+        "Date order (MM/DD vs DD/MM), fuzzy spelling matches and the judgment calls (outliers, masking personal "
+        "data, filling missing values) stay for you to decide.",
     )
     b2.button("Clear all approvals", key=f"clear_all_{where}", on_click=_set_approvals, args=(every, False))
+
+
+# Columns named as codes ("county_code", "icd_code") hold labels, not
+# quantities: no outlier treatment, and a fill uses the most common code.
+_CODE_NAME = re.compile(r"(^|_)(code|codes|icd|cpt|naics|sic)(_|$)", re.IGNORECASE)
+_POSTAL_NAME = re.compile(r"(^|_)(postal|postcode|zipcode|zip_code)(_|$)", re.IGNORECASE)
 
 
 def _approval_model(
@@ -1103,6 +1164,8 @@ def _approval_model(
     lost_leading_zero_findings: dict,
     unit_inconsistency_findings: dict,
     excel_serial_findings: dict,
+    pii_content_findings: dict,
+    group_missingness: list[dict],
 ) -> dict:
     """Everything the analyst has approved, read from session state with
     the same defaults the Review & fix widgets use -- the single source of
@@ -1188,16 +1251,112 @@ def _approval_model(
         fix_offers.append(("date_iso", col, "rewrite dates as YYYY-MM-DD using the format you declared", fmt,
                            find_ambiguous_date_evidence(rows, col)))
 
-    for fix, col, _description, param, _evidence in fix_offers:
-        key = f"fix__{source_key}__{fix}__{col}"
-        every.append(key)
-        if col not in primary_key:
-            recommended.append(key)
-        if state.get(key, False):
-            if fix in ("leading_zeros", "date_iso", "units"):
-                approved_fixes.setdefault(fix, {})[col] = param
-            else:
-                approved_fixes.setdefault(fix, []).append(col)
+    def register(offers: list) -> None:
+        """Approval keys for `offers`, and the approved ones into approved_fixes."""
+        for fix, col, _description, param, _evidence in offers:
+            key = f"fix__{source_key}__{fix}__{col}"
+            every.append(key)
+            if col not in primary_key and fix not in JUDGMENT_FIXES:
+                recommended.append(key)
+            if state.get(key, False):
+                if fix in ("leading_zeros", "date_iso", "units", "outliers", "impute"):
+                    approved_fixes.setdefault(fix, {})[col] = param
+                else:
+                    approved_fixes.setdefault(fix, []).append(col)
+
+    register(fix_offers)
+
+    # Judgment calls: offered, never pre-ticked or included in Approve all.
+    # Each is worked out on the data as it will be when it runs -- after the
+    # approved mappings and safe fixes (a kg value converted to lb isn't an
+    # outlier; a missing-value code mapped to empty is a gap to fill; the
+    # fill value is never a spelling an approved merge removes) -- so the
+    # counts, limits and fill values shown are what Apply will actually do.
+    staged = rows
+    try:
+        staged, _ = apply_transformations(
+            rows,
+            {"primary_key": primary_key, "missing_values": approved_sentinels, "category_mappings": approved_categories},
+            reason="preview",
+        )
+        staged, _ = apply_safe_fixes(
+            staged, {k: v for k, v in approved_fixes.items() if k != "drop_exact_duplicate_rows"}, [], reason="preview"
+        )
+    except ValueError:
+        staged = rows  # conflicting approvals -- Apply refuses those, with the reason
+    # Never on record IDs, ZIP/FIPS-style codes or personal-data columns.
+    off_limits = (
+        set(primary_key) | set(id_like_defaults) | set(find_zip_like_columns(columns))
+        | set(find_fips_like_columns(columns)) | {c for c in columns if is_pii_like_column(c)}
+        | {c for c in columns if _POSTAL_NAME.search(c)}
+    )
+
+    outlier_offers = []
+    for col in columns:
+        if col in off_limits or column_types.get(col) != "numeric" or _CODE_NAME.search(col):
+            continue
+        keep = list(sentinels.get(col, []))
+        values = [
+            (i, number) for i, r in enumerate(staged)
+            if (raw := str(r.get(col, "") or "").strip()) and raw not in keep
+            and (number := parse_finite_float(raw)) is not None
+        ]
+        # Rating scales and number-coded categories (satisfaction 1-5): an
+        # IQR "outlier" there is a valid answer -- the outlier check skips
+        # them too.
+        if looks_like_codes([str(staged[i][col]).strip() for i, _ in values]):
+            continue
+        stats = detect_outliers([v for _, v in values])
+        if not stats.get("outlier_count") or not stats.get("iqr"):
+            continue  # no outliers -- or IQR 0, where "the usual range" is a single value
+        action = "blank" if state.get(f"fix__{source_key}__outliers__{col}__action") == "Set to empty" else "cap"
+        params = outlier_fix_params(stats, keep, action, whole_numbers=all(v == int(v) for _, v in values))
+        evidence = [(i, str(staged[i][col])) for i, v in values if not params["lower"] <= v <= params["upper"]]
+        if evidence:
+            outlier_offers.append(
+                ("outliers", col,
+                 f"{_n(len(evidence), 'value', spec=',')} outside {params['lower']:,.4g} to {params['upper']:,.4g}",
+                 params, evidence)
+            )
+    register(outlier_offers)
+    if approved_fixes.get("outliers"):
+        staged, _ = apply_safe_fixes(staged, {"outliers": approved_fixes["outliers"]}, [], reason="preview")
+
+    pii_offers = []
+    for col, counts in pii_content_findings.items():
+        found = ", ".join(_n(n, label) for label, n in counts.items())
+        pii_offers.append(("pii_mask", col, f"remove {found} from the text", None, find_pii_content_evidence(rows, col)))
+    register(pii_offers)
+
+    # A column whose blanks follow another answer exactly (blank for 95%+
+    # of one group, 2% or less of another) is a survey skip: its blanks mean
+    # "not applicable", and filling them would invent answers.
+    skip_columns = {
+        g["column"] for g in group_missingness
+        if g["kind"] == "category" and g["highest"]["rate"] >= 0.95 and g["lowest"]["rate"] <= 0.02
+    }
+    fill_offers = []
+    for col in columns:
+        if col in off_limits or col in skip_columns or col in pii_content_findings:
+            continue
+        empties = [(i, "") for i, r in enumerate(staged) if r.get(col) in (None, "")]
+        filled_values = [str(r.get(col)).strip() for r in staged if r.get(col) not in (None, "")]
+        if (
+            not empties
+            # Mostly empty: a fill would make up most of the column.
+            or len(empties) > len(staged) / 2
+            or not is_fill_candidate(column_types.get(col), len(filled_values), len(set(filled_values)))
+        ):
+            continue
+        fill = impute_fill_value(staged, col, set(sentinels.get(col, [])), as_category=bool(_CODE_NAME.search(col)))
+        if fill is None:
+            continue
+        method, value = fill
+        fill_offers.append(("impute", col, f"fill {_n(len(empties), 'empty cell', spec=',')} with the {method} ({value})",
+                            value, empties))
+    register(fill_offers)
+    fix_offers = fix_offers + outlier_offers + pii_offers + fill_offers
+
     if dup_rows:
         key = f"fix__{source_key}__drop_duplicates"
         every.append(key)
@@ -1861,6 +2020,8 @@ if workspace == "analyze":
         lost_leading_zero_findings=lost_leading_zero_findings,
         unit_inconsistency_findings=unit_inconsistency_findings,
         excel_serial_findings=excel_serial_findings,
+        pii_content_findings=pii_content_findings,
+        group_missingness=investigation["group_missingness"],
     )
     primary_key = model["primary_key"]
     approved_sentinels = model["approved_sentinels"]
@@ -2256,7 +2417,7 @@ if workspace == "analyze":
                     st.caption(
                         "These are plain comparisons, not a statistical significance test. Missingness pattern "
                         "detected; statistical handling (e.g. multiple imputation) requires analyst judgment — "
-                        "DataForensics never imputes. The rows behind each pattern are under Missing-data patterns at the end of "
+                        "DataForensics never fills gaps unless you approve it (Review & fix → Fill missing values). The rows behind each pattern are under Missing-data patterns at the end of "
                         "this page."
                     )
                 else:
@@ -2588,7 +2749,7 @@ if workspace == "analyze":
             or any_format_integrity_findings or any_temporal_findings or any_privacy_findings
         ):
             st.markdown(_bucket_header("list", "Exhibits"), unsafe_allow_html=True)
-            st.caption("The evidence behind each finding above. Open a card's panel for the rows. Outliers are never deleted, capped or imputed.")
+            st.caption("The evidence behind each finding above. Open a card's panel for the rows. Outliers are never changed unless you approve it on Review & fix.")
             for c, f in outlier_cols.items():
                 st.markdown(
                     f'<div class="dataforensics-card df-exhibit"><span class="dataforensics-badge dataforensics-badge-suggestion">Suggestion</span>'
@@ -2612,7 +2773,7 @@ if workspace == "analyze":
                     rule="IQR method: flagged if the value falls below Q1 − 1.5×(Q3−Q1) or above Q3 + 1.5×(Q3−Q1), computed over this column's own non-null values.",
                     lines=_evidence_lines(c, outlier_evidence),
                     not_known="Whether this is a data-entry error, a genuine rare observation, or the correct value for a legitimately unusual case.",
-                    recommended_action="Review manually. DataForensics never auto-corrects, caps, or removes outliers.",
+                    recommended_action="Review manually. To cap or empty them, approve Treat outliers on Review & fix — nothing changes automatically.",
                 )
             for c, f in top_code_cols.items():
                 st.markdown(
@@ -3125,7 +3286,7 @@ if workspace == "analyze":
         with st.expander("Missing-data patterns — information only, nothing to approve", icon=":material/info:"):
             if missingness_concentration or missingness_co_occurrence:
                 st.markdown(_bucket_header("missing", "Missingness patterns"), unsafe_allow_html=True)
-                st.caption("Informational only — nothing to approve here. DataForensics never imputes; these are plain comparisons, not a significance test.")
+                st.caption("Informational only — nothing to approve here. DataForensics never fills gaps unless you approve it; these are plain comparisons, not a significance test.")
                 for col, findings in missingness_concentration.items():
                     for f in findings:
                         st.markdown(
@@ -3150,7 +3311,7 @@ if workspace == "analyze":
                             st.markdown(
                                 "**Next step:** Missingness pattern detected; statistical handling (e.g. "
                                 "multiple imputation, a missing-data mechanism analysis) requires analyst judgment. "
-                                "DataForensics never imputes."
+                                "DataForensics never fills gaps unless you approve it (Review & fix → Fill missing values)."
                             )
                 for f in missingness_co_occurrence:
                     st.markdown(
@@ -3174,7 +3335,7 @@ if workspace == "analyze":
                         )
                         st.markdown(
                             "**Next step:** Missingness pattern detected; statistical handling requires "
-                            "analyst judgment. DataForensics never imputes."
+                            "analyst judgment. DataForensics never fills gaps unless you approve it (Review & fix → Fill missing values)."
                         )
 
         _step_nav("issues")
@@ -3310,40 +3471,14 @@ if workspace == "analyze":
         # --- Safe fixes: deterministic value-level repairs (cleaning.py). Off
         # by default like everything else here; each shows a before -> after
         # preview of real rows before you approve it. ---
-        if fix_offers or dup_rows or inseparable_unit_columns:
+        if any(offer[0] not in JUDGMENT_FIXES for offer in fix_offers) or dup_rows or inseparable_unit_columns:
             st.markdown(_bucket_header("sparkle", "Safe fixes"), unsafe_allow_html=True)
             st.caption(
                 "Predictable, repeatable repairs. Each one only touches the values shown, and every changed cell is logged in the audit trail."
             )
             for fix, col, description, param, evidence in fix_offers:
-                key = f"fix__{_source_key}__{fix}__{col}"
-                with st.container(border=True):
-                    c1, c2 = st.columns([0.5, 4])
-                    c1.checkbox("approve", key=key, label_visibility="collapsed")
-                    c2.markdown(
-                        f'<span class="dataforensics-badge dataforensics-badge-high">{_esc(FIX_LABELS[fix])}</span>'
-                        f'<div class="dataforensics-card-title">{_esc(col)}: {_esc(description)}</div>',
-                        unsafe_allow_html=True,
-                    )
-                    preview_fixes: dict = {fix: param if param is not None else [col]}
-                    if fix in ("leading_zeros", "date_iso", "units"):
-                        preview_fixes = {fix: {col: param}}
-                    preview, _ = apply_safe_fixes([{col: v} for _, v in evidence[:8]], preview_fixes, [], reason="preview")
-                    pii = is_pii_like_column(col)
-                    with st.expander("Preview: before → after"):
-                        st.markdown(
-                            '<div class="dataforensics-card-evidence">'
-                            + "<br>".join(
-                                f"row {i + 1:,}: " + ("[masked]" if pii else f"{_visualize_whitespace(before)} → {_visualize_whitespace(after[col])}")
-                                for (i, before), after in zip(evidence[:8], preview, strict=True)
-                            )
-                            + "</div>",
-                            unsafe_allow_html=True,
-                        )
-                        if len(evidence) > 8:
-                            st.caption(f"...and {len(evidence) - 8:,} more.")
-                        if fix == "numeric_format":
-                            st.caption("Percentages (e.g. 45%) are left as-is: whether they mean 45 or 0.45 depends on the column.")
+                if fix not in JUDGMENT_FIXES:
+                    _fix_offer_row(_source_key, fix, col, description, param, evidence)
             if dup_rows:
                 with st.container(border=True):
                     c1, c2 = st.columns([0.5, 4])
@@ -3361,6 +3496,17 @@ if workspace == "analyze":
                 )
             if ambiguous_dates and not approved_date_formats:
                 st.caption("To convert ambiguous dates to YYYY-MM-DD, approve a date format in the Ambiguous dates section above.")
+
+        judgment_offers = [offer for offer in fix_offers if offer[0] in JUDGMENT_FIXES]
+        if judgment_offers:
+            st.markdown(_bucket_header("alert", "Judgment calls"), unsafe_allow_html=True)
+            st.caption(
+                "These change what the data says, so they're never part of Approve all — tick each one you want. "
+                "Filling invents values: don't fill blanks that mean 'not applicable' (a skipped question). Every "
+                "change is logged like any other fix."
+            )
+            for fix, col, description, param, evidence in judgment_offers:
+                _fix_offer_row(_source_key, fix, col, description, param, evidence)
 
         with st.expander("Add your own rules (optional) — ranges, required, unique, allowed values, if-then", icon=":material/rule:"):
             # --- Expectations: rules the analyst KNOWS must hold (ranges, required,
@@ -3676,8 +3822,8 @@ if workspace == "analyze":
             st.caption(
                 "Null counts can rise after cleaning: a missing-value code (like 9999) turned into an empty cell was "
                 "always missing — it's now counted honestly, which lowers Completeness while raising Validity. "
-                "Checks that only describe the data (outliers, heaping, missingness patterns) don't change, because "
-                "DataForensics never deletes or imputes values to make them go away."
+                "Checks that only describe the data (heaping, missingness patterns) don't change; outliers and gaps "
+                "change only if you approved treating or filling them under Judgment calls."
             )
             _table_with_download(
                 f"Audit Trail ({len(mutations):,} change{'s' if len(mutations) != 1 else ''})",

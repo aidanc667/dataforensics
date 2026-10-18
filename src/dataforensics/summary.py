@@ -92,7 +92,7 @@ CHECK_DETAILS: dict[str, tuple[str, str]] = {
     "duplicate_entities": ("Different IDs that share the same name, birth date, ZIP, etc. -- possibly one person entered twice.", FLAG),
     "fuzzy_duplicate_entities": ("Like above, but the names are spelling variants (Jon / John Smith).", FLAG),
     "missing_value_codes": ("Codes like 9999, -99, N/A, Refused stored as if they were real values.", FIX + " (map to blank or a label)"),
-    "substantial_missingness": ("Columns less than 90% filled in.", FLAG + " (never imputed)"),
+    "substantial_missingness": ("Columns less than 90% filled in.", FLAG + " (fill on approval)"),
     "missingness_concentration": ("A column is missing more where another variable is higher or lower.", FLAG),
     "missingness_co_occurrence": ("Two columns that tend to be missing on the same rows.", FLAG),
     "group_missingness": ("Missing rates that differ sharply between groups (e.g. 36% under 35 vs 0% over 35).", FLAG),

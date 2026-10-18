@@ -9,7 +9,12 @@ import click
 import yaml
 
 from dataforensics import __version__
-from dataforensics.cleaning import apply_safe_fixes, drop_duplicate_rows
+from dataforensics.cleaning import (
+    apply_safe_fixes,
+    check_judgment_fixes,
+    drop_duplicate_rows,
+    mask_logged_personal_data,
+)
 from dataforensics.config_schema import RulesConfigError, load_rules
 from dataforensics.dictionary import build_data_dictionary, read_rows
 from dataforensics.expectations import evaluate_expectations, validate_expectation
@@ -389,6 +394,12 @@ def _harmonize_single_file(file, rules_path, output, execute, sheet):
             click.echo(f"Invalid expectation #{n} in rules file: {exc}", err=True)
             sys.exit(2)
 
+    try:
+        check_judgment_fixes(rules, safe_fixes, rules["primary_key"])
+    except ValueError as e:
+        click.echo(f"Invalid rules file: {e}", err=True)
+        sys.exit(2)
+
     if not execute:
         click.echo(f"DRY RUN — no files written. Proposed transformations for {file_path.name}:")
         for item in plan:
@@ -404,6 +415,7 @@ def _harmonize_single_file(file, rules_path, output, execute, sheet):
         sys.exit(0)
 
     transformed_rows, mutations = apply_transformations(rows, rules)
+    mask_logged_personal_data(mutations, safe_fixes.get("pii_mask", []))
     transformed_rows, fix_mutations = apply_safe_fixes(
         transformed_rows, safe_fixes, rules["primary_key"], reason="Specified in the rules file"
     )
