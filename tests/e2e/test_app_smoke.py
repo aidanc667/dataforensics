@@ -726,34 +726,21 @@ def test_step_label_has_no_case_number_and_findings_are_exhibits():
     assert sum('class="dataforensics-card df-exhibit"' in m.value for m in at.markdown) >= 5
 
 
-def test_home_specimen_matches_the_real_output():
-    """The sample exhibit on the first screen must be the app's real output
-    for the bundled Messy CSV Example -- the sex column's actual spellings,
-    their row counts, and the category the approved merge maps each to --
-    not illustrative numbers that could drift from what the tool does."""
-    import html
-    from collections import Counter
-
-    from dataforensics.pipeline import run_investigation
-
-    path = FIXTURES_DIR / "demos" / "messy_csv_example.csv"
-    result = run_investigation(path, sheet=None, dataset_type="General", data_size=path.stat().st_size)
-    clusters = result["category_clusters"]["sex"]
-    # Each value maps to its cluster's canonical spelling; the whitespace fix
-    # runs first, so " Male " is matched on its trimmed form.
-    canonical_of = {v: c["suggested_canonical"] for c in clusters for v in c["values"]}
-    raw_counts = Counter(r["sex"] for r in result["rows"])
-    changed = {raw: (n, canonical_of[raw.strip()]) for raw, n in raw_counts.items() if raw != canonical_of[raw.strip()]}
-
+def test_home_shows_the_spreadsheet_illustration():
+    """The first screen's right side is a faint spreadsheet under a
+    magnifier (it replaced the sample card): eight spellings of two genders,
+    males shaded blue, females yellow, and a weight of 20 flagged red."""
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=30)
     assert not at.exception
-    specimen = next(m.value for m in at.markdown if 'class="df-specimen"' in m.value)
-    assert f"gender: {len(raw_counts)} spellings for {len(clusters)} categories" in specimen
-    for raw, (n, fixed) in changed.items():
-        assert f"<tr><td>&quot;{html.escape(raw)}&quot;</td><td>{n}</td><td>{fixed}</td></tr>" in specimen
-    assert specimen.count("<tr><td>") == len(changed)
-    assert f"each of the {sum(n for n, _ in changed.values())} changes logged" in specimen
+    hero = next(m.value for m in at.markdown if 'class="df-hero-art"' in m.value)
+    assert 'class="df-specimen"' not in hero
+    assert ">gender</text>" in hero and ">sex</text>" not in hero
+    for spelling in ("Male", "male", "M", "MALE", "Female", "female", "FEMALE", "F"):
+        assert f">{spelling}</text>" in hero
+    assert hero.count('fill="#DCE8F5"') == 5  # Male, M, male, MALE, Male
+    assert hero.count('fill="#FAEDB8"') == 5  # Female, female, FEMALE, F, Female
+    assert 'fill="#B3261E">20</text>' in hero
 
 
 def test_issues_summary_overview_charts_and_results_fix_chart():
