@@ -341,26 +341,13 @@ st.markdown(
     @media (max-width: 900px) { .df-hero-grid { grid-template-columns: 1fr; gap: 1.2rem; } }
     .df-hero { padding: 1.2rem 0 0.6rem; }
     .df-hero-grid .df-hero-title { font-size: 2.25rem !important; }
+    /* The faint spreadsheet-under-a-magnifier beside the title, fading in
+       from the left; hidden on narrow screens. */
+    .df-hero-art { width: 100%; max-width: 420px; justify-self: end; opacity: 0.7;
+        -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,.35), #000 9%);
+        mask-image: linear-gradient(to right, rgba(0,0,0,.35), #000 9%); }
+    @media (max-width: 900px) { .df-hero-art { display: none; } }
 
-    /* The sample exhibit on the first screen: a real finding, set like a record card */
-    .df-specimen { margin: 0; background: var(--df-surface); border: 1px solid var(--df-border);
-        border-left: 3px solid var(--df-accent); border-radius: 0; }
-    .df-specimen-head { display: flex; justify-content: space-between; gap: 1rem; padding: 0.55rem 1rem;
-        border-bottom: 1px solid var(--df-border); background: var(--df-surface-2);
-        font-family: var(--df-mono); font-size: 0.74rem; color: var(--df-muted); }
-    .df-specimen-body { padding: 0.9rem 1rem 0.8rem; }
-    .df-specimen-title { font-weight: 600; font-size: 1rem; color: var(--df-text); margin: 0.45rem 0 0.2rem; }
-    .df-specimen-sub { color: var(--df-muted); font-size: 0.86rem; line-height: 1.5; }
-    .df-specimen-table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 0.6rem; font-family: var(--df-mono);
-        font-size: 0.82rem; }
-    .df-specimen-table th { text-align: left; font-family: var(--df-sans); font-weight: 500; font-size: 0.76rem;
-        color: var(--df-muted); padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--df-text); }
-    .df-specimen-table td { padding: 0.32rem 0.5rem; border-bottom: 1px solid var(--df-border); color: var(--df-text); }
-    .df-specimen-table td:nth-child(1) { color: var(--df-danger); text-decoration: line-through; text-decoration-thickness: 1px;
-        white-space: pre; }
-    .df-specimen-table td:nth-child(2) { color: var(--df-muted); }
-    .df-specimen-table td:nth-child(3) { color: var(--df-success); }
-    .df-specimen-foot { font-size: 0.76rem; color: var(--df-muted); }
     .df-hero-eyebrow { font-family: var(--df-mono); font-size: 0.78rem; color: var(--df-muted); margin-bottom: 0.7rem; }
     .df-hero-title { font-family: var(--df-serif) !important; font-size: 2.6rem !important; line-height: 1.12 !important;
         font-weight: 600 !important; letter-spacing: -0.02em; margin: 0 0 0.8rem !important; padding: 0 !important; color: var(--df-text); }
@@ -539,32 +526,50 @@ def _step_eyebrow(number: int, name: str) -> str:
     return f"Step {number} of {len(_STEPS)} · {name}"
 
 
-# A real finding from the bundled Messy CSV Example, shown on the first
-# screen so a visitor sees what the tool produces before uploading anything:
-# the sex column's 8 spellings of 2 categories (titled "gender" on the card),
-# and what the approved fixes
-# turn them into (category merge; " Male " via the whitespace trim). The
-# rows are the file's real values and counts;
-# test_home_specimen_matches_the_real_output keeps them honest.
-_SPECIMEN_ROWS = (
-    ("M", 2, "Male"), ("male", 2, "Male"), (" Male ", 1, "Male"),
-    ("F", 1, "Female"), ("FEMALE", 1, "Female"), ("female", 1, "Female"),
+# The first screen's illustration: a faint spreadsheet under a magnifier,
+# showing the kind of problem the tool finds -- one gender column with eight
+# spellings of two values (male spellings blue, female spellings yellow) and
+# a weight of 20 flagged red. Illustrative values, not a real file.
+_HERO_ROWS = (
+    ("P001", "Female", "150", "Married"),
+    ("P002", "Male", "160", "Single"),
+    ("P003", "female", "165", "Divorced"),
+    ("P004", "M", "170", "Married"),
+    ("P005", "male", "180", "Widowed"),
+    ("P006", "MALE", "185", "Single"),
+    ("P007", "FEMALE", "145", "Married"),
+    ("P008", "Male", "190", "Single"),
+    ("P009", "F", "155", "Divorced"),
+    ("P010", "Female", "20", "Married"),
 )
-_SPECIMEN_HTML = (
-    '<figure class="df-specimen" aria-label="Example finding from the Messy CSV Example dataset">'
-    '<div class="df-specimen-head"><span>Sample output · messy_csv_example.csv</span><span>Exhibit A</span></div>'
-    '<div class="df-specimen-body">'
-    '<span class="dataforensics-badge dataforensics-badge-suggestion">Inconsistent categories</span>'
-    '<div class="df-specimen-title">gender: 8 spellings for 2 categories</div>'
-    '<table class="df-specimen-table"><thead><tr><th>Recorded</th><th>Rows</th><th>After approved fix</th></tr></thead><tbody>'
-    + "".join(
-        f"<tr><td>&quot;{html.escape(raw)}&quot;</td><td>{n}</td><td>{fixed}</td></tr>" for raw, n, fixed in _SPECIMEN_ROWS
+_MALE_SPELLINGS = {"Male", "male", "M", "MALE"}
+
+
+def _hero_art_svg() -> str:
+    cells, text = [], []
+    for n, (pid, gender, weight, status) in enumerate(_HERO_ROWS):
+        y = 14 + 26 * n
+        fill = "#DCE8F5" if gender in _MALE_SPELLINGS else "#FAEDB8"
+        cells.append(f'<rect x="70" y="{y}" width="80" height="26" fill="{fill}"/>')
+        if weight == "20":
+            cells.append(f'<rect x="150" y="{y}" width="70" height="26" fill="#F4C9C4"/>')
+        weight_fill = ' fill="#B3261E"' if weight == "20" else ""
+        text.append(
+            f'<text x="6" y="{y + 17}">{pid}</text><text x="76" y="{y + 17}">{gender}</text>'
+            f'<text x="156" y="{y + 17}"{weight_fill}>{weight}</text><text x="226" y="{y + 17}">{status}</text>'
+        )
+    columns = "".join(f'<line x1="{x}" y1="0" x2="{x}" y2="290"/>' for x in (0, 70, 150, 220, 300))
+    lines = "".join(f'<line x1="0" y1="{y}" x2="320" y2="{y}"/>' for y in range(14, 290, 26))
+    return (
+        '<svg class="df-hero-art" viewBox="0 0 320 290" aria-hidden="true" focusable="false">'
+        f'<g opacity=".75">{"".join(cells)}<g stroke="#C9D2DB" stroke-width="1">{columns}{lines}</g>'
+        '<g font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11" fill="#6B7A88">'
+        '<text x="6" y="10">id</text><text x="76" y="10">gender</text><text x="156" y="10">weight</text>'
+        f'<text x="226" y="10">status</text>{"".join(text)}</g></g>'
+        '<circle cx="130" cy="132" r="58" fill="none" stroke="#2C5D86" stroke-width="5" opacity=".35"/>'
+        '<line x1="172" y1="174" x2="206" y2="210" stroke="#2C5D86" stroke-width="11" stroke-linecap="round" opacity=".28"/>'
+        "</svg>"
     )
-    + "</tbody></table>"
-    '<div class="df-specimen-foot">Changed only after approval · each of the '
-    f"{sum(n for _, n, _ in _SPECIMEN_ROWS)} changes logged in the audit trail</div>"
-    "</div></figure>"
-)
 
 
 # The path shown on the first screen: what happens to a file, in order.
@@ -573,8 +578,8 @@ _HOME_PATH = ("Upload", "Learn Issues &amp; Insights", "Review &amp; Fix", "Clea
 
 def _hero_html() -> str:
     """First screen, before any dataset is loaded: the title, intro and path
-    on the left and a real sample exhibit on the right, kept short so the
-    upload box below is visible without scrolling."""
+    on the left and a faint spreadsheet-under-a-magnifier on the right, kept
+    short so the upload box below is visible without scrolling."""
     return (
         '<div class="df-hero-grid"><div class="df-hero">'
         '<div class="df-hero-eyebrow">DataForensics · Automated Data Cleaning Tool</div>'
@@ -584,7 +589,7 @@ def _hero_html() -> str:
         '<div class="df-path" aria-label="What happens to your file">'
         + '<span class="df-path-arrow">→</span>'.join(f"<span>{step}</span>" for step in _HOME_PATH)
         + "</div></div>"
-        + _SPECIMEN_HTML
+        + _hero_art_svg()
         + "</div>"
     )
 
