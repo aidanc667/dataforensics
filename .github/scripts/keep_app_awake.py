@@ -1,62 +1,88 @@
-"""Visit the deployed Streamlit app in a real (headless) browser so it never
-crosses Streamlit Community Cloud's 12-hour inactivity sleep threshold.
+"""Visits the deployed Streamlit app with a real headless browser so it
+never crosses Streamlit Community Cloud's 12-hour inactivity sleep
+threshold.
 
-Two things make a naive "just curl the URL" approach not work here:
+A plain HTTP request (curl, requests.get) does not work for this: the
+page at the app URL is only a shell, and the app itself runs in an
+embedded frame that opens a WebSocket to the server. Streamlit's idle
+timer is reset by that connection, not by the page load. So this script
+waits until the app's own content has rendered inside the frame, then
+stays connected for a while before closing.
 
-1. A plain HTTP GET (curl, UptimeRobot, cron-job.org) returns the static
-   HTML shell but never runs the JavaScript that opens the WebSocket to
-   /_stcore/stream -- and that WebSocket connection is what Community Cloud
-   actually counts as activity, and what starts the Python process. Only a
-   real (or headless) browser load establishes it.
-2. Community Cloud serves the app itself inside a nested iframe
-   (URL ending in "/~/+/") within an outer wrapper page (the one with the
-   "Fork"/GitHub icons and "Hosted with Streamlit" footer). Checking the
-   top-level page's text/selectors only ever sees the wrapper chrome, never
-   the app content -- you have to target the inner frame specifically.
+If the app is asleep, the shell shows a "Yes, get this app back up!"
+button instead (data-testid="wakeup-button-viewer", the selector
+Streamlit Cloud's own frontend uses; a text match is the fallback). The
+script clicks it and waits for the app to come back.
+
+The script exits non-zero when it can confirm neither state, so a broken
+check shows up as a failed run instead of a misleading "awake".
 """
+import sys
+from contextlib import suppress
 
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
-URL = "https://dataforensics.streamlit.app/"
-APP_WAIT_SECONDS = 150
+APP_URL = "https://dataforensics.streamlit.app"
+APP_TEXT = "Automated Data Cleaning Tool"  # rendered by the app's home page
+WAKE_BUTTON = '[data-testid="wakeup-button-viewer"], button:has-text("get this app back up")'
+LOAD_TIMEOUT_MS = 90_000
+STAY_CONNECTED_MS = 45_000
 
 
-def main() -> None:
+def app_rendered(page) -> bool:
+    """True once the app's own content is visible inside its frame."""
+    for frame in page.frames:
+        # A frame can detach mid-check while the app (re)loads; treat that as "not yet".
+        with suppress(PlaywrightError):
+            if frame.get_by_text(APP_TEXT, exact=False).first.is_visible():
+                return True
+    return False
+
+
+def wait_for_state(page, timeout_ms: int) -> str:
+    """Poll until the app has rendered ("awake") or the wake button shows ("asleep")."""
+    waited = 0
+    while waited < timeout_ms:
+        if page.locator(WAKE_BUTTON).count() > 0:
+            return "asleep"
+        if app_rendered(page):
+            return "awake"
+        page.wait_for_timeout(2_000)
+        waited += 2_000
+    return "unknown"
+
+
+def main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
-        # Streamlit keeps a WebSocket open for the app's whole session, so
-        # "networkidle" can stall waiting for a quiet moment that never
-        # comes -- "load" (the page's own load event) fires promptly here.
-        page.goto(URL, wait_until="load", timeout=60_000)
+        try:
+            page.goto(APP_URL, timeout=LOAD_TIMEOUT_MS)
+        except PlaywrightTimeout:
+            print("Timed out loading the app URL.")
+            return 1
 
-        # A sleeping app shows a wake-up button, and a cold start (restoring
-        # the container and reinstalling dependencies) can take well over a
-        # minute -- a run that gave up after ~35s reported a false failure
-        # for an app that was merely still booting. So poll up to
-        # APP_WAIT_SECONDS, re-checking for the wake button each time (it can
-        # appear after the load event, and a click can need repeating), and
-        # only fail once that whole budget is spent.
-        wake_button = page.get_by_text("get this app back up", exact=False)
-        app_frame = None
-        for _ in range(APP_WAIT_SECONDS):
-            app_frame = next((f for f in page.frames if "/~/+/" in f.url), None)
-            if app_frame is not None:
-                break
-            if wake_button.count() > 0:
-                print("App was asleep -- clicking wake-up button")
-                wake_button.first.click()
-            page.wait_for_timeout(1_000)
-        if app_frame is None:
-            raise RuntimeError(
-                f"App iframe never attached within {APP_WAIT_SECONDS}s -- "
-                "the app may have crashed on startup, or the page structure may have changed."
-            )
+        state = wait_for_state(page, LOAD_TIMEOUT_MS)
+        if state == "asleep":
+            print("App was asleep -- clicking the wake-up button.")
+            page.locator(WAKE_BUTTON).first.click()
+            # Waking can take a few minutes while the container restarts.
+            state = "awake" if wait_for_state(page, 5 * 60_000) == "awake" else "unknown"
+            if state == "awake":
+                print("App is back up.")
 
-        app_frame.wait_for_selector("text=DataForensics", timeout=60_000)
-        print("App is awake and rendering.")
+        if state != "awake":
+            print("Could not confirm the app is running (no app content, no wake button).")
+            browser.close()
+            return 1
+
+        print(f"App is awake -- staying connected {STAY_CONNECTED_MS // 1000}s so the visit counts.")
+        page.wait_for_timeout(STAY_CONNECTED_MS)
         browser.close()
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
